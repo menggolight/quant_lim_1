@@ -1,0 +1,233 @@
+{
+  "schema_version": "1.0",
+  "model_id": "broker-report-audit-v1",
+  "status": "research_only_not_trade_eligible",
+  "scope_notice": "东方财富公开抓取样本，不代表券商全部报告",
+  "research_only": true,
+  "automatic_trading_enabled": false,
+  "timezone": "Asia/Shanghai",
+  "dates": {
+    "sample_start": "2024-07-01",
+    "sample_end": "2025-06-30",
+    "evaluation_as_of": "2026-08-04",
+    "factor_backfill_start": "2019-01-01",
+    "factor_backfill_end": "2025-06-30",
+    "skill_lookback_years": 5
+  },
+  "horizons": {
+    "macro_audit_trading_days": [60],
+    "industry_audit_trading_days": [120],
+    "stock_audit_trading_days": [120],
+    "factor_target_trading_days": [20, 60],
+    "primary_factor_target_trading_days": 20,
+    "secondary_factor_target_trading_days": 60,
+    "purge_embargo_trading_days": 120
+  },
+  "dimensions": {
+    "macro": {
+      "main_horizon_trading_days": 60,
+      "targets": [
+        "GDP",
+        "CPI",
+        "PPI",
+        "social_financing",
+        "liquidity",
+        "interest_rate",
+        "exchange_rate",
+        "policy_direction",
+        "market_direction"
+      ],
+      "fundamental_truth_policy": "official_first_release_only",
+      "market_truth": ["CSI300", "CGB_yield", "CNY", "commodity"]
+    },
+    "industry": {
+      "main_horizon_trading_days": 120,
+      "targets": [
+        "demand",
+        "price",
+        "inventory",
+        "capacity",
+        "profit",
+        "industry_rating",
+        "industry_cycle"
+      ],
+      "fundamental_truth_policy": "point_in_time_industry_and_constituent_data",
+      "market_truth": ["SW_industry_excess_vs_CSI300", "CSI_industry_excess_vs_CSI300"]
+    },
+    "stock": {
+      "main_horizon_trading_days": 120,
+      "targets": ["rating", "target_price", "EPS", "earnings_revision"],
+      "fundamental_truth_policy": "annual_report_first_disclosed_eps",
+      "market_truth": ["stock_excess_vs_industry", "stock_excess_vs_CSI300"]
+    }
+  },
+  "availability": {
+    "date_only_report_execution": "next_trading_day_open",
+    "require_available_at": true,
+    "reject_future_information": true,
+    "macro_revision_policy": "appendix_only"
+  },
+  "deduplication": {
+    "same_report_target_horizon_keep": 1,
+    "episode_types": ["industry_weekly", "maintain_rating", "similar_strategy_report"],
+    "consensus_correlation_discount": true
+  },
+  "skill": {
+    "maximum_lookback_years": 5,
+    "half_life_days": 730,
+    "sensitivity_half_life_days": 365,
+    "empirical_bayes_shrinkage_levels": ["team", "broker", "market"],
+    "rank_statistic": "conservative_lower_bound",
+    "minimum_effective_sample_size_for_ranking": 5,
+    "mature_outcomes_only": true,
+    "follow_analyst_across_brokers": true,
+    "broker_process_bound_to_published_entity": true
+  },
+  "factor_research": {
+    "input_contract_version": "broker-report-factor-input.v1",
+    "input_path": "",
+    "trading_calendar_path": "",
+    "label_field": "stock_excess_vs_industry_20d",
+    "secondary_label_field": "stock_excess_vs_industry_60d",
+    "date_field": "as_of",
+    "industry_field": "industry_id",
+    "model": "ridge",
+    "cost_bps": 10.0,
+    "rebalance_frequency": "weekly",
+    "minimum_stocks_per_rebalance_date": 20,
+    "minimum_industries_per_rebalance_date": 3,
+    "minimum_train_rebalance_dates": 104,
+    "minimum_validation_rebalance_dates": 13,
+    "minimum_test_rebalance_dates": 13,
+    "train_months": 36,
+    "validation_months": 6,
+    "test_months": 6,
+    "step_months": 6,
+    "final_frozen_test_months": 12,
+    "models": ["ridge", "logistic"],
+    "baselines": ["B0", "B1", "B2"],
+    "candidate": "M1",
+    "interactions": ["macro_x_industry", "industry_x_stock"],
+    "allow_three_way_interaction": false,
+    "admission": {
+      "minimum_out_of_sample_windows": 4,
+      "minimum_positive_incremental_windows": 3,
+      "mean_rank_ic_must_be_positive": true,
+      "cost_adjusted_return_required": true,
+      "single_industry_dominance_forbidden": true
+    }
+  },
+  "deep_read": {
+    "default_limit": 20,
+    "maximum_limit": 20,
+    "priority": [
+      "decision_sensitivity",
+      "conflict_with_objective_or_high_skill_sources",
+      "change_from_previous_report",
+      "source_skill_conservative_lower_bound",
+      "falsifiability",
+      "evidence_completeness"
+    ]
+  },
+  "llm": {
+    "enabled": false,
+    "exception_mode_enabled": false,
+    "maximum_reports_per_run": 20,
+    "cache_key_fields": ["pdf_sha256", "extractor_version", "prompt_version"]
+  },
+  "broker_aliases": {
+    "CITIC_SECURITIES": ["中信证券", "中信证券股份有限公司"],
+    "HUATAI_SECURITIES": ["华泰证券", "华泰证券股份有限公司"],
+    "CICC": ["中金公司", "中国国际金融", "中国国际金融股份有限公司"],
+    "GUOTAI_JUNAN": ["国泰君安", "国泰君安证券", "国泰君安证券股份有限公司"],
+    "HAITONG_SECURITIES": ["海通证券", "海通证券股份有限公司"],
+    "CHINA_SECURITIES": ["中信建投", "中信建投证券", "中信建投证券股份有限公司"],
+    "CHINA_MERCHANTS_SECURITIES": ["招商证券", "招商证券股份有限公司"],
+    "GF_SECURITIES": ["广发证券", "广发证券股份有限公司"],
+    "SHENWAN_HONGYUAN": ["申万宏源", "申万宏源证券", "申万宏源证券有限公司"],
+    "GUOSEN_SECURITIES": ["国信证券", "国信证券股份有限公司"],
+    "CHINA_GALAXY_SECURITIES": ["中国银河", "银河证券", "中国银河证券", "中国银河证券股份有限公司"],
+    "INDUSTRIAL_SECURITIES": ["兴业证券", "兴业证券股份有限公司"],
+    "SINOLINK_SECURITIES": ["国金证券", "国金证券股份有限公司"],
+    "SOOCHOW_SECURITIES": ["东吴证券", "东吴证券股份有限公司"],
+    "ZHESHANG_SECURITIES": ["浙商证券", "浙商证券股份有限公司"],
+    "TIANFENG_SECURITIES": ["天风证券", "天风证券股份有限公司"],
+    "EVERBRIGHT_SECURITIES": ["光大证券", "光大证券股份有限公司"],
+    "GUOLIAN_MINSHENG_SECURITIES": ["国联证券", "国联证券股份有限公司", "国联民生", "国联民生证券", "国联民生证券股份有限公司"]
+  },
+  "entity_history": {
+    "do_not_collapse_ambiguous_successor_aliases": ["国泰海通", "国泰海通证券", "国泰海通证券股份有限公司"],
+    "note": "历史技能绑定报告发布时实体；国联证券与国联民生等别名保留原始发布实体字段，存在合并或改名歧义时进入异常表，禁止静默覆盖历史标识。"
+  },
+  "sources": {
+    "truth_input_paths": [],
+    "market": {
+      "provider": "eastmoney_public.push2his",
+      "truth_source_allowlist": ["eastmoney_public.push2his"],
+      "csi300_instrument_id": "000300.SH",
+      "instrument_aliases": {
+        "CSI300": "000300.SH",
+        "沪深300": "000300.SH",
+        "沪深300指数": "000300.SH"
+      },
+      "industry_instrument_map": {},
+      "macro_target_instruments": {
+        "market_direction": "000300.SH"
+      },
+      "mapping_policy": "industry codes require an explicit point-in-time map unless already an Eastmoney BK identifier; a missing stock-industry mapping excludes the primary stock-vs-industry label, while CSI300 is retained only as an auxiliary comparison"
+    },
+    "reports": {
+      "eastmoney": {
+        "label": "东方财富公开研报中心",
+        "url": "https://data.eastmoney.com/report/index",
+        "sample_scope": "publicly_retrievable_sample_only",
+        "query_types": {"industry": 1, "strategy": 2, "macro": 3, "stock": "structured_stock_report"}
+      }
+    },
+    "macro_truth": [
+      {"id": "NBS_FIRST_RELEASE", "truth_source_aliases": ["nbs_first_release", "stats_gov_cn_first_release", "stats_nbs_first_release"], "url": "https://data.stats.gov.cn/", "revision_policy": "first_release"},
+      {"id": "PBOC_STATISTICS", "truth_source_aliases": ["pbc_first_release", "pboc_statistics"], "url": "https://www.pbc.gov.cn/diaochatongjisi/", "revision_policy": "first_release"},
+      {"id": "CHINAMONEY", "truth_source_aliases": ["chinamoney_point_in_time"], "url": "https://www.chinamoney.com.cn/", "revision_policy": "point_in_time"}
+    ],
+    "industry_truth": [
+      {"id": "SW_INDEX", "truth_source_aliases": ["sw_index_point_in_time"], "url": "https://www.swsresearch.com/institute_sw/allIndex/releasedIndex", "version_policy": "point_in_time"},
+      {"id": "CSI_INDUSTRY", "truth_source_aliases": ["csi_industry_point_in_time"], "url": "https://www.csindex.com.cn/", "version_policy": "point_in_time"},
+      {"id": "CNINFO", "truth_source_aliases": ["cninfo_first_disclosure"], "url": "https://www.cninfo.com.cn/new/index", "version_policy": "first_disclosure"}
+    ],
+    "stock_truth": [
+      {"id": "CNINFO_ANNUAL_REPORT", "truth_source_aliases": ["cninfo_first_release", "cninfo_annual_report_first_disclosure"], "url": "https://www.cninfo.com.cn/new/index", "version_policy": "first_disclosure"}
+    ],
+    "optional": ["tushare"]
+  },
+  "paths": {
+    "database": "data/research_reports/broker_report_audit.sqlite3",
+    "cache_directory": "data/cache/broker_report_audit",
+    "output_directory": "data/reports/broker_report_audit"
+  },
+  "outputs": [
+    "macro_accuracy.csv",
+    "industry_accuracy.csv",
+    "stock_accuracy.csv",
+    "broker_skill_cube.csv",
+    "three_layer_factor.csv",
+    "factor_walk_forward_report.md",
+    "three_layer_dashboard.md",
+    "deep_read_queue.md",
+    "source_coverage.csv",
+    "exceptions.csv",
+    "run_manifest.json"
+  ],
+  "acceptance": {
+    "manual_metadata_samples_per_dimension": 30,
+    "minimum_extraction_precision": 0.95,
+    "validation_manifest_path": "",
+    "validation_manifest_sha256": "",
+    "extractor_validation": {
+      "macro": {"sample_count": 0, "metadata_match_rate": null, "field_precision": null, "passed": false},
+      "industry": {"sample_count": 0, "metadata_match_rate": null, "field_precision": null, "passed": false},
+      "stock": {"sample_count": 0, "metadata_match_rate": null, "field_precision": null, "passed": false}
+    },
+    "deterministic_offline_rerun": true,
+    "separate_dimension_accuracy_outputs": true
+  }
+}

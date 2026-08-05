@@ -1,0 +1,69 @@
+# Python bytecode and tool caches
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.mypy_cache/
+.ruff_cache/
+.coverage
+.coverage.*
+htmlcov/
+
+# Local environments and secrets
+.venv/
+venv/
+.env
+.env.*
+!.env.example
+*.log
+*.tmp
+*.bak
+
+# Workspace scratch areas
+.tmp/
+data/tmp/
+data/cache/
+
+# Research databases and generated audit bundles
+data/research_reports/
+data/reports/broker_report_audit/
+*.sqlite3
+*.sqlite
+*.sqlite3-shm
+*.sqlite3-wal
+*.sqlite3-journal
+
+# Private or generated local inputs; retain committed samples
+data/raw/
+data/portfolio/
+data/broker/
+data/trading/
+
+data/inbox/*
+!data/inbox/*.sample.*
+
+data/actions/*
+!data/actions/*.sample.*
+
+data/signals/*
+!data/signals/*.sample.*
+
+data/industry/*
+!data/industry/*.sample.*
+
+data/reports/industry/*
+!data/reports/industry/*.sample.*
+
+# Personal research notes and generated Obsidian views
+/DeepVan的逃生地牢_球主最新100条帖子_获取说明.md
+/DeepVan的逃生地牢_星主最新100条_摘要索引_*.md
+obsidian-vault/00-Dashboard/*.md
+obsidian-vault/01-Daily/*.md
+obsidian-vault/02-Signals/*.md
+obsidian-vault/03-Portfolio/当前持仓.md
+
+# Local editor and OS files
+.idea/
+.vscode/
+.obsidian/
+.DS_Store
+Thumbs.db

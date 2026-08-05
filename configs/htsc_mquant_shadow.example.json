@@ -1,0 +1,14 @@
+{
+  "config_version": "htsc-mquant-shadow-config/1",
+  "status": "blocked_pending_client_authorization",
+  "required_snapshot_schema": "htsc-mquant-shadow/1",
+  "read_only": true,
+  "orders_enabled": false,
+  "expected_account_binding_id": null,
+  "expected_account_fingerprint": null,
+  "expected_api_shape_id": null,
+  "snapshot_path": "C:\\path\\to\\quant\\data\\broker\\htsc_mquant_shadow.v1.json",
+  "max_snapshot_age_seconds": 15,
+  "require_complete_snapshot": true,
+  "require_payload_sha256": true
+}

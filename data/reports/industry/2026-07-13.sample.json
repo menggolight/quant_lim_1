@@ -1,0 +1,132 @@
+{
+  "model_id": "industry-radar-r0",
+  "model_status": "heuristic_baseline_not_alpha",
+  "as_of": "2026-07-13",
+  "decision_time": "2026-07-13T20:00:00+08:00",
+  "industry_count": 4,
+  "industries": [
+    {
+      "industry_id": "CN10",
+      "industry_name": "能源（合成样例）",
+      "market": "CN",
+      "classification": "CSI_LEVEL_1",
+      "state": "weakening",
+      "state_label": "转弱",
+      "direction_score": 0.0,
+      "attention_score": 80.0,
+      "confidence_score": 76.9,
+      "components": {
+        "trend": 0.0,
+        "breadth": 0.0,
+        "participation": 0.0,
+        "fundamental": 0.0,
+        "crowding": 0.0
+      },
+      "evidence_for": [],
+      "evidence_against": [
+        "相对趋势仅处于同组 0 分位",
+        "市场广度仅处于同组 0 分位",
+        "交易参与度仅处于同组 0 分位",
+        "产业基本面仅处于同组 0 分位"
+      ],
+      "invalidation": "若广度先于价格回升且基本面停止下修，可转为筑底观察。",
+      "changed_from": {
+        "state": "mixed",
+        "direction_score": 50.0
+      }
+    },
+    {
+      "industry_id": "CN45",
+      "industry_name": "信息技术（合成样例）",
+      "market": "CN",
+      "classification": "CSI_LEVEL_1",
+      "state": "crowded",
+      "state_label": "强势但拥挤/背离",
+      "direction_score": 63.3,
+      "attention_score": 78.9,
+      "confidence_score": 76.9,
+      "components": {
+        "trend": 100.0,
+        "breadth": 33.3,
+        "participation": 100.0,
+        "fundamental": 33.3,
+        "crowding": 100.0
+      },
+      "evidence_for": [
+        "相对趋势位于同组 100 分位",
+        "交易参与度位于同组 100 分位"
+      ],
+      "evidence_against": [
+        "市场广度仅处于同组 33 分位",
+        "产业基本面仅处于同组 33 分位",
+        "拥挤风险处于同组 100 分位"
+      ],
+      "invalidation": "若广度重新扩散且拥挤指标回落，可解除拥挤警报；若价格转弱则升级风险。",
+      "changed_from": {
+        "state": "strengthening",
+        "direction_score": 78.0
+      }
+    },
+    {
+      "industry_id": "CN20",
+      "industry_name": "工业（合成样例）",
+      "market": "CN",
+      "classification": "CSI_LEVEL_1",
+      "state": "strengthening",
+      "state_label": "趋势与基本面共振",
+      "direction_score": 85.0,
+      "attention_score": 77.7,
+      "confidence_score": 76.9,
+      "components": {
+        "trend": 66.7,
+        "breadth": 100.0,
+        "participation": 66.7,
+        "fundamental": 100.0,
+        "crowding": 55.6
+      },
+      "evidence_for": [
+        "相对趋势位于同组 67 分位",
+        "市场广度位于同组 100 分位",
+        "交易参与度位于同组 67 分位",
+        "产业基本面位于同组 100 分位"
+      ],
+      "evidence_against": [],
+      "invalidation": "若相对趋势和广度同步跌破同组中位，或盈利修正转负，则共振判断失效。",
+      "changed_from": {
+        "state": "mixed",
+        "direction_score": 55.0
+      }
+    },
+    {
+      "industry_id": "CN15",
+      "industry_name": "原材料（合成样例）",
+      "market": "CN",
+      "classification": "CSI_LEVEL_1",
+      "state": "bottoming",
+      "state_label": "筑底观察",
+      "direction_score": 51.7,
+      "attention_score": 47.7,
+      "confidence_score": 76.9,
+      "components": {
+        "trend": 33.3,
+        "breadth": 66.7,
+        "participation": 33.3,
+        "fundamental": 66.7,
+        "crowding": 44.4
+      },
+      "evidence_for": [
+        "市场广度位于同组 67 分位",
+        "产业基本面位于同组 67 分位"
+      ],
+      "evidence_against": [
+        "相对趋势仅处于同组 33 分位",
+        "交易参与度仅处于同组 33 分位"
+      ],
+      "invalidation": "若广度和基本面改善未能持续两个观察期，则筑底判断失效。",
+      "changed_from": {
+        "state": "weakening",
+        "direction_score": 35.0
+      }
+    }
+  ]
+}

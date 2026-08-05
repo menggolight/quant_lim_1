@@ -1,0 +1,68 @@
+{
+  "model_id": "industry-radar-r0",
+  "status": "heuristic_baseline_not_alpha",
+  "classification_universe": {
+    "CN": {
+      "primary": "CSI_LEVEL_1",
+      "drill_down": "CSI_LEVEL_2",
+      "primary_count": 11,
+      "drill_down_count": 35,
+      "benchmark_id": "CSI_ALL_SHARE",
+      "classification_version_policy": "point_in_time"
+    },
+    "GLOBAL": {
+      "primary": "GICS_SECTOR",
+      "drill_down": "GICS_INDUSTRY_GROUP",
+      "primary_count": 11,
+      "benchmark_id": "MSCI_ACWI",
+      "classification_version_policy": "point_in_time"
+    }
+  },
+  "feature_groups": {
+    "trend": [
+      "excess_return_20d",
+      "excess_return_60d",
+      "excess_return_120d"
+    ],
+    "breadth": [
+      "breadth_above_ma20",
+      "breadth_above_ma60",
+      "breadth_change_20d"
+    ],
+    "participation": [
+      "turnover_z20",
+      "volume_share_change_20d"
+    ],
+    "fundamental": [
+      "earnings_revision_3m",
+      "revenue_growth_yoy",
+      "capex_growth_yoy"
+    ],
+    "crowding": [
+      "valuation_percentile",
+      "realized_vol_20d",
+      "turnover_z20"
+    ]
+  },
+  "direction_weights": {
+    "trend": 0.35,
+    "breadth": 0.25,
+    "participation": 0.10,
+    "fundamental": 0.30
+  },
+  "state_thresholds": {
+    "strong": 65.0,
+    "weak": 40.0,
+    "breadth_confirmed": 60.0,
+    "fundamental_confirmed": 55.0,
+    "crowded": 70.0,
+    "bottoming_trend_ceiling": 45.0,
+    "material_score_change": 8.0,
+    "breadth_divergence": 15.0
+  },
+  "minimums": {
+    "industries_per_cohort": 4,
+    "confidence_for_directional_state": 60.0,
+    "fundamental_features_for_confirmation": 1
+  }
+}

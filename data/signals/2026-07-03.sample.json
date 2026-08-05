@@ -1,0 +1,34 @@
+{
+  "date": "2026-07-03",
+  "source_mode": "synthetic_demo",
+  "current_weights": {
+    "qd": 40,
+    "quant": 30,
+    "defense": 20,
+    "a_share_alpha": 10
+  },
+  "signals": [
+    {
+      "title": "海外科技波动观察（合成样例）",
+      "asset": "qd",
+      "direction": "watch",
+      "strength": 2,
+      "confidence": 2,
+      "horizon": "days",
+      "summary": "用于演示观察类信号，不对应任何真实组合或市场判断。",
+      "evidence": "合成输入假设短期波动上升，仅用于测试字段和评分流程。",
+      "counter_evidence": "若合成波动指标恢复，则该演示信号失效。"
+    },
+    {
+      "title": "防守因子改善（合成样例）",
+      "asset": "defense",
+      "direction": "bullish",
+      "strength": 3,
+      "confidence": 3,
+      "horizon": "week",
+      "summary": "用于演示防守资产方向信号，不对应任何真实持仓。",
+      "evidence": "合成输入假设防守因子相对强度改善。",
+      "counter_evidence": "若合成相对强度转负，则该演示信号失效。"
+    }
+  ]
+}

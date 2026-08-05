@@ -1,0 +1,489 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/htsc_mquant_shadow.v1.json",
+  "title": "HTSC MQuant read-only shadow snapshot v1",
+  "description": "A query-complete, sequential, non-atomic read-only account snapshot produced by the local MQuant bridge. The schema does not authenticate its source.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "source",
+    "capture",
+    "capabilities",
+    "funds",
+    "positions",
+    "open_orders",
+    "today_orders",
+    "trades",
+    "payload_sha256"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "htsc-mquant-shadow/1"
+    },
+    "source": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "broker",
+        "adapter",
+        "environment",
+        "api_shape_id",
+        "account_binding_id",
+        "account_fingerprint",
+        "session_id"
+      ],
+      "properties": {
+        "broker": {
+          "const": "HTSC"
+        },
+        "adapter": {
+          "const": "mquant"
+        },
+        "environment": {
+          "const": "real_account_read_only"
+        },
+        "api_shape_id": {
+          "type": "string",
+          "pattern": "^(public-manual-v3\\.1-2021-01-27-unchecked-current|local-shape-sha256:[0-9a-f]{64})$",
+          "description": "A local static shape/drift identifier only. It does not prove HTSC provenance, current version, or the files loaded by MQuant."
+        },
+        "account_binding_id": {
+          "type": "string",
+          "pattern": "^htsc-local-[0-9a-f]{32}$",
+          "description": "A random local binding identifier. It MUST NOT be a securities account number, fund account number, identity number, phone number, or a hash derived from any of them."
+        },
+        "account_fingerprint": {
+          "type": "string",
+          "pattern": "^hmac-sha256:[0-9a-f]{64}$",
+          "description": "A keyed fingerprint of the actual MQuant fund account. The raw account and HMAC secret MUST NOT be exported."
+        },
+        "session_id": {
+          "type": "string",
+          "minLength": 8,
+          "maxLength": 128
+        }
+      }
+    },
+    "capture": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "sequence",
+        "started_at",
+        "completed_at",
+        "complete",
+        "consistency",
+        "sections",
+        "pagination",
+        "errors",
+        "warnings"
+      ],
+      "properties": {
+        "sequence": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "started_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timezone-aware capture start time."
+        },
+        "completed_at": {
+          "type": "string",
+          "format": "date-time",
+          "description": "Timezone-aware capture completion time."
+        },
+        "complete": {
+          "const": true,
+          "description": "All required query calls and pagination checks succeeded. This does not mean the sections were captured atomically."
+        },
+        "consistency": {
+          "const": "sequential_non_atomic",
+          "description": "Funds, positions, orders and trades are queried in sequence and can represent a mixed-time view."
+        },
+        "sections": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "funds",
+            "positions",
+            "open_orders",
+            "today_orders",
+            "trades"
+          ],
+          "properties": {
+            "funds": {
+              "const": true
+            },
+            "positions": {
+              "const": true
+            },
+            "open_orders": {
+              "const": true
+            },
+            "today_orders": {
+              "const": true
+            },
+            "trades": {
+              "const": true
+            }
+          }
+        },
+        "pagination": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": [
+            "open_orders",
+            "today_orders",
+            "trades"
+          ],
+          "properties": {
+            "open_orders": {
+              "$ref": "#/$defs/pagination"
+            },
+            "today_orders": {
+              "$ref": "#/$defs/pagination"
+            },
+            "trades": {
+              "$ref": "#/$defs/pagination"
+            }
+          }
+        },
+        "errors": {
+          "type": "array",
+          "maxItems": 0,
+          "items": {
+            "$ref": "#/$defs/captureError"
+          }
+        },
+        "warnings": {
+          "type": "array",
+          "items": {
+            "type": "string",
+            "minLength": 1,
+            "maxLength": 512
+          }
+        }
+      }
+    },
+    "capabilities": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "read_only",
+        "orders_enabled"
+      ],
+      "properties": {
+        "read_only": {
+          "const": true
+        },
+        "orders_enabled": {
+          "const": false
+        }
+      }
+    },
+    "funds": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "available_cash",
+        "frozen_cash",
+        "hold_cash",
+        "total_value",
+        "market_value",
+        "transferable_cash"
+      ],
+      "properties": {
+        "available_cash": {
+          "$ref": "#/$defs/nonNegativeDecimalString"
+        },
+        "frozen_cash": {
+          "$ref": "#/$defs/nonNegativeDecimalString"
+        },
+        "hold_cash": {
+          "$ref": "#/$defs/nonNegativeDecimalString"
+        },
+        "total_value": {
+          "$ref": "#/$defs/nonNegativeDecimalString"
+        },
+        "market_value": {
+          "$ref": "#/$defs/nonNegativeDecimalString"
+        },
+        "transferable_cash": {
+          "$ref": "#/$defs/nonNegativeDecimalString"
+        }
+      }
+    },
+    "positions": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/position"
+      }
+    },
+    "open_orders": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/order"
+      }
+    },
+    "today_orders": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/order"
+      }
+    },
+    "trades": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/trade"
+      }
+    },
+    "payload_sha256": {
+      "type": "string",
+      "pattern": "^sha256:[0-9a-f]{64}$",
+      "description": "Remove payload_sha256 from the complete top-level object, serialize with canonical JSON equivalent to json.dumps(obj, sort_keys=True, separators=(',', ':'), ensure_ascii=False), UTF-8 encode it, then prefix the lowercase SHA-256 hex digest with 'sha256:'."
+    }
+  },
+  "$defs": {
+    "pagination": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "page_count",
+        "reported_total_count",
+        "returned_count",
+        "is_last"
+      ],
+      "properties": {
+        "page_count": {
+          "type": "integer",
+          "minimum": 1
+        },
+        "reported_total_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "returned_count": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "is_last": {
+          "const": true
+        }
+      }
+    },
+    "captureError": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "section",
+        "code"
+      ],
+      "properties": {
+        "section": {
+          "enum": [
+            "funds",
+            "positions",
+            "open_orders",
+            "today_orders",
+            "trades"
+          ]
+        },
+        "code": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        }
+      }
+    },
+    "nonNegativeDecimalString": {
+      "type": "string",
+      "pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$",
+      "description": "A non-negative base-10 fixed-point value encoded as a JSON string. Scientific notation, NaN, Infinity, grouping separators and leading plus signs are forbidden."
+    },
+    "symbol": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 32,
+      "pattern": "^[A-Za-z0-9._-]{1,32}$"
+    },
+    "side": {
+      "enum": [
+        "BUY",
+        "SELL",
+        "UNKNOWN"
+      ]
+    },
+    "position": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "symbol",
+        "total_quantity",
+        "sellable_quantity",
+        "today_quantity",
+        "frozen_quantity",
+        "price",
+        "market_value",
+        "hold_cost"
+      ],
+      "properties": {
+        "symbol": {
+          "$ref": "#/$defs/symbol"
+        },
+        "total_quantity": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "sellable_quantity": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "today_quantity": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "frozen_quantity": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "price": {
+          "$ref": "#/$defs/nonNegativeDecimalString"
+        },
+        "market_value": {
+          "$ref": "#/$defs/nonNegativeDecimalString"
+        },
+        "hold_cost": {
+          "$ref": "#/$defs/nonNegativeDecimalString"
+        }
+      }
+    },
+    "order": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "order_id",
+        "entrust_no",
+        "symbol",
+        "side",
+        "status",
+        "quantity",
+        "filled_quantity",
+        "withdrawn_quantity",
+        "entrust_price",
+        "average_price",
+        "created_at",
+        "cancel_info"
+      ],
+      "properties": {
+        "order_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "entrust_no": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "symbol": {
+          "$ref": "#/$defs/symbol"
+        },
+        "side": {
+          "$ref": "#/$defs/side"
+        },
+        "status": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "quantity": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "filled_quantity": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "withdrawn_quantity": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "entrust_price": {
+          "$ref": "#/$defs/nonNegativeDecimalString"
+        },
+        "average_price": {
+          "$ref": "#/$defs/nonNegativeDecimalString"
+        },
+        "created_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        },
+        "cancel_info": {
+          "type": "string",
+          "maxLength": 4096
+        }
+      }
+    },
+    "trade": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "trade_id",
+        "order_id",
+        "entrust_no",
+        "symbol",
+        "side",
+        "quantity",
+        "price",
+        "business_balance",
+        "real_type",
+        "traded_at"
+      ],
+      "properties": {
+        "trade_id": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "order_id": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "entrust_no": {
+          "type": "string",
+          "maxLength": 128
+        },
+        "symbol": {
+          "$ref": "#/$defs/symbol"
+        },
+        "side": {
+          "$ref": "#/$defs/side"
+        },
+        "quantity": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "price": {
+          "$ref": "#/$defs/nonNegativeDecimalString"
+        },
+        "business_balance": {
+          "$ref": "#/$defs/nonNegativeDecimalString"
+        },
+        "real_type": {
+          "type": "string"
+        },
+        "traded_at": {
+          "type": [
+            "string",
+            "null"
+          ],
+          "format": "date-time"
+        }
+      }
+    }
+  }
+}

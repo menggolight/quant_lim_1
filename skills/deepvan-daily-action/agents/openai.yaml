@@ -1,0 +1,3 @@
+display_name: DeepVan Daily Action
+short_description: 每日把DeepVan信号转成持仓动作建议
+default_prompt: 根据今天的DeepVan星球发言和我的当前持仓，输出结构化信号、对抗式审查和今日动作表。

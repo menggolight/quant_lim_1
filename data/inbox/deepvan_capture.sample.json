@@ -1,0 +1,19 @@
+{
+  "captured_at": "2026-07-07T09:10:00+08:00",
+  "source_mode": "browser_visible",
+  "items": [
+    {
+      "source_id": "sample-topic-001",
+      "published_at": "2026-07-07T08:58:00+08:00",
+      "title": "AI算力扩散观察",
+      "summary": "可见信息显示算力链仍有扩散迹象，但需要检查估值、拥挤度和是否已经被价格充分反映。",
+      "asset": "ai_semiconductor",
+      "direction": "watch",
+      "strength": 3,
+      "confidence": 2,
+      "horizon": "days",
+      "evidence": "来自用户账号可见页面的非逐字摘要。",
+      "counter_evidence": "如果半导体或AI链冲高回落，降低动作强度。"
+    }
+  ]
+}

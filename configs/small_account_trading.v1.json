@@ -1,0 +1,60 @@
+{
+  "schema_version": "1.0",
+  "strategy_id": "small-account-etf-v0",
+  "execution_status": "paper_only",
+  "description": "1万元独立策略账本；ETF、低换手、只做多；当前严禁实盘下单。",
+  "capital": {
+    "strategy_capital_limit": "10000",
+    "cash_reserve_ratio": "0.10",
+    "excluded_assets": [
+      "用户长期持有的美的集团股票",
+      "支付宝场外基金与QDII",
+      "任何未显式划入策略账本的资产"
+    ]
+  },
+  "universe": {
+    "allowed_instrument_types": ["ETF"],
+    "real_trading_whitelist": [],
+    "max_positions": 3,
+    "max_position_weight": "0.35",
+    "lot_size_policy": "per_instrument_metadata",
+    "turnaround_policy": "per_instrument_metadata"
+  },
+  "fee_assumption": {
+    "commission_rate": "0.0003",
+    "minimum_commission": "5",
+    "exchange_fee_rate": "0",
+    "verified_for_user_account": false,
+    "note": "仅用于保守纸面验证；实盘前必须用华泰交割单或客服确认ETF实际佣金及最低收费。"
+  },
+  "risk": {
+    "minimum_trade_notional": "2000",
+    "minimum_trade_notional_derivation": "5元最低佣金 / 0.25%可接受单边佣金占比 = 2000元",
+    "max_orders_per_plan": 3,
+    "max_orders_per_day": 3,
+    "max_order_notional_ratio": "0.35",
+    "max_daily_turnover_ratio": "0.25",
+    "bootstrap_turnover_ratio": "0.90",
+    "maximum_quote_age_seconds": 60,
+    "maximum_spread_ratio": "0.003",
+    "maximum_daily_loss_ratio": "0.02",
+    "limit_orders_only": true,
+    "leverage_allowed": false,
+    "short_selling_allowed": false
+  },
+  "stage_gates": {
+    "paper_minimum_calendar_days": 90,
+    "paper_minimum_trade_events": 30,
+    "shadow_minimum_sessions": 5,
+    "programmatic_trade_report_required": true,
+    "official_broker_api_required": true,
+    "explicit_live_unlock_required": true
+  },
+  "live_readiness": {
+    "broker": "华泰证券",
+    "broker_adapter": null,
+    "broker_api_authorized": false,
+    "programmatic_report_confirmed": false,
+    "live_order_submission_enabled": false
+  }
+}
