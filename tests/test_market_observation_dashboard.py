@@ -289,6 +289,8 @@ class MarketObservationDashboardTest(unittest.TestCase):
 
             self.assertEqual(first.read_bytes(), second.read_bytes())
             content = first.read_text(encoding="utf-8")
+            self.assertIn("东方财富历史行情（补充源）", content)
+            self.assertIn("当前连接失败 · 已隔离未使用", content)
             self.assertIn("文件完整性已核验 · 来源仍未准入", content)
             self.assertIn("首次基线 · 暂无前次变化", content)
             self.assertIn("首次可比基线", content)

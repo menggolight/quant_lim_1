@@ -9,11 +9,13 @@ from __future__ import annotations
 
 import csv
 import html
+import http.client
 import io
 import json
 import random
 import re
 import socket
+import ssl
 import time
 from dataclasses import dataclass
 from datetime import date, datetime, time as datetime_time, timedelta, timezone
@@ -24,7 +26,7 @@ from types import MappingProxyType
 from typing import Any, Callable, Collection, Iterator, Mapping, Protocol, Sequence
 from urllib.error import HTTPError, URLError
 from urllib.parse import parse_qsl, urlencode, urljoin, urlsplit, urlunsplit
-from urllib.request import Request, urlopen
+from urllib.request import HTTPHandler, HTTPSHandler, Request, build_opener, urlopen
 
 from .models import (
     CHINA_TZ,
@@ -44,6 +46,21 @@ DEFAULT_USER_AGENT = (
     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
     "Chrome/124.0 Safari/537.36 broker-report-audit/1.0"
+)
+
+# Exact public-data hosts that have repeatedly selected an unusable IPv6 CDN
+# path in the supported Windows environment.  This is deliberately not a
+# wildcard: transport policy for an unrelated Eastmoney host must be an
+# explicit code change and test decision.
+EASTMONEY_IPV4_ONLY_HOSTS = frozenset(
+    {
+        "datacenter-web.eastmoney.com",
+        "pdf.dfcfw.com",
+        "17.push2.eastmoney.com",
+        "push2.eastmoney.com",
+        "push2his.eastmoney.com",
+        "reportapi.eastmoney.com",
+    }
 )
 
 
@@ -70,6 +87,10 @@ class HttpStatusError(SourceError):
 
 class MalformedResponseError(SourceError):
     """Raised when a source response does not satisfy its documented shape."""
+
+
+class IncompleteSourceBatchError(SourceError):
+    """Raised when a paginated source cannot prove that the batch is complete."""
 
 
 class UnsupportedInstrumentError(SourceError):
@@ -101,16 +122,40 @@ class HttpResponse:
 
     def json(self) -> Any:
         payload = self.text().strip()
+        if not payload:
+            raise MalformedResponseError(f"empty JSON response from {self.url}")
         # Eastmoney sometimes wraps JSON in a callback even when the current
         # public endpoint normally returns plain JSON.
-        if payload and payload[0] not in "[{":
-            left = payload.find("(")
-            right = payload.rfind(")")
-            if left >= 0 and right > left:
-                payload = payload[left + 1 : right]
+        if payload[0] not in "[{":
+            callback = re.fullmatch(
+                r"[A-Za-z_$][\w$]*(?:\.[A-Za-z_$][\w$]*)*\s*\((.*)\)\s*;?",
+                payload,
+                flags=re.DOTALL,
+            )
+            if callback is None:
+                raise MalformedResponseError(f"invalid JSON wrapper from {self.url}")
+            payload = callback.group(1).strip()
+            if not payload or payload[0] not in "[{":
+                raise MalformedResponseError(f"invalid JSON callback body from {self.url}")
+
+        def reject_duplicate_keys(pairs: Sequence[tuple[str, Any]]) -> dict[str, Any]:
+            result: dict[str, Any] = {}
+            for key, value in pairs:
+                if key in result:
+                    raise ValueError(f"duplicate JSON key: {key}")
+                result[key] = value
+            return result
+
+        def reject_non_finite(value: str) -> Any:
+            raise ValueError(f"non-finite JSON number: {value}")
+
         try:
-            return json.loads(payload)
-        except json.JSONDecodeError as exc:
+            return json.loads(
+                payload,
+                object_pairs_hook=reject_duplicate_keys,
+                parse_constant=reject_non_finite,
+            )
+        except (json.JSONDecodeError, ValueError) as exc:
             raise MalformedResponseError(f"invalid JSON from {self.url}") from exc
 
 
@@ -427,6 +472,163 @@ def _response_encoding(headers: Mapping[str, str]) -> str | None:
     return match.group(1) if match else None
 
 
+def _normalise_network_host(host: str) -> str:
+    """Return a comparable DNS host without changing the request URL."""
+
+    value = str(host).strip().rstrip(".")
+    if (
+        not value
+        or "*" in value
+        or ":" in value
+        or "/" in value
+        or any(character.isspace() for character in value)
+    ):
+        raise ValueError(f"invalid exact network host: {host!r}")
+    try:
+        normalised = value.encode("idna").decode("ascii").lower()
+    except UnicodeError as exc:
+        raise ValueError(f"invalid exact network host: {host!r}") from exc
+    labels = normalised.split(".")
+    if any(
+        not label
+        or len(label) > 63
+        or re.fullmatch(r"[a-z0-9](?:[a-z0-9-]*[a-z0-9])?", label) is None
+        for label in labels
+    ):
+        raise ValueError(f"invalid exact network host: {host!r}")
+    return normalised
+
+
+def _create_ipv4_connection(
+    address: tuple[str, int],
+    timeout: float | object = socket._GLOBAL_DEFAULT_TIMEOUT,
+    source_address: tuple[str, int] | None = None,
+) -> socket.socket:
+    """Create one TCP connection using A records only.
+
+    This mirrors the relevant behaviour of ``socket.create_connection`` while
+    pinning only the address family.  The original DNS host is retained by the
+    HTTP connection, so HTTPS SNI and certificate hostname verification remain
+    unchanged.
+    """
+
+    host, port = address
+    last_error: OSError | None = None
+    addresses = socket.getaddrinfo(
+        host,
+        port,
+        family=socket.AF_INET,
+        type=socket.SOCK_STREAM,
+    )
+    for family, socket_type, protocol, _canonical_name, socket_address in addresses:
+        connection: socket.socket | None = None
+        try:
+            connection = socket.socket(family, socket_type, protocol)
+            if timeout is not socket._GLOBAL_DEFAULT_TIMEOUT:
+                connection.settimeout(timeout)  # type: ignore[arg-type]
+            if source_address:
+                connection.bind(source_address)
+            connection.connect(socket_address)
+            return connection
+        except OSError as exc:
+            last_error = exc
+            if connection is not None:
+                connection.close()
+    if last_error is not None:
+        raise last_error
+    raise OSError(f"getaddrinfo returned no IPv4 addresses for {host!r}")
+
+
+def _selective_create_connection(
+    address: tuple[str, int],
+    timeout: float | object,
+    source_address: tuple[str, int] | None,
+    *,
+    ipv4_only_hosts: Collection[str],
+) -> socket.socket:
+    try:
+        host = _normalise_network_host(address[0])
+    except ValueError:
+        # Parsed IPv6 literals and proxy-specific endpoint forms are not DNS
+        # allowlist entries.  Preserve the system resolver for those routes.
+        return socket.create_connection(address, timeout, source_address)  # type: ignore[arg-type]
+    if host in ipv4_only_hosts:
+        return _create_ipv4_connection(address, timeout, source_address)
+    return socket.create_connection(address, timeout, source_address)  # type: ignore[arg-type]
+
+
+class _SelectiveIPv4HTTPConnection(http.client.HTTPConnection):
+    def __init__(self, *args: Any, ipv4_only_hosts: Collection[str], **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._ipv4_only_hosts = frozenset(ipv4_only_hosts)
+        self._create_connection = self._create_selective_connection
+
+    def _create_selective_connection(
+        self,
+        address: tuple[str, int],
+        timeout: float | object = socket._GLOBAL_DEFAULT_TIMEOUT,
+        source_address: tuple[str, int] | None = None,
+    ) -> socket.socket:
+        return _selective_create_connection(
+            address,
+            timeout,
+            source_address,
+            ipv4_only_hosts=self._ipv4_only_hosts,
+        )
+
+
+class _SelectiveIPv4HTTPSConnection(http.client.HTTPSConnection):
+    def __init__(self, *args: Any, ipv4_only_hosts: Collection[str], **kwargs: Any) -> None:
+        super().__init__(*args, **kwargs)
+        self._ipv4_only_hosts = frozenset(ipv4_only_hosts)
+        self._create_connection = self._create_selective_connection
+
+    def _create_selective_connection(
+        self,
+        address: tuple[str, int],
+        timeout: float | object = socket._GLOBAL_DEFAULT_TIMEOUT,
+        source_address: tuple[str, int] | None = None,
+    ) -> socket.socket:
+        return _selective_create_connection(
+            address,
+            timeout,
+            source_address,
+            ipv4_only_hosts=self._ipv4_only_hosts,
+        )
+
+
+class _SelectiveIPv4HTTPHandler(HTTPHandler):
+    def __init__(self, ipv4_only_hosts: Collection[str]) -> None:
+        super().__init__()
+        self._ipv4_only_hosts = frozenset(ipv4_only_hosts)
+
+    def http_open(self, request: Request) -> Any:
+        def connection_factory(host: str, **kwargs: Any) -> _SelectiveIPv4HTTPConnection:
+            return _SelectiveIPv4HTTPConnection(
+                host,
+                ipv4_only_hosts=self._ipv4_only_hosts,
+                **kwargs,
+            )
+
+        return self.do_open(connection_factory, request)
+
+
+class _SelectiveIPv4HTTPSHandler(HTTPSHandler):
+    def __init__(self, ipv4_only_hosts: Collection[str]) -> None:
+        super().__init__()
+        self._ipv4_only_hosts = frozenset(ipv4_only_hosts)
+
+    def https_open(self, request: Request) -> Any:
+        def connection_factory(host: str, **kwargs: Any) -> _SelectiveIPv4HTTPSConnection:
+            return _SelectiveIPv4HTTPSConnection(
+                host,
+                ipv4_only_hosts=self._ipv4_only_hosts,
+                **kwargs,
+            )
+
+        return self.do_open(connection_factory, request, context=self._context)
+
+
 class CachedHttpClient:
     """Cache-first GET client with bounded retries and monotonic rate limiting."""
 
@@ -442,6 +644,8 @@ class CachedHttpClient:
         user_agent: str = DEFAULT_USER_AGENT,
         clock: Callable[[], float] = time.monotonic,
         sleeper: Callable[[float], None] = time.sleep,
+        ipv4_only_hosts: Collection[str] = (),
+        request_opener: Callable[..., Any] | None = None,
     ) -> None:
         if rate_limit_seconds < 0:
             raise ValueError("rate_limit_seconds cannot be negative")
@@ -461,6 +665,24 @@ class CachedHttpClient:
         self._clock = clock
         self._sleep = sleeper
         self._last_request_at: float | None = None
+        self.ipv4_only_hosts = frozenset(
+            _normalise_network_host(host) for host in ipv4_only_hosts
+        )
+        self._opener: Any = None
+        if request_opener is not None:
+            self._request_opener = request_opener
+        elif self.ipv4_only_hosts:
+            self._opener = build_opener(
+                _SelectiveIPv4HTTPHandler(self.ipv4_only_hosts),
+                _SelectiveIPv4HTTPSHandler(self.ipv4_only_hosts),
+            )
+            self._request_opener = self._opener.open
+        else:
+            self._request_opener = urlopen
+
+    def close(self) -> None:
+        if self._opener is not None:
+            self._opener.close()
 
     @staticmethod
     def canonical_url(url: str, params: Mapping[str, Any] | None = None) -> str:
@@ -528,7 +750,7 @@ class CachedHttpClient:
             self._rate_limit()
             request = Request(resolved_url, headers=resolved_headers, method="GET")
             try:
-                with urlopen(request, timeout=self.timeout) as response:
+                with self._request_opener(request, timeout=self.timeout) as response:
                     status = int(getattr(response, "status", response.getcode()))
                     body = response.read()
                     response_headers = {str(k): str(v) for k, v in response.headers.items()}
@@ -563,13 +785,36 @@ class CachedHttpClient:
                     raise HttpStatusError(int(exc.code), resolved_url) from exc
                 retry_after = exc.headers.get("Retry-After") if exc.headers else None
                 delay = _retry_delay(attempt, retry_after)
+            except ssl.SSLCertVerificationError as exc:
+                raise SourceError(
+                    f"TLS certificate verification failed for {resolved_url}"
+                ) from exc
             except (URLError, TimeoutError, socket.timeout, OSError) as exc:
+                if _exception_chain_contains(exc, ssl.SSLCertVerificationError):
+                    raise SourceError(
+                        f"TLS certificate verification failed for {resolved_url}"
+                    ) from exc
                 final_error = exc
                 if attempt + 1 >= attempts:
                     break
                 delay = _retry_delay(attempt, None)
             self._sleep(delay)
         raise SourceError(f"request failed after {attempts} attempts: {resolved_url}") from final_error
+
+
+def _exception_chain_contains(error: BaseException, expected: type[BaseException]) -> bool:
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        if isinstance(current, expected):
+            return True
+        seen.add(id(current))
+        reason = getattr(current, "reason", None)
+        if isinstance(reason, BaseException) and id(reason) not in seen:
+            current = reason
+        else:
+            current = current.__cause__ or current.__context__
+    return False
 
 
 def _retry_delay(attempt: int, retry_after: str | None) -> float:
@@ -742,6 +987,7 @@ class EastmoneySource:
             specs = ((3, "macro"),)
 
         seen: set[str] = set()
+        complete_batch: list[ResearchReport] = []
         for query_type, category in specs:
             endpoint = self.LIST_URL if query_type in (0, 1) else self.INSTITUTION_URL
             page = 1
@@ -768,10 +1014,29 @@ class EastmoneySource:
                 raw_rows = payload.get("data")
                 if not isinstance(raw_rows, list):
                     raise MalformedResponseError("Eastmoney report response lacks data[]")
-                try:
-                    total_pages = max(0, int(payload.get("TotalPage", 0)))
-                except (TypeError, ValueError) as exc:
-                    raise MalformedResponseError("invalid Eastmoney TotalPage") from exc
+                current_total_pages = _strict_source_count(
+                    payload.get("TotalPage"), "TotalPage"
+                )
+                if total_pages is None:
+                    total_pages = current_total_pages
+                elif current_total_pages != total_pages:
+                    raise IncompleteSourceBatchError(
+                        "Eastmoney report TotalPage changed during pagination"
+                    )
+                if max_pages is not None and total_pages > max_pages:
+                    raise IncompleteSourceBatchError(
+                        "Eastmoney report pagination exceeds max_pages"
+                    )
+                if total_pages == 0:
+                    if raw_rows:
+                        raise MalformedResponseError(
+                            "Eastmoney report response has rows with TotalPage=0"
+                        )
+                    break
+                if not raw_rows:
+                    raise IncompleteSourceBatchError(
+                        "Eastmoney report pagination ended before TotalPage"
+                    )
                 current_year = payload.get("currentYear")
                 for raw in raw_rows:
                     if not isinstance(raw, dict):
@@ -784,17 +1049,20 @@ class EastmoneySource:
                         current_year=current_year,
                     )
                     if report.report_id in seen:
-                        continue
+                        raise IncompleteSourceBatchError(
+                            f"Eastmoney report pagination repeated {report.report_id}"
+                        )
+                    seen.add(report.report_id)
                     if decision_time is not None and report.available_at > decision_time:
                         # One date-only row may execute at the next trading-day
                         # open after the research cutoff.  Isolate that row so
                         # tuple(fetch_reports(...)) keeps earlier valid rows.
                         continue
-                    seen.add(report.report_id)
-                    yield report
-                if not raw_rows or page >= total_pages:
+                    complete_batch.append(report)
+                if page >= total_pages:
                     break
                 page += 1
+        yield from complete_batch
 
     def fetch_reports(self, *args: Any, **kwargs: Any) -> tuple[ResearchReport, ...]:
         return tuple(self.iter_reports(*args, **kwargs))
@@ -1019,6 +1287,253 @@ class ActualEpsObservation:
                 "Eastmoney F10 EPS is provisional; official first-release truth "
                 "must be imported from CNINFO"
             )
+
+
+@dataclass(frozen=True)
+class IndustryBoardRecord:
+    """One normalized row from Eastmoney's public industry-board snapshot."""
+
+    board_id: str
+    board_name: str
+    source_page_position: int
+    metrics: Mapping[str, Decimal | None]
+    source_content_hash: str
+
+    def __post_init__(self) -> None:
+        if not self.board_id.strip() or not self.board_name.strip():
+            raise ValueError("industry board id and name are required")
+        if self.source_page_position <= 0:
+            raise ValueError("industry board source_page_position must be positive")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.source_content_hash):
+            raise ValueError("source_content_hash must be a lowercase SHA-256")
+        object.__setattr__(self, "metrics", MappingProxyType(dict(self.metrics)))
+
+
+@dataclass(frozen=True)
+class IndustryBoardBatch:
+    """An all-or-nothing, completeness-checked industry-board snapshot."""
+
+    records: tuple[IndustryBoardRecord, ...]
+    expected_total: int
+    pages_fetched: int
+    first_fetched_at: datetime
+    last_fetched_at: datetime
+    source: str
+    source_url: str
+    content_hash: str
+    all_from_cache: bool
+
+    def __post_init__(self) -> None:
+        ensure_aware(self.first_fetched_at, "first_fetched_at")
+        ensure_aware(self.last_fetched_at, "last_fetched_at")
+        if self.last_fetched_at < self.first_fetched_at:
+            raise ValueError("industry batch fetch interval is reversed")
+        if self.expected_total < 0 or len(self.records) != self.expected_total:
+            raise ValueError("industry batch must contain exactly expected_total records")
+        if self.pages_fetched <= 0:
+            raise ValueError("industry batch pages_fetched must be positive")
+        if not re.fullmatch(r"[0-9a-f]{64}", self.content_hash):
+            raise ValueError("industry batch content_hash must be a lowercase SHA-256")
+
+
+class EastmoneyIndustryBoardSource:
+    """Fetch a complete public Eastmoney industry-board snapshot.
+
+    No partial page set is returned.  The source's declared total must remain
+    stable, every board code must be unique, and all pages must have been
+    captured within ``max_fetch_span_seconds``.  This adapter is diagnostic;
+    it does not make the public snapshot an admitted official industry truth.
+    """
+
+    # AKShare's current industry-board adapter uses Eastmoney's numbered 17
+    # public node for this exact board-list route.
+    SNAPSHOT_URL = "https://17.push2.eastmoney.com/api/qt/clist/get"
+    FIELD_MAP = MappingProxyType(
+        {
+            "f2": "last_price",
+            "f3": "change_pct",
+            "f4": "change_amount",
+            "f8": "turnover_rate",
+            "f20": "total_market_cap",
+            "f21": "free_float_market_cap",
+            "f24": "change_60d_pct",
+            "f25": "change_ytd_pct",
+        }
+    )
+
+    def __init__(
+        self,
+        client: CachedHttpClient,
+        *,
+        source_name: str = "eastmoney_public.push2",
+    ) -> None:
+        self.client = client
+        self.source_name = source_name
+
+    def fetch_snapshot(
+        self,
+        *,
+        page_size: int = 100,
+        max_pages: int = 20,
+        max_fetch_span_seconds: float = 120.0,
+        refresh: bool = True,
+        require_live: bool = True,
+        allow_empty: bool = False,
+    ) -> IndustryBoardBatch:
+        if not 1 <= int(page_size) <= 5000:
+            raise ValueError("page_size must be in [1, 5000]")
+        if max_pages <= 0:
+            raise ValueError("max_pages must be positive")
+        if max_fetch_span_seconds < 0:
+            raise ValueError("max_fetch_span_seconds cannot be negative")
+
+        expected_total: int | None = None
+        records: list[IndustryBoardRecord] = []
+        seen_codes: set[str] = set()
+        responses: list[HttpResponse] = []
+        page = 1
+        while True:
+            if page > max_pages:
+                raise IncompleteSourceBatchError(
+                    "Eastmoney industry snapshot exceeded max_pages before completion"
+                )
+            response = self.client.get(
+                self.SNAPSHOT_URL,
+                {
+                    "pn": str(page),
+                    "pz": str(int(page_size)),
+                    "po": "1",
+                    "np": "1",
+                    "ut": "bd1d9ddb04089700cf9c27f6f7426281",
+                    "fltt": "2",
+                    "invt": "2",
+                    "fid": "f3",
+                    "fs": "m:90 t:2 f:!50",
+                    "fields": "f2,f3,f4,f8,f12,f14,f20,f21,f24,f25",
+                },
+                headers={"Referer": "https://quote.eastmoney.com/center/boardlist.html"},
+                refresh=refresh,
+            )
+            responses.append(response)
+            payload = response.json()
+            if not isinstance(payload, dict) or payload.get("rc") != 0:
+                raise MalformedResponseError(
+                    "Eastmoney industry response must be an rc=0 object"
+                )
+            data = payload.get("data")
+            if not isinstance(data, dict):
+                raise MalformedResponseError("Eastmoney industry response lacks data object")
+            current_total = _strict_source_count(data.get("total"), "data.total")
+            if expected_total is None:
+                expected_total = current_total
+            elif current_total != expected_total:
+                raise IncompleteSourceBatchError(
+                    "Eastmoney industry total changed during pagination"
+                )
+            raw_rows = data.get("diff")
+            if not isinstance(raw_rows, list):
+                raise MalformedResponseError("Eastmoney industry response lacks data.diff[]")
+            if expected_total == 0:
+                if raw_rows:
+                    raise MalformedResponseError(
+                        "Eastmoney industry response has rows with data.total=0"
+                    )
+                if not allow_empty:
+                    raise IncompleteSourceBatchError(
+                        "Eastmoney industry snapshot unexpectedly declared zero boards"
+                    )
+                break
+            if not raw_rows:
+                raise IncompleteSourceBatchError(
+                    "Eastmoney industry pagination ended before declared total"
+                )
+            for raw in raw_rows:
+                if not isinstance(raw, dict):
+                    raise MalformedResponseError(
+                        "Eastmoney industry record must be an object"
+                    )
+                board_id = str(raw.get("f12") or "").strip()
+                board_name = str(raw.get("f14") or "").strip()
+                if not board_id or not board_name:
+                    raise MalformedResponseError(
+                        "Eastmoney industry record lacks f12 code or f14 name"
+                    )
+                if board_id in seen_codes:
+                    raise IncompleteSourceBatchError(
+                        f"Eastmoney industry pagination repeated board {board_id}"
+                    )
+                seen_codes.add(board_id)
+                records.append(
+                    IndustryBoardRecord(
+                        board_id=board_id,
+                        board_name=board_name,
+                        # This is an observed page position, not a durable
+                        # global rank: live values can move between page calls.
+                        source_page_position=len(records) + 1,
+                        metrics={
+                            metric_name: _source_decimal(raw.get(field_name))
+                            for field_name, metric_name in self.FIELD_MAP.items()
+                        },
+                        source_content_hash=response.content_hash,
+                    )
+                )
+            if len(records) > expected_total:
+                raise IncompleteSourceBatchError(
+                    "Eastmoney industry rows exceed the declared total"
+                )
+            if len(records) == expected_total:
+                break
+            page += 1
+
+        if expected_total is None:
+            raise MalformedResponseError("Eastmoney industry total was not observed")
+        first_fetched_at = min(response.fetched_at for response in responses)
+        last_fetched_at = max(response.fetched_at for response in responses)
+        cache_modes = {response.from_cache for response in responses}
+        if len(cache_modes) > 1:
+            raise IncompleteSourceBatchError(
+                "Eastmoney industry snapshot mixes cached and live pages"
+            )
+        if require_live and True in cache_modes:
+            raise IncompleteSourceBatchError(
+                "Eastmoney current industry snapshot was served from replay cache"
+            )
+        if (last_fetched_at - first_fetched_at).total_seconds() > max_fetch_span_seconds:
+            raise IncompleteSourceBatchError(
+                "Eastmoney industry pages were captured too far apart for one snapshot"
+            )
+        batch_hash = _canonical_json_hash(
+            {
+                "expected_total": expected_total,
+                "page_hashes": [response.content_hash for response in responses],
+                "record_ids": [record.board_id for record in records],
+            }
+        )
+        return IndustryBoardBatch(
+            records=tuple(records),
+            expected_total=expected_total,
+            pages_fetched=len(responses),
+            first_fetched_at=first_fetched_at,
+            last_fetched_at=last_fetched_at,
+            source=self.source_name,
+            source_url=self.SNAPSHOT_URL,
+            content_hash=batch_hash,
+            all_from_cache=cache_modes == {True},
+        )
+
+
+def _strict_source_count(value: Any, field: str) -> int:
+    if isinstance(value, bool):
+        raise MalformedResponseError(f"{field} must be a non-negative integer")
+    if isinstance(value, int):
+        parsed = value
+    elif isinstance(value, str) and re.fullmatch(r"\d+", value.strip()):
+        parsed = int(value.strip())
+    else:
+        raise MalformedResponseError(f"{field} must be a non-negative integer")
+    if parsed < 0:
+        raise MalformedResponseError(f"{field} must be a non-negative integer")
+    return parsed
 
 
 class MarketSource(Protocol):

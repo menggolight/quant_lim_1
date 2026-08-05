@@ -62,16 +62,16 @@ QUALITY_LABELS = {
     "partial_success": "部分成功",
     "missing": "缺失",
     "not_admitted": "未准入",
-    "failed_after_3_attempts_not_used": "连续失败 · 未使用",
-    "partial_snapshot_then_pagination_failure_not_used": "仅部分截面 · 未使用",
+    "failed_after_3_attempts_not_used": "当前连接失败 · 已隔离未使用",
+    "partial_snapshot_then_pagination_failure_not_used": "分页不完整 · 已隔离未使用",
 }
 
 QUALITY_NAMES = {
     "official_industry_source": "中证行业行情",
     "official_macro_sources": "官方宏观数据",
     "tencent_market_history": "股票与宽基行情",
-    "eastmoney_market_history": "东方财富历史行情",
-    "eastmoney_industry_board": "东方财富行业榜",
+    "eastmoney_market_history": "东方财富历史行情（补充源）",
+    "eastmoney_industry_board": "东方财富行业榜（补充源）",
     "point_in_time_constituent_breadth": "时点成分股广度",
     "official_trade_calendar_adapter": "正式交易日历适配器",
     "formal_factor_eligibility": "正式因子准入",

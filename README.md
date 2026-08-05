@@ -116,6 +116,18 @@ python -m research.broker_report_audit deep-read --as-of 2026-08-04 --limit 20
 
 在线 `audit` 访问的是东方财富公开可抓取样本，不代表券商全部研报；未抓到不等于未发布。当前人工验证 manifest 尚未完成，受控官方真值适配器也尚未接齐，因此空准确率表、异常记录和 `not_admitted` manifest 都可能是正确的 fail-closed 结果。包内数据流和逐项产物见 [研报审计包说明](research/broker_report_audit/README.md)。
 
+若东方财富公开接口在本机出现 TLS 中断，可运行只读健康检查：
+
+```powershell
+python -m agent.eastmoney_source_probe `
+  --stock 000333.SZ `
+  --start-date 2026-07-01 `
+  --end-date 2026-08-05 `
+  --expected-last-date 2026-08-05
+```
+
+适配器只对精确列出的东方财富接口域名使用 IPv4 直连，绝不改 URL、关闭证书验证或全局修改 DNS。诊断产物与已密封市场观察相互独立；旧页面记录的失败不会被事后覆盖。
+
 ### 5. 运行 1 万元 Paper 验证
 
 ```powershell

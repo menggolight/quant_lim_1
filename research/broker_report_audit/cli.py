@@ -674,7 +674,11 @@ def _ingest_online(
     """Fetch public report metadata through the optional cached source adapter."""
 
     try:
-        from .sources import CachedHttpClient, EastmoneySource
+        from .sources import (
+            EASTMONEY_IPV4_ONLY_HOSTS,
+            CachedHttpClient,
+            EastmoneySource,
+        )
         from .storage import HttpCache
     except (ImportError, AttributeError) as exc:
         issues.append(
@@ -698,6 +702,9 @@ def _ingest_online(
             offline=False,
             as_of=decision,
             user_agent="broker-report-audit-v1/research-only",
+            ipv4_only_hosts=EASTMONEY_IPV4_ONLY_HOSTS,
+            rate_limit_seconds=2.0,
+            max_retries=1,
         )
         source = _construct_supported(
             EastmoneySource,
@@ -917,7 +924,12 @@ def _extract_pdf_texts(
         import pypdf
 
         from .extractors import EXTRACTOR_VERSION
-        from .sources import CachedHttpClient, EastmoneySource, OfflineCacheMiss
+        from .sources import (
+            EASTMONEY_IPV4_ONLY_HOSTS,
+            CachedHttpClient,
+            EastmoneySource,
+            OfflineCacheMiss,
+        )
         from .storage import ExtractionCache, HttpCache
     except (ImportError, AttributeError) as exc:
         for report in report_rows:
@@ -947,6 +959,9 @@ def _extract_pdf_texts(
             offline=offline,
             as_of=decision,
             user_agent="broker-report-audit-v1/research-only",
+            ipv4_only_hosts=EASTMONEY_IPV4_ONLY_HOSTS,
+            rate_limit_seconds=2.0,
+            max_retries=1,
         )
         source = EastmoneySource(client)
         for report in report_rows:
@@ -1708,7 +1723,11 @@ def _ingest_market_bars(
         return
 
     try:
-        from .sources import CachedHttpClient, EastmoneyMarketSource
+        from .sources import (
+            EASTMONEY_IPV4_ONLY_HOSTS,
+            CachedHttpClient,
+            EastmoneyMarketSource,
+        )
         from .storage import HttpCache
     except (ImportError, AttributeError) as exc:
         issues.append(
@@ -1732,6 +1751,9 @@ def _ingest_market_bars(
             offline=False,
             as_of=decision,
             user_agent="broker-report-audit-v1/research-only",
+            ipv4_only_hosts=EASTMONEY_IPV4_ONLY_HOSTS,
+            rate_limit_seconds=2.0,
+            max_retries=1,
         )
         market_config = _market_source_config(config)
         provider = str(

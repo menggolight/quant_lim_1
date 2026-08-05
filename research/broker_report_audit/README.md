@@ -55,6 +55,8 @@ python -m research.broker_report_audit deep-read --as-of 2026-08-04 --limit 20
 
 三个子命令共同支持 `--config`、`--db`、`--cache-dir` 和 `--output-dir`。`audit` 可重复传入 `--truth-input`；`build-factor` 使用 `--factor-input` 与 `--trading-calendar`；`audit` 和 `deep-read` 支持 `--offline`。
 
+在线东方财富请求经共享缓存客户端执行。标准 CLI 对精确接口域名启用 IPv4 直连策略，但仍使用原域名完成 Host、SNI 和证书验证；其他域名以及代理端点保持系统默认网络路径。研报分页会先完整缓冲并验证稳定 `TotalPage`、非空页和唯一报告 ID，之后才向调用者返回；分页异常不会交付半批结果。`EastmoneyIndustryBoardSource` 同样只返回总数稳定、代码唯一、完整且同一采集批次的行业榜。
+
 默认路径由 `configs/broker_report_audit.v1.json` 定义：
 
 ```text
