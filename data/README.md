@@ -24,5 +24,7 @@
 - 金额和价格在交易领域使用十进制定点语义，避免二进制浮点误差。
 - 原始证据尽量只追加；修正通过新版本和父记录标识表达，不覆盖历史。
 - 生成物至少记录生产器版本、配置哈希、输入哈希、运行时点和研究截止日。
+- `signals/<observation_id>.sealed.json` 与 `actions/<observation_id>.manifest.json` 是标准观察流水线的受控产物；同名历史文件内容不一致时拒绝覆盖。
+- `reports/market_observation/<observation_id>.html` 是历史快照；`latest.html` 与 `latest.alias.json` 是最后更新的可变入口及其完整性元数据，旧决策时点不得回退该入口。展示层不反向修改研究数据，也不进入交易层。
 
 新增 `.gitignore` 只会阻止新的未跟踪文件。仓库中已经被跟踪的个人数据不会自动消失，清理前必须单独核验。

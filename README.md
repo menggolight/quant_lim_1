@@ -133,6 +133,27 @@ python -m trading.huatai_shadow_probe `
 
 在正式客户端授权、契约校准和人工核对完成前，预期结果应为 `blocked`。具体步骤见 [华泰 MQuant 只读导出器说明](integrations/htsc_mquant/README.md)。
 
+### 7. 生成本地三层观察仪表盘
+
+首次建立可比基线：
+
+```powershell
+python -m agent.market_observation_pipeline `
+  --input data/inbox/market_observation/2026-08-05-close.draft.json `
+  --first-baseline
+```
+
+后续观察必须显式传入上一期密封观察及其 manifest，不能自动把 `latest` 当作真源：
+
+```powershell
+python -m agent.market_observation_pipeline `
+  --input data/inbox/market_observation/2026-08-06-close.draft.json `
+  --previous data/signals/cn-market-2026-08-05-close.sealed.json `
+  --previous-manifest data/actions/cn-market-2026-08-05-close.manifest.json
+```
+
+标准 CLI 会按 `observation_id` 生成不可变的密封 JSON、manifest 和历史 HTML，同时写入真实 `sealed_at`，并通过 `latest.alias.json` 校验上一期链和决策时点后才更新 `latest.html`。旧观察不能把最新页回退，同一时点不同观察也不能覆盖。页面集中展示宏观状态、行业20/60日相对表现、跨行业个股验证样本、三层冲突、失效条件、数据质量和较上一期的状态变化。非空 `trade_action`、未来或同日仅日期证据、未知 Schema、重复 ID、伪造比较字段或不匹配 manifest 都会失败关闭。CLI 与 SHA-256 只证明文件契约和内容一致性，不证明上游来源已获正式准入；当前仍是 `diagnostic_only_not_admitted`，不产生订单。
+
 ## 数据与隐私
 
 - `*.sample.*` 是可提交的脱敏样例；账户持仓、券商快照、抓取正文、缓存、SQLite 和运行报告默认视为本地数据。

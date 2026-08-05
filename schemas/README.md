@@ -5,6 +5,7 @@
 当前契约：
 
 - `htsc_mquant_shadow.v1.json`：华泰 MQuant 只读 Shadow 快照结构。
+- `market_observation.v0.1.json`：宏观—行业—个股三层市场观察结构；固定为诊断状态，`overall.trade_action` 必须为 `null`；可选 `comparison` 记录与前一期的结构化变化，可选 `pipeline` 记录标准 CLI 的实际密封时点及输入、Schema 哈希。
 
 修改规则：
 

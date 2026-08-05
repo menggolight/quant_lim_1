@@ -53,6 +53,9 @@ data/industry/*
 data/reports/industry/*
 !data/reports/industry/*.sample.*
 
+data/reports/market_observation/*
+!data/reports/market_observation/*.sample.html
+
 # Personal research notes and generated Obsidian views
 /DeepVan的逃生地牢_球主最新100条帖子_获取说明.md
 /DeepVan的逃生地牢_星主最新100条_摘要索引_*.md
