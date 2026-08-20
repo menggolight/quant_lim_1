@@ -5,7 +5,7 @@ import json
 import unittest
 from datetime import date, datetime, timedelta
 
-from research.broker_report_audit.cli import _run_walk_forward, load_config
+from research.broker_report_audit.cli import V1_CONFIG_PATH, _run_walk_forward, load_config
 from research.broker_report_audit.factors import (
     FactorError,
     _portfolio_metrics,
@@ -673,7 +673,7 @@ class InternalLabelClosureAdversarialTests(unittest.TestCase):
         internal_issues: list[dict[str, object]] = []
         internal = _run_walk_forward(
             [],
-            config=load_config(),
+            config=load_config(V1_CONFIG_PATH),
             issues=internal_issues,
             evaluation_as_of=at(date(2026, 8, 4)),
             trading_calendar=calendar,
@@ -688,7 +688,7 @@ class InternalLabelClosureAdversarialTests(unittest.TestCase):
         external_issues: list[dict[str, object]] = []
         external = _run_walk_forward(
             batch.rows,
-            config=load_config(),
+            config=load_config(V1_CONFIG_PATH),
             issues=external_issues,
             evaluation_as_of=at(date(2026, 8, 4)),
             trading_calendar=calendar,

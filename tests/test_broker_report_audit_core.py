@@ -8,6 +8,7 @@ import unittest
 from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
+from unittest.mock import patch
 
 from research.broker_report_audit.evaluation import (
     FutureDataError,
@@ -27,6 +28,7 @@ from research.broker_report_audit.models import (
 )
 from research.broker_report_audit.reporting import (
     ARTIFACT_FILENAMES,
+    ReportingError,
     build_accuracy_rows,
     build_factor_rows,
     write_report_bundle,
@@ -698,6 +700,48 @@ class ReportingTests(unittest.TestCase):
             self.assertEqual(first.hashes, second.hashes)
             manifest = json.loads(first.paths["run_manifest.json"].read_text(encoding="utf-8"))
             self.assertFalse(manifest["automatic_trading_enabled"])
+            self.assertRegex(manifest["repository_commit"], r"^[0-9a-f]{40,64}$")
+            self.assertIs(type(manifest["working_tree_dirty_at_generation"]), bool)
+            if manifest["working_tree_dirty_at_generation"]:
+                self.assertRegex(manifest["git_diff_sha256"], r"^[0-9a-f]{64}$")
+            else:
+                self.assertIsNone(manifest["git_diff_sha256"])
+
+    def test_bundle_refuses_unverifiable_git_state(self) -> None:
+        with tempfile.TemporaryDirectory() as directory, patch(
+            "research.broker_report_audit.reporting.git_worktree_state",
+            return_value=(None, None, None),
+        ):
+            with self.assertRaisesRegex(ReportingError, "Git working-tree state"):
+                write_report_bundle(
+                    Path(directory),
+                    as_of="2026-08-04",
+                    command="audit",
+                    config={},
+                )
+
+    def test_bundle_serializes_domain_report_with_frozen_metadata(self) -> None:
+        config = {
+            "model_id": "broker-report-audit-v1",
+            "skill": {"minimum_effective_sample_size_for_ranking": 5},
+            "acceptance": {"minimum_extraction_precision": 0.95},
+            "deep_read": {"maximum_limit": 20},
+        }
+        frozen_report = report("a", 1)
+
+        with tempfile.TemporaryDirectory() as directory:
+            bundle = write_report_bundle(
+                Path(directory),
+                as_of="2026-08-04",
+                command="audit",
+                config=config,
+                reports=[frozen_report],
+            )
+
+            manifest = json.loads(
+                bundle.paths["run_manifest.json"].read_text(encoding="utf-8")
+            )
+            self.assertEqual(manifest["counts"]["reports"], 1)
 
 
 if __name__ == "__main__":

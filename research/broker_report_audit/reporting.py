@@ -12,13 +12,15 @@ from __future__ import annotations
 import csv
 import json
 import math
-from dataclasses import asdict, dataclass, is_dataclass
+from dataclasses import dataclass, fields, is_dataclass
 from datetime import date, datetime
 from decimal import Decimal
 from enum import Enum
 from hashlib import sha256
 from pathlib import Path
 from typing import Any, Iterable, Mapping, Sequence
+
+from research.reproducibility import git_worktree_state
 
 
 DIMENSIONS = ("macro", "industry", "stock")
@@ -38,6 +40,7 @@ ARTIFACT_FILENAMES = (
     "exceptions.csv",
     "run_manifest.json",
 )
+REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 
 ACCURACY_COLUMNS = (
     "report_id",
@@ -190,7 +193,10 @@ def _normalise(value: Any) -> Any:
     """Convert dataclasses and domain scalars to canonical JSON-safe values."""
 
     if is_dataclass(value) and not isinstance(value, type):
-        return _normalise(asdict(value))
+        return {
+            field.name: _normalise(getattr(value, field.name))
+            for field in fields(value)
+        }
     if isinstance(value, Mapping):
         return {str(key): _normalise(item) for key, item in value.items()}
     if isinstance(value, (datetime, date)):
@@ -1479,14 +1485,27 @@ def write_report_bundle(
     exceptions: Iterable[Any] = (),
     parameters: Mapping[str, Any] | None = None,
     additional_input_snapshot: Mapping[str, Any] | None = None,
+    report_source: Mapping[str, Any] | None = None,
+    market_data_batches: Iterable[Mapping[str, Any]] = (),
 ) -> ReportBundle:
-    """Write the complete deterministic V1 artifact set.
+    """Write the complete deterministic fixed artifact set.
 
     The function always writes all eleven artifacts.  Empty inputs yield
     explicit coverage and exception records rather than placeholder rankings.
     """
 
     output_path = Path(output_directory)
+    repository_commit, working_tree_dirty, git_diff_sha256 = git_worktree_state(
+        REPOSITORY_ROOT
+    )
+    if working_tree_dirty is None:
+        raise ReportingError(
+            "Git working-tree state is unavailable; formal report generation is refused"
+        )
+    if working_tree_dirty and git_diff_sha256 is None:
+        raise ReportingError(
+            "dirty working tree cannot generate a formal report without git_diff_sha256"
+        )
     output_path.mkdir(parents=True, exist_ok=True)
     report_rows = _records(reports)
     claim_rows = _records(claims)
@@ -1495,6 +1514,20 @@ def write_report_bundle(
     factor_input_rows = _records(factor_observations)
     supplied_exceptions = _records(exceptions)
     deep_read_input_rows = _records(deep_read_candidates)
+    resolved_report_source = _normalise(report_source or {})
+    resolved_market_batches = sorted(
+        (
+            _normalise(
+                {
+                    str(key): value
+                    for key, value in dict(batch).items()
+                    if str(key) != "records"
+                }
+            )
+            for batch in market_data_batches
+        ),
+        key=_canonical_json,
+    )
 
     skill_config = _get(config, "skill", default={})
     acceptance_config = _get(config, "acceptance", default={})
@@ -1602,6 +1635,10 @@ def write_report_bundle(
         "deep_read_candidates": deep_read_input_rows,
         "exceptions": supplied_exceptions,
         "additional_inputs": additional_input_snapshot or {},
+        "source_evidence": {
+            "report_source": resolved_report_source,
+            "market_data_batches": resolved_market_batches,
+        },
     }
     config_hash = _sha256_text(_canonical_json(config))
     source_snapshot_hash = _sha256_text(_canonical_json(input_snapshot))
@@ -1611,12 +1648,15 @@ def write_report_bundle(
         if str(key) not in {"db", "cache_dir", "output_dir", "config"}
     }
     run_identity = {
-        "schema_version": "1.0",
+        "schema_version": _get(config, "schema_version", default="1.0"),
         "model_id": _get(config, "model_id", default="broker-report-audit-v1"),
         "command": command,
         "as_of": as_of,
         "config_sha256": config_hash,
         "source_snapshot_sha256": source_snapshot_hash,
+        "repository_commit": repository_commit,
+        "working_tree_dirty_at_generation": working_tree_dirty,
+        "git_diff_sha256": git_diff_sha256,
         "parameters": stable_parameters,
         "output_sha256": output_hashes,
     }
@@ -1626,6 +1666,14 @@ def write_report_bundle(
         "run_id": run_id,
         "research_cutoff": f"{as_of}T23:59:59+08:00",
         "sample_scope": SCOPE_NOTICE.rstrip("。"),
+        "report_source": resolved_report_source,
+        "market_data_batches": resolved_market_batches,
+        "source_snapshot": {
+            "sha256": source_snapshot_hash,
+            "report_source": resolved_report_source,
+            "market_data_batches": resolved_market_batches,
+            "market_data_records_omitted": True,
+        },
         "research_only": True,
         "automatic_trading_enabled": False,
         "counts": {

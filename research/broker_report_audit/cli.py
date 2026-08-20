@@ -1,4 +1,4 @@
-"""Command-line orchestration for the broker-report audit V1.
+"""Command-line orchestration for the broker-report audit.
 
 Concrete ingestion and analytics modules are imported only inside command
 functions.  This keeps ``python -m research.broker_report_audit --help`` and an
@@ -11,13 +11,18 @@ import argparse
 import csv
 import inspect
 import json
+import re
 import sys
 from dataclasses import dataclass, field, is_dataclass, replace
 from datetime import date, datetime, time, timedelta, timezone
+from decimal import Decimal, InvalidOperation
 from hashlib import sha256
 from io import BytesIO
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
+
+from research.market_data.providers.base import safe_error_text
+from research.market_data.providers.baostock import normalize_a_share_stock_instrument
 
 from .reporting import (
     ARTIFACT_FILENAMES,
@@ -28,10 +33,18 @@ from .reporting import (
 
 
 REPO_ROOT = Path(__file__).resolve().parents[2]
-DEFAULT_CONFIG_PATH = REPO_ROOT / "configs" / "broker_report_audit.v1.json"
+V1_CONFIG_PATH = REPO_ROOT / "configs" / "broker_report_audit.v1.json"
+DEFAULT_CONFIG_PATH = REPO_ROOT / "configs" / "broker_report_audit.v2.json"
 CHINA_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
 VALID_DIMENSIONS = ("macro", "industry", "stock")
 CANONICAL_CSI300_INSTRUMENT_ID = "000300.SH"
+DEFAULT_VALIDATION_SAMPLE_SEED = "broker-report-audit-v2-extractor-validation-v3"
+
+
+def _market_data_requested_at() -> datetime:
+    """Return the real start time for an external market-data request."""
+
+    return datetime.now(CHINA_TZ)
 
 
 class ConfigurationError(ValueError):
@@ -57,10 +70,10 @@ class PipelineState:
     daily_bars: list[Any] = field(default_factory=list)
 
 
-def load_config(path: Path | str | None = None) -> dict[str, Any]:
-    """Load and validate the fail-closed V1 configuration."""
+def _load_and_validate_v1_config(path: Path | str = V1_CONFIG_PATH) -> dict[str, Any]:
+    """Load and validate the frozen V1 compatibility configuration."""
 
-    resolved = Path(path) if path is not None else DEFAULT_CONFIG_PATH
+    resolved = Path(path)
     if not resolved.is_absolute():
         resolved = REPO_ROOT / resolved
     try:
@@ -263,6 +276,163 @@ def load_config(path: Path | str | None = None) -> dict[str, Any]:
     if payload.get("llm", {}).get("exception_mode_enabled") is not False:
         raise ConfigurationError("V1 requires LLM exception mode to remain disabled")
     return payload
+
+
+def _deep_merge_config(base: Mapping[str, Any], override: Mapping[str, Any]) -> dict[str, Any]:
+    """Merge configuration objects while replacing arrays and scalar values."""
+
+    merged: dict[str, Any] = dict(base)
+    for key, value in override.items():
+        prior = merged.get(key)
+        if isinstance(prior, Mapping) and isinstance(value, Mapping):
+            merged[key] = _deep_merge_config(prior, value)
+        else:
+            merged[key] = value
+    return merged
+
+
+def _is_v2_config(config: Mapping[str, Any]) -> bool:
+    return (
+        str(config.get("schema_version") or "").strip() == "2.0"
+        and str(config.get("model_id") or "").strip() == "broker-report-audit-v2"
+    )
+
+
+def _load_and_validate_v2_config(
+    payload: Mapping[str, Any],
+    *,
+    resolved: Path,
+) -> dict[str, Any]:
+    allowed_overrides = {
+        "schema_version",
+        "extends",
+        "model_id",
+        "status",
+        "research_only",
+        "automatic_trading_enabled",
+        "sources",
+        "market_data",
+    }
+    unexpected = set(payload) - allowed_overrides
+    if unexpected:
+        raise ConfigurationError(
+            f"V2 extends may override only controlled fields: {sorted(unexpected)!r}"
+        )
+    extends = str(payload.get("extends") or "").strip()
+    if Path(extends).name != "broker_report_audit.v1.json" or Path(extends).is_absolute():
+        raise ConfigurationError("V2 extends must be broker_report_audit.v1.json")
+    base_path = (resolved.parent / extends).resolve()
+    if base_path != V1_CONFIG_PATH.resolve():
+        raise ConfigurationError("V2 extends must resolve to the repository V1 config")
+    base = _load_and_validate_v1_config(base_path)
+    merged = _deep_merge_config(base, payload)
+    if not _is_v2_config(merged):
+        raise ConfigurationError("V2 schema_version/model_id contract is invalid")
+    if merged.get("status") != "research_only_not_trade_eligible":
+        raise ConfigurationError("V2 status must remain research_only_not_trade_eligible")
+    if merged.get("research_only") is not True:
+        raise ConfigurationError("research_only must remain true")
+    if merged.get("automatic_trading_enabled") is not False:
+        raise ConfigurationError("automatic_trading_enabled must remain false")
+    if tuple(merged.get("outputs", ())) != ARTIFACT_FILENAMES:
+        raise ConfigurationError("V2 must preserve the fixed 11-artifact output contract")
+
+    market = _market_source_config(merged)
+    if str(market.get("provider") or "").strip().lower() != "baostock":
+        raise ConfigurationError("V2 sources.market.provider must be baostock")
+    if market.get("truth_source_allowlist") != []:
+        raise ConfigurationError("V2 market provider names cannot be official-truth aliases")
+
+    policy = merged.get("market_data")
+    if not isinstance(policy, Mapping):
+        raise ConfigurationError("V2 market_data policy must be an object")
+    expected = {
+        "provider": "baostock",
+        "online_retrieval_mode": "historical_backfill",
+        "offline_retrieval_mode": "offline_replay",
+        "fallback_providers": [],
+        "provider_name_is_official_truth": False,
+        "whole_batch_only": True,
+        "allow_synthetic": False,
+    }
+    for field_name, expected_value in expected.items():
+        if policy.get(field_name) != expected_value:
+            raise ConfigurationError(
+                f"V2 market_data.{field_name} must be {expected_value!r}"
+            )
+    if policy.get("admitted_batch_statuses") != ["validated_research_only"]:
+        raise ConfigurationError(
+            "V2 admits only validated_research_only BaoStock batches"
+        )
+    registry_config = str(policy.get("registry_config") or "").strip()
+    if registry_config != "configs/market_data.v1.json":
+        raise ConfigurationError("V2 registry_config must be configs/market_data.v1.json")
+    if "eastmoney" in json.dumps(policy, ensure_ascii=False).casefold():
+        raise ConfigurationError("V2 market_data policy cannot configure Eastmoney fallback")
+
+    report_source = merged.get("sources", {}).get("reports", {}).get("eastmoney", {})
+    if (
+        not isinstance(report_source, Mapping)
+        or report_source.get("sample_scope") != "publicly_retrievable_sample_only"
+    ):
+        raise ConfigurationError("V2 report source must remain the public Eastmoney sample")
+    return merged
+
+
+def load_config(path: Path | str | None = None) -> dict[str, Any]:
+    """Load V2 by default; accept frozen V1 only when it is explicitly selected."""
+
+    resolved = Path(path) if path is not None else DEFAULT_CONFIG_PATH
+    if not resolved.is_absolute():
+        resolved = REPO_ROOT / resolved
+    try:
+        payload = json.loads(resolved.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as exc:
+        raise ConfigurationError(f"Cannot load config {resolved}: {exc}") from exc
+    if not isinstance(payload, dict):
+        raise ConfigurationError("Config root must be a JSON object")
+    if payload.get("schema_version") == "1.0":
+        if path is None:
+            raise ConfigurationError("V1 is compatibility-only and must be selected explicitly")
+        return _load_and_validate_v1_config(resolved)
+    if payload.get("schema_version") == "2.0":
+        return _load_and_validate_v2_config(payload, resolved=resolved)
+    raise ConfigurationError("Unsupported broker-report audit config version")
+
+
+def _apply_validation_manifest_override(
+    config: dict[str, Any],
+    manifest_path: Path | str | None,
+    manifest_sha256: str | None = None,
+) -> tuple[str, str]:
+    """Bind a finalized review manifest without editing versioned config."""
+
+    if manifest_path is None:
+        if manifest_sha256:
+            raise ConfigurationError(
+                "validation_manifest_sha256 requires validation_manifest_path"
+            )
+        return "", ""
+    resolved = _path(manifest_path, str(manifest_path))
+    if not resolved.is_file():
+        raise ConfigurationError(
+            f"validation manifest does not exist: {resolved}"
+        )
+    actual = sha256(resolved.read_bytes()).hexdigest()
+    expected = str(manifest_sha256 or "").strip().lower()
+    if not expected:
+        raise ConfigurationError(
+            "validation_manifest_sha256 is required as an external anchor "
+            "when validation_manifest_path is supplied"
+        )
+    if not re.fullmatch(r"[0-9a-f]{64}", expected) or expected != actual:
+        raise ConfigurationError("validation manifest SHA-256 mismatch")
+    acceptance = config.get("acceptance")
+    if not isinstance(acceptance, dict):
+        raise ConfigurationError("acceptance config must be an object")
+    acceptance["validation_manifest_path"] = str(resolved)
+    acceptance["validation_manifest_sha256"] = actual
+    return str(resolved), actual
 
 
 def _path(value: Path | str | None, fallback: str) -> Path:
@@ -1046,6 +1216,38 @@ def _report_has_resolvable_pdf(report: Any) -> bool:
     )
 
 
+def _bounded_pdf_candidates(
+    reports: Iterable[Any],
+    *,
+    limit: int,
+) -> list[Any]:
+    """Choose a deterministic recent PDF subset before any network request.
+
+    This is only a download bound.  It is not a recommendation score and it
+    cannot substitute for the evidence-gated deep-read ranking performed after
+    the selected PDFs have been parsed.
+    """
+
+    resolved_limit = max(0, min(int(limit), 20))
+    if resolved_limit == 0:
+        return []
+    candidates = [report for report in reports if _report_has_resolvable_pdf(report)]
+    candidates.sort(
+        key=lambda report: (
+            -int(
+                (_field(report, "available_at", "published_at").timestamp())
+                if isinstance(
+                    _field(report, "available_at", "published_at"), datetime
+                )
+                else 0
+            ),
+            _identifier(report, "dimension"),
+            _identifier(report, "report_id", "id"),
+        )
+    )
+    return candidates[:resolved_limit]
+
+
 def _candidate_claims(claims: Iterable[Any], config: Mapping[str, Any]) -> list[Any]:
     acceptance = config.get("acceptance", {})
     threshold = float(acceptance.get("minimum_extraction_precision", 0.95))
@@ -1184,13 +1386,13 @@ def _hydrate_extractor_validation(
                 details={
                     "path": str(manifest_path),
                     "error_type": type(exc).__name__,
-                    "error": str(exc),
+                    "error": safe_error_text(exc),
                 },
             )
         )
 
 
-def _claims_with_current_evidence(
+def _claims_with_bound_evidence(
     claims: Iterable[Any],
     *,
     reports: Iterable[Any] | Mapping[str, Any] = (),
@@ -1219,18 +1421,6 @@ def _claims_with_current_evidence(
         report = report_by_id.get(_identifier(claim, "report_id"))
         if report is None:
             continue
-        timestamp_quality = str(
-            _field(report, "timestamp_quality", default="") or ""
-        ).strip().lower()
-        if timestamp_quality in {
-            "date_only_calendar_unverified",
-            "date_only_local_calendar_unverified",
-            "date_only_next_weekday_open",
-        }:
-            # A weekday approximation is useful for coverage diagnostics only.
-            # It cannot establish the executable timestamp around exchange
-            # holidays, so fail closed before outcomes, skill or factors.
-            continue
         try:
             validate_claim_evidence_bindings(
                 [claim],
@@ -1246,6 +1436,50 @@ def _claims_with_current_evidence(
             continue
         bound.append(claim)
     return bound
+
+
+def _claims_with_current_evidence(
+    claims: Iterable[Any],
+    *,
+    reports: Iterable[Any] | Mapping[str, Any] = (),
+    extractor_version: str | None = None,
+    parser_version: str | None = None,
+    prompt_version: str | None = None,
+) -> list[Any]:
+    """Return evidence-bound claims whose execution timestamp is also usable."""
+
+    report_values = (
+        list(reports.values()) if isinstance(reports, Mapping) else list(reports)
+    )
+    report_by_id = {
+        _identifier(report, "report_id", "id"): report for report in report_values
+    }
+    bound = _claims_with_bound_evidence(
+        claims,
+        reports=report_values,
+        extractor_version=extractor_version,
+        parser_version=parser_version,
+        prompt_version=prompt_version,
+    )
+    return [
+        claim
+        for claim in bound
+        if str(
+            _field(
+                report_by_id[_identifier(claim, "report_id")],
+                "timestamp_quality",
+                default="",
+            )
+            or ""
+        )
+        .strip()
+        .lower()
+        not in {
+            "date_only_calendar_unverified",
+            "date_only_local_calendar_unverified",
+            "date_only_next_weekday_open",
+        }
+    ]
 
 
 def _eligible_claims(
@@ -1548,13 +1782,14 @@ def _mapped_industry_instrument(
     misread as a stock or exchange index.
     """
 
-    del config  # config strings are not point-in-time mapping evidence
     candidates = (
         _identifier(report, "industry_id"),
         _identifier(report, "subject_id")
         if _identifier(report, "dimension") == "industry"
         else "",
     )
+    if _is_v2_config(config):
+        return "", next((value.strip() for value in candidates if value.strip()), "")
     for candidate in candidates:
         raw = candidate.strip()
         if not raw:
@@ -1565,7 +1800,6 @@ def _mapped_industry_instrument(
 
 
 def _explicit_market_instrument(value: str, config: Mapping[str, Any]) -> str:
-    del config  # aliases in a mutable config are not evidence-bound mappings
     raw = value.strip()
     if not raw:
         return ""
@@ -1577,7 +1811,9 @@ def _explicit_market_instrument(value: str, config: Mapping[str, Any]) -> str:
     }:
         return ""
     upper = raw.upper()
-    if upper.startswith("BK") or upper.startswith(("SH", "SZ", "BJ")):
+    if upper.startswith("BK"):
+        return "" if _is_v2_config(config) else upper
+    if upper.startswith(("SH", "SZ", "BJ")):
         return upper
     if "." in upper or (len(upper) == 6 and upper.isdigit()) or upper.startswith(("0.", "1.", "2.", "90.")):
         return upper
@@ -1594,7 +1830,13 @@ def _market_route_for_claim(
 
     dimension = _identifier(claim, "dimension").strip().lower()
     target_type = _identifier(claim, "target_type").strip().lower()
-    subject_id = _identifier(claim, "subject_id").strip()
+    raw_subject_id = _identifier(claim, "subject_id").strip()
+    subject_id = raw_subject_id
+    if dimension == "stock" and _is_v2_config(config):
+        try:
+            subject_id = normalize_a_share_stock_instrument(raw_subject_id)
+        except ValueError:
+            subject_id = ""
     market = _market_source_config(config)
     csi300 = CANONICAL_CSI300_INSTRUMENT_ID
     explicit_benchmark = _explicit_market_instrument(
@@ -1605,10 +1847,19 @@ def _market_route_for_claim(
         if not subject_id:
             _market_issue_once(
                 issues,
-                "STOCK_MARKET_MAPPING_MISSING",
-                "个股预测缺少可执行证券代码，未抓取主体行情。",
+                (
+                    "STOCK_MARKET_MAPPING_MISSING"
+                    if not raw_subject_id
+                    else "STOCK_MARKET_MAPPING_INVALID"
+                ),
+                (
+                    "个股预测缺少可执行证券代码，未抓取主体行情。"
+                    if not raw_subject_id
+                    else "个股证券代码无法无歧义规范化为沪深市场代码，未抓取主体行情。"
+                ),
                 claim=claim,
                 report=report,
+                details={"raw_subject_id": raw_subject_id},
             )
             return "", "", "", ""
         industry_instrument, industry_key = _mapped_industry_instrument(
@@ -1688,7 +1939,7 @@ def _collection_scope(report: Any) -> str:
     )
 
 
-def _ingest_market_bars(
+def _ingest_market_bars_v1(
     store: Any,
     *,
     reports: Iterable[Any],
@@ -1699,7 +1950,7 @@ def _ingest_market_bars(
     offline: bool,
     issues: list[dict[str, Any]],
 ) -> None:
-    """Cache subject and benchmark bars needed by admitted claims."""
+    """V1 compatibility path for the legacy Eastmoney market adapter."""
 
     report_by_id = {
         _identifier(report, "report_id", "id"): report for report in reports
@@ -1832,6 +2083,261 @@ def _ingest_market_bars(
                 pass
 
 
+def _market_batch_evidence(batch: Any) -> dict[str, Any]:
+    payload = batch.to_dict(include_records=False)
+    fields = (
+        "batch_id",
+        "provider_id",
+        "upstream_source",
+        "dataset_type",
+        "schema_version",
+        "adapter_version",
+        "request_fingerprint",
+        "retrieval_mode",
+        "requested_at",
+        "fetched_at",
+        "available_at_min",
+        "available_at_max",
+        "raw_content_sha256",
+        "normalized_content_sha256",
+        "record_count",
+        "completeness_status",
+        "freshness_status",
+        "admission_status",
+        "point_in_time_status",
+        "synthetic",
+        "issues",
+    )
+    return {field_name: payload.get(field_name) for field_name in fields}
+
+
+def _legacy_daily_bars_from_batch(batch: Any) -> list[Any]:
+    """Convert one already validated whole batch without losing its evidence identity."""
+
+    from .models import DailyBar
+
+    source = (
+        f"market_data:{batch.provider_id}:{batch.upstream_source}:"
+        f"batch={batch.batch_id}"
+    )
+    bars: list[Any] = []
+    for row in batch.records:
+        available_at = datetime.fromisoformat(str(row["available_at"]))
+        bars.append(
+            DailyBar(
+                instrument_id=str(row["instrument_id"]),
+                trade_date=date.fromisoformat(str(row["trading_date"])),
+                open=row["open"],
+                high=row["high"],
+                low=row["low"],
+                close=row["close"],
+                volume=row["volume"],
+                amount=row["amount"],
+                available_at=available_at,
+                source=source,
+                fetched_at=batch.fetched_at,
+                content_hash=batch.normalized_content_sha256,
+                suspended=str(row["trading_status"]).strip().lower() != "traded",
+            )
+        )
+    return bars
+
+
+def _ingest_market_bars_v2(
+    store: Any,
+    *,
+    reports: Iterable[Any],
+    claims: Iterable[Any],
+    config: Mapping[str, Any],
+    decision: datetime,
+    cache_directory: Path,
+    offline: bool,
+    issues: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    """Fetch only whole, validated BaoStock batches through the provider registry."""
+
+    report_by_id = {
+        _identifier(report, "report_id", "id"): report for report in reports
+    }
+    windows: dict[str, tuple[date, date]] = {}
+    for claim in _eligible_claims(claims, config, reports=report_by_id):
+        report = report_by_id.get(_identifier(claim, "report_id"))
+        subject, benchmark, _benchmark_kind, auxiliary = _market_route_for_claim(
+            claim, report, config, issues
+        )
+        start, end = _market_window(claim, decision)
+        for instrument_id in (subject, benchmark, auxiliary):
+            if not instrument_id:
+                continue
+            previous = windows.get(instrument_id)
+            windows[instrument_id] = (
+                min(previous[0], start) if previous else start,
+                max(previous[1], end) if previous else end,
+            )
+    if not windows:
+        return []
+
+    policy = config.get("market_data", {})
+    if not isinstance(policy, Mapping):
+        raise ConfigurationError("V2 market_data policy is missing")
+    provider_id = str(policy.get("provider") or "").strip()
+    retrieval_mode = str(
+        policy.get(
+            "offline_retrieval_mode" if offline else "online_retrieval_mode"
+        )
+        or ""
+    ).strip()
+    admitted_statuses = {
+        str(item).strip()
+        for item in policy.get("admitted_batch_statuses", [])
+        if str(item).strip()
+    }
+    try:
+        from research.market_data import MarketDataRegistry, MarketDataRequest
+
+        registry = MarketDataRegistry.configured(
+            config_path=REPO_ROOT / str(policy.get("registry_config")),
+            storage_root=cache_directory / "market_data_registry",
+        )
+    except Exception as exc:
+        status = str(getattr(exc, "status", "failed"))
+        issues.append(
+            _issue(
+                "MARKET_DATA_REGISTRY_UNAVAILABLE",
+                "V2 行情注册表不可用；未回退到东方财富，也未补造行情。",
+                stage="market_data",
+                severity="error",
+                details={
+                    "provider_id": provider_id,
+                    "status": status,
+                    "error_code": str(getattr(exc, "code", "failed")),
+                    "error_type": type(exc).__name__,
+                    "error": safe_error_text(exc),
+                },
+            )
+        )
+        return []
+
+    evidence: list[dict[str, Any]] = []
+    for instrument_id, (start, end) in sorted(windows.items()):
+        try:
+            requested_at = _market_data_requested_at()
+            request = MarketDataRequest(
+                dataset_type="daily_bar",
+                requested_at=requested_at,
+                retrieval_mode=retrieval_mode,
+                instrument_id=instrument_id,
+                start_date=start,
+                end_date=end,
+                adjustment="none",
+                evidence_cutoff_at=(
+                    min(decision, requested_at) if offline else None
+                ),
+            )
+            batch = registry.fetch(request, provider_id=provider_id)
+            evidence.append(_market_batch_evidence(batch))
+            for notice in batch.issues:
+                issues.append(
+                    _issue(
+                        "MARKET_DATA_BATCH_NOTICE",
+                        str(notice.get("message") or notice.get("code") or "行情批次提示"),
+                        stage="market_data",
+                        severity=str(notice.get("severity") or "info"),
+                        details={
+                            "batch_id": batch.batch_id,
+                            "provider_id": batch.provider_id,
+                            "issue": dict(notice),
+                        },
+                    )
+                )
+            rejection_reasons: list[str] = []
+            if batch.provider_id != provider_id:
+                rejection_reasons.append("provider_mismatch")
+            if batch.dataset_type != "daily_bar":
+                rejection_reasons.append("dataset_mismatch")
+            if batch.completeness_status != "complete" or batch.record_count == 0:
+                rejection_reasons.append("incomplete_batch")
+            if batch.synthetic:
+                rejection_reasons.append("synthetic_batch")
+            if batch.admission_status not in admitted_statuses:
+                rejection_reasons.append("admission_status_not_allowed")
+            if rejection_reasons:
+                issues.append(
+                    _issue(
+                        "MARKET_DATA_BATCH_REJECTED",
+                        "行情批次未通过 V2 整批准入；未写入审计行情库。",
+                        stage="market_data",
+                        severity="error",
+                        details={
+                            "batch_id": batch.batch_id,
+                            "provider_id": batch.provider_id,
+                            "admission_status": batch.admission_status,
+                            "reasons": rejection_reasons,
+                        },
+                    )
+                )
+                continue
+            bars = _legacy_daily_bars_from_batch(batch)
+            store.upsert_daily_bars(bars)
+        except Exception as exc:
+            status = str(getattr(exc, "status", "failed"))
+            issues.append(
+                _issue(
+                    "MARKET_DATA_BATCH_FAILED",
+                    "BaoStock V2 行情批次失败；未回退、未合并其他源、未补造数据。",
+                    stage="market_data",
+                    severity="error",
+                    details={
+                        "instrument_id": instrument_id,
+                        "start_date": start.isoformat(),
+                        "end_date": end.isoformat(),
+                        "provider_id": provider_id,
+                        "retrieval_mode": retrieval_mode,
+                        "status": status,
+                        "error_code": str(getattr(exc, "code", "failed")),
+                        "error_type": type(exc).__name__,
+                        "error": safe_error_text(exc),
+                    },
+                )
+            )
+    return sorted(evidence, key=lambda item: (str(item["provider_id"]), str(item["batch_id"])))
+
+
+def _ingest_market_bars(
+    store: Any,
+    *,
+    reports: Iterable[Any],
+    claims: Iterable[Any],
+    config: Mapping[str, Any],
+    decision: datetime,
+    cache_directory: Path,
+    offline: bool,
+    issues: list[dict[str, Any]],
+) -> list[dict[str, Any]]:
+    if _is_v2_config(config):
+        return _ingest_market_bars_v2(
+            store,
+            reports=reports,
+            claims=claims,
+            config=config,
+            decision=decision,
+            cache_directory=cache_directory,
+            offline=offline,
+            issues=issues,
+        )
+    _ingest_market_bars_v1(
+        store,
+        reports=reports,
+        claims=claims,
+        config=config,
+        decision=decision,
+        cache_directory=cache_directory,
+        offline=offline,
+        issues=issues,
+    )
+    return []
+
+
 def _outcome_result_sufficient(
     claim: Any,
     outcome: Any | None,
@@ -1908,6 +2414,70 @@ def _match_first_release_truths(
     issues: list[dict[str, Any]],
 ) -> dict[str, Any]:
     """Bind official first releases, preferring an exact claim-id binding."""
+
+    claim_rows = list(claims)
+    observation_rows = list(observations)
+    # The legacy TruthObservation.evidence_verified boolean only records a
+    # caller assertion.  It is not a receipt from a source-owned transport.
+    # Until official_truth exposes an admitted transport, no local DB row may
+    # unlock formal fundamental scoring, regardless of source name or hash.
+    from .official_truth import OFFICIAL_ADMISSION_STATUS
+
+    if OFFICIAL_ADMISSION_STATUS != "admitted":
+        first_releases = [
+            observation
+            for observation in observation_rows
+            if _field(observation, "first_release") is True
+            and _field(observation, "revision") is not True
+        ]
+        for dimension in VALID_DIMENSIONS:
+            stored = [
+                observation
+                for observation in first_releases
+                if _identifier(observation, "dimension") == dimension
+            ]
+            representative = next(
+                (
+                    claim
+                    for claim in claim_rows
+                    if _identifier(claim, "dimension") == dimension
+                ),
+                None,
+            )
+            if not stored or representative is None:
+                continue
+            _market_issue_once(
+                issues,
+                "OFFICIAL_TRUTH_RECEIPT_REQUIRED",
+                "本地真值行及 evidence_verified 布尔值不能证明官方来源；source-owned receipt transport 尚未配置，已拒绝正式评分。",
+                claim=representative,
+                report=None,
+                details={
+                    "admission_status": OFFICIAL_ADMISSION_STATUS,
+                    "stored_first_release_count": len(stored),
+                },
+                stage="truth",
+            )
+        return {}
+
+    # A future status flip alone is deliberately insufficient.  Before this
+    # branch can ever match observations, each row must carry a receipt_id and
+    # the consumer must reload the receipt/raw bytes from the immutable
+    # official evidence store and revalidate that binding.
+    if claim_rows and observation_rows:
+        _market_issue_once(
+            issues,
+            "OFFICIAL_TRUTH_RECEIPT_BINDING_NOT_IMPLEMENTED",
+            "官方 transport 状态标签不能单独解锁；逐条 receipt/raw evidence 绑定尚未实现。",
+            claim=claim_rows[0],
+            report=None,
+            details={"admission_status": OFFICIAL_ADMISSION_STATUS},
+            stage="truth",
+        )
+    return {}
+
+    claims = claim_rows
+    observations = observation_rows
 
     rows = [
         observation
@@ -2339,6 +2909,8 @@ def _is_market_truth_source(
     value: str,
     config: Mapping[str, Any] | None = None,
 ) -> bool:
+    if config is not None and _is_v2_config(config):
+        return False
     source = value.strip().lower()
     configured: set[str] = set()
     if config is not None:
@@ -2729,9 +3301,13 @@ def _append_official_truth_issues(
 ) -> None:
     """Require imported official first-release truth for fundamental scoring."""
 
+    from .official_truth import OFFICIAL_ADMISSION_STATUS
+
+    receipt_transport_admitted = OFFICIAL_ADMISSION_STATUS == "admitted"
+
     for dimension in dimensions:
         trusted_ids = _official_truth_source_ids(config, dimension)
-        has_trusted = any(
+        has_trusted = receipt_transport_admitted and any(
             _identifier(observation, "dimension") == dimension
             and _field(observation, "first_release") is True
             and _field(observation, "revision") is False
@@ -2747,7 +3323,8 @@ def _append_official_truth_issues(
             if not truth_source:
                 continue
             if (
-                truth_source.upper() not in trusted_ids
+                not receipt_transport_admitted
+                or truth_source.upper() not in trusted_ids
                 or _field(observation, "evidence_verified") is not True
             ):
                 observed_untrusted.add(truth_source)
@@ -2760,6 +3337,7 @@ def _append_official_truth_issues(
                     dimension=dimension,
                     severity="warning",
                     details={
+                        "official_receipt_admission_status": OFFICIAL_ADMISSION_STATUS,
                         "accepted_source_ids": sorted(trusted_ids),
                         "observed_untrusted_sources": sorted(observed_untrusted),
                     },
@@ -3451,6 +4029,18 @@ def _sample_state(
     )
 
 
+def _report_source_evidence(config: Mapping[str, Any]) -> dict[str, Any]:
+    sources = config.get("sources", {})
+    reports = sources.get("reports", {}) if isinstance(sources, Mapping) else {}
+    eastmoney = reports.get("eastmoney", {}) if isinstance(reports, Mapping) else {}
+    details = dict(eastmoney) if isinstance(eastmoney, Mapping) else {}
+    return {
+        "provider_id": "eastmoney_public_report_sample",
+        "upstream_source": "eastmoney_public_report_center",
+        **details,
+    }
+
+
 def _write_state_bundle(
     *,
     state: PipelineState,
@@ -3464,6 +4054,7 @@ def _write_state_bundle(
     dashboard: Mapping[str, Any] | None = None,
     additional_input_snapshot: Mapping[str, Any] | None = None,
     parameters: Mapping[str, Any] | None = None,
+    market_data_batches: Iterable[Mapping[str, Any]] = (),
 ) -> ReportBundle:
     resolved_issues = list(issues)
     dates = config.get("dates", {})
@@ -3500,6 +4091,7 @@ def _write_state_bundle(
         "daily_bar_versions": sample.daily_bars,
         "caller_additional_inputs": additional_input_snapshot or {},
     }
+    batch_evidence = [dict(item) for item in market_data_batches]
     return write_report_bundle(
         paths.output_directory,
         as_of=as_of,
@@ -3516,6 +4108,8 @@ def _write_state_bundle(
         exceptions=resolved_issues,
         parameters=parameters,
         additional_input_snapshot=evidence_snapshot,
+        report_source=_report_source_evidence(config),
+        market_data_batches=batch_evidence,
     )
 
 
@@ -3529,10 +4123,15 @@ def run_audit(
     cache_directory: Path | str | None = None,
     output_directory: Path | str | None = None,
     truth_input_paths: Sequence[Path | str] | Path | str | None = None,
+    validation_manifest_path: Path | str | None = None,
+    validation_manifest_sha256: str | None = None,
 ) -> ReportBundle:
     """Collect, extract, evaluate and render the independent audit tables."""
 
     config = load_config(config_path)
+    validation_manifest, validation_hash = _apply_validation_manifest_override(
+        config, validation_manifest_path, validation_manifest_sha256
+    )
     paths = resolve_runtime_paths(
         config,
         config_path=config_path,
@@ -3548,6 +4147,7 @@ def run_audit(
     sample_start = _date_value(dates.get("sample_start"), "dates.sample_start")
     sample_end = _date_value(dates.get("sample_end"), "dates.sample_end")
     issues: list[dict[str, Any]] = []
+    market_data_batches: list[dict[str, Any]] = []
     resolved_truth_inputs = _resolve_truth_input_paths(config, truth_input_paths)
     report_trading_calendar = _configured_trading_calendar(
         config, config_path=paths.config, issues=issues
@@ -3627,39 +4227,18 @@ def run_audit(
             emit_unscorable=False,
         )
         state = _load_state(store, decision, issues)
-        # A structured rating/EPS/target-price claim covers only that topic. It
-        # must never suppress extraction of demand, inventory, earnings-change
-        # or other falsifiable claims in the same PDF. The extractor performs
-        # claim-level report/topic/period/horizon deduplication.
-        pdf_reports = [
-            report
-            for report in deduplicated
-            if _report_has_resolvable_pdf(report)
-        ]
-        pdf_texts = _extract_pdf_texts(
-            pdf_reports,
-            store=store,
-            cache_directory=paths.cache_directory,
-            offline=offline,
-            decision=decision,
-            issues=issues,
+        resolvable_pdf_count = sum(
+            1 for report in deduplicated if _report_has_resolvable_pdf(report)
         )
-        if pdf_texts:
-            state = _load_state(store, decision, issues)
-            enriched_pdf_reports = [
-                report
-                for report in state.reports
-                if _identifier(report, "report_id", "id") in pdf_texts
-            ]
-            _extract_claims(
-                store,
-                reports=enriched_pdf_reports,
-                existing_claims=state.claims,
-                config=config,
-                issues=issues,
-                text_by_report_id=pdf_texts,
-                retry_completed=True,
-                emit_unscorable=False,
+        if resolvable_pdf_count:
+            issues.append(
+                _issue(
+                    "PDF_EXTRACTION_DEFERRED_TO_BOUNDED_COMMAND",
+                    "标准审计不批量下载全样本PDF；人工验证仅处理确定性90份，深读仅处理最多20份候选。",
+                    stage="pdf_extraction",
+                    severity="info",
+                    details={"resolvable_pdf_count": resolvable_pdf_count},
+                )
             )
         state = _load_state(store, decision, issues)
         validation_population = [
@@ -3673,7 +4252,7 @@ def run_audit(
             decision=decision,
             config_path=paths.config,
             population_reports=validation_population,
-            population_claims=_claims_with_current_evidence(
+            population_claims=_claims_with_bound_evidence(
                 state.claims, reports=validation_population
             ),
             issues=issues,
@@ -3690,7 +4269,7 @@ def run_audit(
                 issues.append(
                     _issue(
                         "UNSCORABLE_REPORT",
-                        "元数据与已运行的可用正文抽取均未得到同时具备变量、方向和期限的可证伪预测。",
+                        "元数据未得到同时具备变量、方向和期限的可证伪预测；正文仅由有界审核或深读命令处理。",
                         stage="extraction",
                         dimension=_identifier(report, "dimension"),
                         report_id=report_id,
@@ -3709,7 +4288,7 @@ def run_audit(
         selected_claims = [
             claim for claim in state.claims if _identifier(claim, "report_id") in selected_report_ids
         ]
-        _ingest_market_bars(
+        market_data_batches = _ingest_market_bars(
             store,
             reports=selected_reports,
             claims=selected_claims,
@@ -3761,7 +4340,10 @@ def run_audit(
             "offline": bool(offline),
             "truth_inputs": [str(path) for path in resolved_truth_inputs],
             "current_feed_start": _current_feed_start(config, decision).isoformat(),
+            "validation_manifest": validation_manifest,
+            "validation_manifest_sha256": validation_hash,
         },
+        market_data_batches=market_data_batches,
     )
 
 
@@ -3776,10 +4358,15 @@ def build_factor(
     factor_input_path: Path | str | None = None,
     factor_research_rows: Iterable[Mapping[str, Any]] | None = None,
     trading_calendar_path: Path | str | None = None,
+    validation_manifest_path: Path | str | None = None,
+    validation_manifest_sha256: str | None = None,
 ) -> ReportBundle:
     """Build auditable three-layer observations from data already in the store."""
 
     config = load_config(config_path)
+    validation_manifest, validation_hash = _apply_validation_manifest_override(
+        config, validation_manifest_path, validation_manifest_sha256
+    )
     paths = resolve_runtime_paths(
         config,
         config_path=config_path,
@@ -3859,7 +4446,7 @@ def build_factor(
             decision=decision,
             config_path=paths.config,
             population_reports=validation_population,
-            population_claims=_claims_with_current_evidence(
+            population_claims=_claims_with_bound_evidence(
                 state.claims, reports=validation_population
             ),
             issues=issues,
@@ -3933,6 +4520,8 @@ def build_factor(
             "internal_factor_research_row_count": (
                 len(getattr(internal_batch, "rows", ())) if internal_batch else 0
             ),
+            "validation_manifest": validation_manifest,
+            "validation_manifest_sha256": validation_hash,
         },
     )
 
@@ -3946,10 +4535,15 @@ def deep_read(
     db_path: Path | str | None = None,
     cache_directory: Path | str | None = None,
     output_directory: Path | str | None = None,
+    validation_manifest_path: Path | str | None = None,
+    validation_manifest_sha256: str | None = None,
 ) -> ReportBundle:
     """Build the current evidence-gated deep-read queue from local records."""
 
     config = load_config(config_path)
+    validation_manifest, validation_hash = _apply_validation_manifest_override(
+        config, validation_manifest_path, validation_manifest_sha256
+    )
     paths = resolve_runtime_paths(
         config,
         config_path=config_path,
@@ -4012,9 +4606,24 @@ def deep_read(
             emit_unscorable=False,
         )
         state = _load_state(store, decision, issues)
-        pdf_reports = [
-            report for report in deduplicated if _report_has_resolvable_pdf(report)
-        ]
+        pdf_reports = _bounded_pdf_candidates(deduplicated, limit=resolved_limit)
+        total_resolvable = sum(
+            1 for report in deduplicated if _report_has_resolvable_pdf(report)
+        )
+        if total_resolvable > len(pdf_reports):
+            issues.append(
+                _issue(
+                    "PDF_DOWNLOAD_BOUNDED",
+                    "深读在任何网络请求前已将PDF候选限制为最多20份。",
+                    stage="pdf_extraction",
+                    severity="info",
+                    details={
+                        "resolvable_pdf_count": total_resolvable,
+                        "selected_pdf_count": len(pdf_reports),
+                        "hard_limit": 20,
+                    },
+                )
+            )
         pdf_texts = _extract_pdf_texts(
             pdf_reports,
             store=store,
@@ -4055,7 +4664,7 @@ def deep_read(
         decision=decision,
         config_path=paths.config,
         population_reports=validation_population,
-        population_claims=_claims_with_current_evidence(
+        population_claims=_claims_with_bound_evidence(
             state.claims, reports=validation_population
         ),
         issues=issues,
@@ -4083,7 +4692,529 @@ def deep_read(
             "limit": resolved_limit,
             "offline": bool(offline),
             "current_feed_start": _current_feed_start(config, decision).isoformat(),
+            "validation_manifest": validation_manifest,
+            "validation_manifest_sha256": validation_hash,
         },
+    )
+
+
+def _choice_pdf_evidence_span(report: Any, claim: Any, text: str) -> str:
+    """Return a short span that is actually present in one downloaded PDF."""
+
+    compact = re.sub(r"[ \t\r\f\v]+", " ", str(text or ""))
+    if not compact.strip():
+        return ""
+    target_type = _identifier(claim, "target_type").strip().lower()
+    if target_type == "stock_rating":
+        rating = _identifier(report, "rating").strip()
+        direction_by_rating = {
+            "买入": 1,
+            "强烈推荐": 1,
+            "推荐": 1,
+            "增持": 1,
+            "看好": 1,
+            "优于大市": 1,
+            "跑赢大市": 1,
+            "outperform": 1,
+            "buy": 1,
+            "中性": 0,
+            "持有": 0,
+            "同步大市": 0,
+            "与大市同步": 0,
+            "neutral": 0,
+            "hold": 0,
+            "减持": -1,
+            "卖出": -1,
+            "回避": -1,
+            "看淡": -1,
+            "弱于大市": -1,
+            "跑输大市": -1,
+            "underperform": -1,
+            "sell": -1,
+        }
+        expected_direction = direction_by_rating.get(rating.casefold())
+        try:
+            claim_direction = int(_field(claim, "direction"))
+        except (TypeError, ValueError):
+            return ""
+        if expected_direction is None or expected_direction != claim_direction:
+            return ""
+        pattern = re.compile(
+            rf"(?:投资)?评级[^\n。；]{{0,100}}{re.escape(rating)}|"
+            rf"{re.escape(rating)}[^\n。；]{{0,100}}(?:投资)?评级",
+            re.IGNORECASE,
+        )
+        match = pattern.search(compact)
+    elif target_type == "target_price":
+        try:
+            if int(_field(claim, "direction")) != 0 or int(
+                _field(claim, "horizon_days")
+            ) != 120:
+                return ""
+        except (TypeError, ValueError):
+            return ""
+        match = re.search(r"目标(?:价|价格)[^\n。；]{0,160}", compact, re.IGNORECASE)
+        if match is None:
+            return ""
+        expected_values: set[Decimal] = set()
+        for field_name in ("value_min", "value_max"):
+            raw = _field(claim, field_name)
+            if raw in (None, ""):
+                continue
+            try:
+                expected_values.add(Decimal(str(raw).replace(",", "")))
+            except InvalidOperation:
+                return ""
+        if not expected_values:
+            return ""
+        observed_values: set[Decimal] = set()
+        for token in re.findall(r"(?<![A-Za-z0-9])\d+(?:\.\d+)?", match.group(0)):
+            try:
+                observed_values.add(Decimal(token))
+            except InvalidOperation:
+                continue
+        if not expected_values.issubset(observed_values):
+            return ""
+    else:
+        return ""
+    if match is None:
+        return ""
+    start = max(0, match.start() - 100)
+    end = min(len(compact), match.end() + 160)
+    return compact[start:end].strip()[:500]
+
+
+def _choice_pdf_enricher(
+    *,
+    database_path: Path,
+    cache_directory: Path,
+    decision: datetime,
+) -> Callable[[Sequence[Mapping[str, Any]]], Mapping[str, Mapping[str, Any]]]:
+    """Build the bounded Eastmoney PDF enrichment callback for diagnostics."""
+
+    def enrich(
+        candidates: Sequence[Mapping[str, Any]],
+    ) -> Mapping[str, Mapping[str, Any]]:
+        from .storage import AuditStore
+
+        bounded = tuple(candidates[:20])
+        report_ids = {str(item.get("report_id") or "") for item in bounded}
+        claim_ids = {str(item.get("claim_id") or "") for item in bounded}
+        issues: list[dict[str, Any]] = []
+        with AuditStore(database_path, decision_time=decision) as store:
+            reports = {
+                _identifier(report, "report_id"): report
+                for report in store.iter_reports(
+                    available_by=decision, version_as_of=decision
+                )
+                if _identifier(report, "report_id") in report_ids
+            }
+            claims = {
+                _identifier(claim, "claim_id"): claim
+                for claim in store.iter_claims(available_by=decision)
+                if _identifier(claim, "claim_id") in claim_ids
+            }
+            texts = _extract_pdf_texts(
+                [reports[report_id] for report_id in sorted(reports)],
+                store=store,
+                cache_directory=cache_directory,
+                offline=False,
+                decision=decision,
+                issues=issues,
+            )
+            refreshed = {
+                _identifier(report, "report_id"): report
+                for report in store.iter_reports(
+                    available_by=decision, version_as_of=decision
+                )
+                if _identifier(report, "report_id") in report_ids
+            }
+
+        issue_by_report: dict[str, Mapping[str, Any]] = {}
+        for issue in issues:
+            report_id = str(issue.get("report_id") or "")
+            if report_id:
+                issue_by_report[report_id] = issue
+        result: dict[str, Mapping[str, Any]] = {}
+        for candidate in bounded:
+            report_id = str(candidate.get("report_id") or "")
+            claim_id = str(candidate.get("claim_id") or "")
+            report = refreshed.get(report_id)
+            claim = claims.get(claim_id)
+            text = texts.get(report_id, "")
+            if report is None or claim is None or not text:
+                issue = issue_by_report.get(report_id, {})
+                result[report_id] = {
+                    "status": "failed",
+                    "code": str(issue.get("code") or "pdf_evidence_unavailable"),
+                    "message": str(
+                        issue.get("message")
+                        or "downloaded PDF evidence is unavailable for this claim"
+                    ),
+                }
+                continue
+            pdf_hash = _identifier(report, "pdf_sha256").strip().lower()
+            evidence_span = _choice_pdf_evidence_span(report, claim, text)
+            if not evidence_span:
+                result[report_id] = {
+                    "status": "failed",
+                    "code": "claim_not_verified_in_pdf",
+                    "message": "the diagnostic claim could not be located in the downloaded PDF",
+                }
+                continue
+            result[report_id] = {
+                "status": "passed",
+                "code": "pdf_evidence_verified",
+                "pdf_sha256": pdf_hash,
+                "evidence_span": evidence_span,
+            }
+        return result
+
+    return enrich
+
+
+def diagnostic_market(
+    *,
+    as_of: Any = None,
+    offline: bool = False,
+    resume: bool = True,
+    max_requests_per_minute: int = 300,
+    max_pdf_candidates: int = 20,
+    max_recommendations: int = 5,
+    config_path: Path | str | None = None,
+    db_path: Path | str | None = None,
+    cache_directory: Path | str | None = None,
+    output_directory: Path | str | None = None,
+) -> Any:
+    """Run the explicit Choice-secondary seven-file market diagnostic."""
+
+    from .choice_diagnostic import run_choice_market_diagnostic
+
+    config = load_config(config_path)
+    paths = resolve_runtime_paths(
+        config,
+        config_path=config_path,
+        db_path=db_path,
+        cache_directory=cache_directory,
+        output_directory=output_directory,
+    )
+    # A live SDK response must never be backdated to the frozen research
+    # baseline.  Callers can still request an explicit historical offline
+    # replay, while an omitted cutoff means today's end-of-day capture.
+    resolved_as_of = as_of or datetime.now(CHINA_TZ).date()
+    decision = _decision_time(resolved_as_of)
+    diagnostic_cache = (
+        paths.cache_directory
+        if cache_directory is not None
+        else paths.cache_directory / "choice_diagnostic"
+    )
+    diagnostic_output = (
+        paths.output_directory
+        if output_directory is not None
+        else paths.output_directory.parent / "choice_market_diagnostic"
+    )
+    return run_choice_market_diagnostic(
+        db_path=paths.database,
+        cache_directory=diagnostic_cache,
+        output_directory=diagnostic_output,
+        as_of=decision,
+        offline=offline,
+        resume=resume,
+        max_requests_per_minute=max_requests_per_minute,
+        max_pdf_candidates=max_pdf_candidates,
+        max_recommendations=max_recommendations,
+        config=config,
+        pdf_enricher=(
+            None
+            if offline
+            else _choice_pdf_enricher(
+                database_path=paths.database,
+                cache_directory=diagnostic_cache / "pdf_cache",
+                decision=decision,
+            )
+        ),
+    )
+
+
+def _validation_population(
+    store: Any,
+    config: Mapping[str, Any],
+    decision: datetime,
+) -> tuple[list[Any], list[Any]]:
+    dates = config.get("dates", {})
+    sample_start = _date_value(dates.get("sample_start"), "dates.sample_start")
+    sample_end = _date_value(dates.get("sample_end"), "dates.sample_end")
+    reports = [
+        report
+        for report in store.iter_reports(
+            available_by=decision, version_as_of=decision
+        )
+        if _report_date(report) is not None
+        and sample_start <= _report_date(report) <= sample_end  # type: ignore[operator]
+    ]
+    report_ids = {_identifier(report, "report_id") for report in reports}
+    all_claims = [
+        claim
+        for claim in store.iter_claims(available_by=decision)
+        if _identifier(claim, "report_id") in report_ids
+    ]
+    active_extractor, active_parser, active_prompt = _active_extraction_versions()
+    from .validation import validate_claim_evidence_bindings
+
+    report_by_id = {_identifier(report, "report_id"): report for report in reports}
+    claims: list[Any] = []
+    for claim in all_claims:
+        report = report_by_id.get(_identifier(claim, "report_id"))
+        if report is None:
+            continue
+        try:
+            validate_claim_evidence_bindings(
+                [claim],
+                [report],
+                expected_extractor_version=active_extractor,
+                expected_extractor_bundle_sha256=_active_extractor_bundle_sha256(),
+                expected_parser_version=active_parser,
+                expected_prompt_version=active_prompt,
+            )
+        except Exception:
+            continue
+        claims.append(claim)
+    return reports, claims
+
+
+def _validation_pdf_path(pdf_directory: Path, report_id: str) -> Path:
+    return pdf_directory / f"{sha256(report_id.encode('utf-8')).hexdigest()}.pdf"
+
+
+def _download_validation_pdfs(
+    *,
+    store: Any,
+    reports: Sequence[Any],
+    report_ids: Sequence[str],
+    cache_directory: Path,
+    pdf_directory: Path,
+    decision: datetime,
+    offline: bool,
+) -> Mapping[str, Path]:
+    """Download only the deterministic 90-report sample, with resumable cache."""
+
+    from .extractors import RuleBasedExtractor
+    from .sources import EASTMONEY_IPV4_ONLY_HOSTS, CachedHttpClient, EastmoneySource
+    from .storage import HttpCache
+
+    try:
+        import pypdf
+    except ImportError as exc:
+        raise ConfigurationError("pypdf is required to prepare extractor validation") from exc
+
+    report_by_id = {_identifier(report, "report_id"): report for report in reports}
+    selected = [report_by_id[report_id] for report_id in report_ids]
+    pdf_directory.mkdir(parents=True, exist_ok=True)
+    cache = HttpCache(cache_directory)
+    client = CachedHttpClient(
+        cache,
+        offline=offline,
+        as_of=decision,
+        user_agent="broker-report-audit-v2/validation-review-only",
+        ipv4_only_hosts=EASTMONEY_IPV4_ONLY_HOSTS,
+        rate_limit_seconds=2.0,
+        max_retries=1,
+    )
+    source = EastmoneySource(client)
+    extractor_version, parser_version, prompt_version = _active_extraction_versions()
+    extractor = RuleBasedExtractor(
+        extractor_version=extractor_version,
+        parser_version=parser_version,
+        prompt_version=prompt_version,
+    )
+    results: dict[str, Path] = {}
+    statuses: list[dict[str, Any]] = []
+    try:
+        for report in selected:
+            report_id = _identifier(report, "report_id")
+            destination = _validation_pdf_path(pdf_directory, report_id)
+            try:
+                response = source.fetch_pdf(report)
+                if response.content_hash != sha256(response.body).hexdigest():
+                    raise ValueError("PDF response content hash mismatch")
+                temporary = destination.with_suffix(".pdf.tmp")
+                temporary.write_bytes(response.body)
+                temporary.replace(destination)
+                enriched_report = replace(
+                    report,
+                    pdf_sha256=response.content_hash,
+                    fetched_at=max(_field(report, "fetched_at"), response.fetched_at),
+                )
+                store.upsert_report(enriched_report)
+                reader = pypdf.PdfReader(BytesIO(response.body), strict=False)
+                if reader.is_encrypted:
+                    reader.decrypt("")
+                text = "\n\n".join(
+                    (page.extract_text() or "").strip() for page in reader.pages
+                ).strip()
+                extracted_claims = extractor.extract(
+                    enriched_report, text if text else None
+                )
+                if extracted_claims:
+                    store.upsert_claims(extracted_claims)
+                results[report_id] = destination
+                statuses.append(
+                    {
+                        "report_id": report_id,
+                        "status": "passed",
+                        "pdf_sha256": response.content_hash,
+                        "text_extracted": bool(text),
+                        "claim_count": len(extracted_claims),
+                    }
+                )
+            except Exception as exc:
+                statuses.append(
+                    {
+                        "report_id": report_id,
+                        "status": "failed",
+                        "error_type": type(exc).__name__,
+                        "error": safe_error_text(exc),
+                    }
+                )
+    finally:
+        client.close()
+        cache.close()
+    status_path = pdf_directory.parent / "validation_download_status.json"
+    status_path.write_text(
+        json.dumps(
+            {
+                "contract_version": "broker-report-validation-download.v1",
+                "selected_count": len(selected),
+                "passed_count": len(results),
+                "failed_count": len(selected) - len(results),
+                "offline": bool(offline),
+                "records": statuses,
+            },
+            ensure_ascii=False,
+            sort_keys=True,
+            indent=2,
+        )
+        + "\n",
+        encoding="utf-8",
+    )
+    if len(results) != len(selected):
+        raise ConfigurationError(
+            f"validation PDF download incomplete: {len(results)}/{len(selected)}; "
+            f"see {status_path}"
+        )
+    return results
+
+
+def prepare_validation(
+    *,
+    as_of: Any = None,
+    offline: bool = False,
+    sample_seed: str = DEFAULT_VALIDATION_SAMPLE_SEED,
+    config_path: Path | str | None = None,
+    db_path: Path | str | None = None,
+    cache_directory: Path | str | None = None,
+    output_directory: Path | str | None = None,
+) -> Any:
+    """Download exactly 90 selected PDFs and build one offline review page."""
+
+    from .storage import AuditStore
+    from .validation_review import prepare_validation_package, select_validation_reports
+
+    config = load_config(config_path)
+    paths = resolve_runtime_paths(
+        config,
+        config_path=config_path,
+        db_path=db_path,
+        cache_directory=cache_directory,
+        output_directory=output_directory,
+    )
+    decision = _decision_time(as_of or datetime.now(CHINA_TZ).date())
+    output = (
+        paths.output_directory
+        if output_directory is not None
+        else paths.output_directory.parent / "extractor_validation_review"
+    )
+    cache = (
+        paths.cache_directory
+        if cache_directory is not None
+        else paths.cache_directory / "extractor_validation_review"
+    )
+    with AuditStore(paths.database, decision_time=decision) as store:
+        reports, claims = _validation_population(store, config, decision)
+        selection = select_validation_reports(
+            reports, claims, sample_seed=sample_seed
+        )
+        pdf_files = _download_validation_pdfs(
+            store=store,
+            reports=reports,
+            report_ids=selection.report_ids,
+            cache_directory=cache,
+            pdf_directory=output / "pdfs",
+            decision=decision,
+            offline=offline,
+        )
+        reports, claims = _validation_population(store, config, decision)
+    extractor_version, parser_version, prompt_version = _active_extraction_versions()
+    return prepare_validation_package(
+        reports,
+        claims,
+        pdf_files=pdf_files,
+        output_directory=output,
+        sample_seed=sample_seed,
+        extractor_version=extractor_version,
+        extractor_bundle_sha256=_active_extractor_bundle_sha256(),
+        parser_version=parser_version,
+        prompt_version=prompt_version,
+    )
+
+
+def finalize_validation(
+    *,
+    review_path: Path | str,
+    as_of: Any = None,
+    sample_seed: str = DEFAULT_VALIDATION_SAMPLE_SEED,
+    config_path: Path | str | None = None,
+    db_path: Path | str | None = None,
+    output_directory: Path | str | None = None,
+) -> Any:
+    """Validate a completed browser export against current DB/PDF evidence."""
+
+    from .storage import AuditStore
+    from .validation_review import finalize_validation_review, select_validation_reports
+
+    config = load_config(config_path)
+    paths = resolve_runtime_paths(
+        config,
+        config_path=config_path,
+        db_path=db_path,
+        output_directory=output_directory,
+    )
+    decision = _decision_time(as_of or datetime.now(CHINA_TZ).date())
+    output = (
+        paths.output_directory
+        if output_directory is not None
+        else paths.output_directory.parent / "extractor_validation_review"
+    )
+    with AuditStore(paths.database, decision_time=decision) as store:
+        reports, claims = _validation_population(store, config, decision)
+    selection = select_validation_reports(reports, claims, sample_seed=sample_seed)
+    pdf_files = {
+        report_id: _validation_pdf_path(output / "pdfs", report_id)
+        for report_id in selection.report_ids
+    }
+    extractor_version, parser_version, prompt_version = _active_extraction_versions()
+    return finalize_validation_review(
+        review_path,
+        reports,
+        claims,
+        pdf_files=pdf_files,
+        output_directory=output,
+        as_of=decision,
+        sample_seed=sample_seed,
+        extractor_version=extractor_version,
+        extractor_bundle_sha256=_active_extractor_bundle_sha256(),
+        parser_version=parser_version,
+        prompt_version=prompt_version,
     )
 
 
@@ -4095,8 +5226,14 @@ def build_parser() -> argparse.ArgumentParser:
     commands = parser.add_subparsers(dest="command", required=True)
 
     common = argparse.ArgumentParser(add_help=False)
-    common.add_argument("--as-of", help="Research cutoff date (YYYY-MM-DD); defaults to config.")
-    common.add_argument("--config", help="V1 JSON config path.")
+    common.add_argument(
+        "--as-of",
+        help=(
+            "Research cutoff date (YYYY-MM-DD); formal commands default to config, "
+            "live Choice/validation commands default to today."
+        ),
+    )
+    common.add_argument("--config", help="Broker-report audit JSON config path; defaults to V2.")
     common.add_argument("--db", help="SQLite audit store path.")
     common.add_argument("--cache-dir", help="Content-addressed HTTP cache directory.")
     common.add_argument("--output-dir", help="Directory for the fixed report bundle.")
@@ -4107,6 +5244,14 @@ def build_parser() -> argparse.ArgumentParser:
         nargs="+",
         default=list(VALID_DIMENSIONS),
         help="Comma-separated or space-separated: macro, industry, stock.",
+    )
+    audit_parser.add_argument(
+        "--validation-manifest",
+        help="Finalized extractor-validation v3 JSON; verified at runtime without editing config.",
+    )
+    audit_parser.add_argument(
+        "--validation-manifest-sha256",
+        help="Required external SHA-256 anchor when --validation-manifest is used.",
     )
     audit_parser.add_argument("--offline", action="store_true", help="Forbid all network access.")
     audit_parser.add_argument(
@@ -4125,12 +5270,74 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional JSON/JSONL/CSV feature-and-label rows for Walk-forward evaluation.",
     )
     factor_parser.add_argument(
+        "--validation-manifest",
+        help="Finalized extractor-validation v3 JSON.",
+    )
+    factor_parser.add_argument(
+        "--validation-manifest-sha256",
+        help="Required external SHA-256 anchor when --validation-manifest is used.",
+    )
+    factor_parser.add_argument(
         "--trading-calendar",
         help="Optional JSON/JSONL/CSV explicit exchange trading dates.",
     )
     deep_parser = commands.add_parser("deep-read", parents=[common], help="Rank the current evidence-gated reading queue.")
     deep_parser.add_argument("--limit", type=int, default=20, help="Maximum queue length; hard-capped at 20.")
     deep_parser.add_argument("--offline", action="store_true", help="Forbid all network access.")
+    deep_parser.add_argument(
+        "--validation-manifest",
+        help="Finalized extractor-validation v3 JSON.",
+    )
+    deep_parser.add_argument(
+        "--validation-manifest-sha256",
+        help="Required external SHA-256 anchor when --validation-manifest is used.",
+    )
+
+    diagnostic_parser = commands.add_parser(
+        "diagnostic-market",
+        parents=[common],
+        help="Run the explicit Choice-secondary seven-file market diagnostic.",
+    )
+    diagnostic_parser.add_argument(
+        "--offline", action="store_true", help="Replay validated Choice diagnostic batches only."
+    )
+    diagnostic_parser.add_argument(
+        "--no-resume", action="store_true", help="Do not reuse completed checkpoint entries."
+    )
+    diagnostic_parser.add_argument(
+        "--max-requests-per-minute",
+        type=int,
+        default=300,
+        help="Maximum Choice SDK data calls per minute; cannot exceed 300.",
+    )
+    diagnostic_parser.add_argument(
+        "--max-pdf-candidates", type=int, default=20, help="Bounded PDF candidate count; hard-capped at 20."
+    )
+    diagnostic_parser.add_argument(
+        "--max-recommendations", type=int, default=5, help="Reading recommendations; hard-capped at 5."
+    )
+
+    prepare_parser = commands.add_parser(
+        "prepare-validation",
+        parents=[common],
+        help="Download the deterministic 90 PDFs and build one offline review page.",
+    )
+    prepare_parser.add_argument(
+        "--offline", action="store_true", help="Use only already-cached PDF responses."
+    )
+    prepare_parser.add_argument(
+        "--sample-seed", default=DEFAULT_VALIDATION_SAMPLE_SEED, help="Deterministic 30-per-dimension sample seed."
+    )
+
+    finalize_parser = commands.add_parser(
+        "finalize-validation",
+        parents=[common],
+        help="Validate a completed review export and emit extractor-validation v3.",
+    )
+    finalize_parser.add_argument("--review", required=True, help="Browser-exported review JSON path.")
+    finalize_parser.add_argument(
+        "--sample-seed", default=DEFAULT_VALIDATION_SAMPLE_SEED, help="Must match prepare-validation."
+    )
     return parser
 
 
@@ -4148,6 +5355,8 @@ def main(argv: Sequence[str] | None = None) -> int:
                 cache_directory=args.cache_dir,
                 output_directory=args.output_dir,
                 truth_input_paths=args.truth_input,
+                validation_manifest_path=args.validation_manifest,
+                validation_manifest_sha256=args.validation_manifest_sha256,
             )
         elif args.command == "build-factor":
             bundle = build_factor(
@@ -4158,8 +5367,10 @@ def main(argv: Sequence[str] | None = None) -> int:
                 output_directory=args.output_dir,
                 factor_input_path=args.factor_input,
                 trading_calendar_path=args.trading_calendar,
+                validation_manifest_path=args.validation_manifest,
+                validation_manifest_sha256=args.validation_manifest_sha256,
             )
-        else:
+        elif args.command == "deep-read":
             bundle = deep_read(
                 as_of=args.as_of,
                 limit=args.limit,
@@ -4168,7 +5379,51 @@ def main(argv: Sequence[str] | None = None) -> int:
                 db_path=args.db,
                 cache_directory=args.cache_dir,
                 output_directory=args.output_dir,
+                validation_manifest_path=args.validation_manifest,
+                validation_manifest_sha256=args.validation_manifest_sha256,
             )
+        elif args.command == "diagnostic-market":
+            bundle = diagnostic_market(
+                as_of=args.as_of,
+                offline=args.offline,
+                resume=not args.no_resume,
+                max_requests_per_minute=args.max_requests_per_minute,
+                max_pdf_candidates=args.max_pdf_candidates,
+                max_recommendations=args.max_recommendations,
+                config_path=args.config,
+                db_path=args.db,
+                cache_directory=args.cache_dir,
+                output_directory=args.output_dir,
+            )
+        elif args.command == "prepare-validation":
+            package = prepare_validation(
+                as_of=args.as_of,
+                offline=args.offline,
+                sample_seed=args.sample_seed,
+                config_path=args.config,
+                db_path=args.db,
+                cache_directory=args.cache_dir,
+                output_directory=args.output_dir,
+            )
+            print(f"output_directory={package.output_directory}")
+            print(f"wrote={package.html_path}")
+            print(f"package_sha256={package.package_sha256}")
+            print(f"selected_reports={package.counts['total']}")
+            return 0
+        else:
+            finalized = finalize_validation(
+                review_path=args.review,
+                as_of=args.as_of,
+                sample_seed=args.sample_seed,
+                config_path=args.config,
+                db_path=args.db,
+                output_directory=args.output_dir,
+            )
+            print(f"output_directory={finalized.output_directory}")
+            print(f"wrote={finalized.manifest_path}")
+            print(f"manifest_sha256={finalized.manifest_sha256}")
+            print(f"reviewed_reports={finalized.counts['total']}")
+            return 0
     except ConfigurationError as exc:
         parser.error(str(exc))
         return 2
@@ -4177,24 +5432,34 @@ def main(argv: Sequence[str] | None = None) -> int:
         return 1
     print(f"run_id={bundle.run_id}")
     print(f"output_directory={bundle.output_directory}")
-    for name in ARTIFACT_FILENAMES:
+    artifact_names = ARTIFACT_FILENAMES
+    if args.command == "diagnostic-market":
+        from .choice_diagnostic import CHOICE_ARTIFACT_FILENAMES
+
+        artifact_names = CHOICE_ARTIFACT_FILENAMES
+    for name in artifact_names:
         print(f"wrote={bundle.paths[name]}")
     return 0
 
 
 __all__ = [
     "ConfigurationError",
+    "DEFAULT_VALIDATION_SAMPLE_SEED",
     "DEFAULT_CONFIG_PATH",
+    "V1_CONFIG_PATH",
     "PipelineState",
     "RuntimePaths",
     "build_factor",
     "build_parser",
     "deep_read",
+    "diagnostic_market",
+    "finalize_validation",
     "load_config",
     "load_factor_research_rows",
     "load_trading_calendar",
     "main",
     "parse_dimensions",
+    "prepare_validation",
     "resolve_runtime_paths",
     "run_audit",
 ]

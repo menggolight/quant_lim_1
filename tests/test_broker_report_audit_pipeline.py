@@ -13,8 +13,13 @@ from unittest.mock import patch
 
 from research.broker_report_audit.cli import (
     ConfigurationError,
+    DEFAULT_CONFIG_PATH,
     PipelineState,
+    V1_CONFIG_PATH,
+    _apply_validation_manifest_override,
     _build_factor_observations,
+    _claims_with_bound_evidence,
+    _claims_with_current_evidence,
     _active_extraction_versions,
     _active_extractor_bundle_sha256,
     _evaluate_missing_outcomes,
@@ -22,6 +27,7 @@ from research.broker_report_audit.cli import (
     _import_truth_inputs,
     _ingest_market_bars,
     _is_market_truth_source,
+    _match_first_release_truths,
     _trusted_outcomes,
     build_factor,
     build_parser,
@@ -48,7 +54,8 @@ from research.broker_report_audit.models import (
     SkillSnapshot,
     TruthObservation,
 )
-from research.broker_report_audit.reporting import ARTIFACT_FILENAMES
+from research.broker_report_audit.reporting import ARTIFACT_FILENAMES, write_report_bundle
+from research.market_data import MarketDataBatch, MarketDataRegistry
 from research.broker_report_audit.sources import EastmoneySource, HttpResponse
 from research.broker_report_audit.storage import (
     AuditStore,
@@ -124,8 +131,10 @@ def make_claim(
     )
 
 
-def admitted_config() -> dict[str, object]:
-    config = load_config()
+def admitted_config(config_path: Path | str = V1_CONFIG_PATH) -> dict[str, object]:
+    # Existing outcome/factor regression fixtures exercise the explicit V1
+    # Eastmoney compatibility contract, not the V2 BaoStock default.
+    config = load_config(config_path)
     manifest_hash = "f" * 64
     config["acceptance"]["validation_manifest_sha256"] = manifest_hash
     validation = config["acceptance"]["extractor_validation"]
@@ -236,11 +245,18 @@ class SourceAndExtractionTests(unittest.TestCase):
         self.assertEqual(unverified.timestamp_quality, "date_only_calendar_unverified")
         claim = replace(
             make_claim(unverified.report_id),
+            subject_id=unverified.subject_id,
             available_at=unverified.available_at,
             evidence_source_hash=unverified.content_hash,
         )
         self.assertEqual(
             _eligible_claims([claim], admitted_config(), reports=[unverified]), []
+        )
+        self.assertEqual(
+            _claims_with_current_evidence([claim], reports=[unverified]), []
+        )
+        self.assertEqual(
+            _claims_with_bound_evidence([claim], reports=[unverified]), [claim]
         )
 
     def test_old_extractor_claim_cannot_borrow_current_validation_gate(self) -> None:
@@ -731,7 +747,42 @@ class FactorPipelineTests(unittest.TestCase):
 
 
 class CliMarketOutcomeRegressionTests(unittest.TestCase):
-    def test_truth_inputs_are_repeatable_append_only_and_only_first_release_scores(self) -> None:
+    def test_admitted_status_label_cannot_unlock_unbound_local_truth(self) -> None:
+        source_report = make_report("receipt-binding")
+        claim = make_claim(source_report.report_id)
+        observation = TruthObservation(
+            claim_id=claim.claim_id,
+            dimension=claim.dimension,
+            subject_id=claim.subject_id,
+            target_type=claim.target_type,
+            forecast_period=claim.forecast_period,
+            unit=claim.unit,
+            basis=claim.benchmark,
+            realized_value=Decimal("1.2"),
+            truth_source="cninfo_first_disclosure",
+            available_at=at(date(2024, 1, 15), 10),
+            fetched_at=at(date(2024, 1, 15), 11),
+            first_release=True,
+            revision=False,
+            content_hash="d" * 64,
+            evidence_url="https://www.cninfo.com.cn/example.pdf",
+            evidence_verified=True,
+        )
+        issues: list[dict[str, object]] = []
+        with patch(
+            "research.broker_report_audit.official_truth.OFFICIAL_ADMISSION_STATUS",
+            "admitted",
+        ):
+            matched = _match_first_release_truths(
+                [claim], [observation], admitted_config(), issues
+            )
+        self.assertEqual(matched, {})
+        self.assertIn(
+            "OFFICIAL_TRUTH_RECEIPT_BINDING_NOT_IMPLEMENTED",
+            {item["code"] for item in issues},
+        )
+
+    def test_truth_inputs_are_append_only_but_local_rows_cannot_score(self) -> None:
         parsed = build_parser().parse_args(
             ["audit", "--truth-input", "a.json", "--truth-input", "b.csv"]
         )
@@ -817,8 +868,9 @@ class CliMarketOutcomeRegressionTests(unittest.TestCase):
                     len(tuple(store.iter_truth_observations(first_release=None))),
                     2,
                 )
-                # Local manifests remain diagnostic.  A controlled adapter is
-                # represented here by separately verified immutable records.
+                # Even direct immutable rows with official-looking names and
+                # evidence_verified=True remain caller assertions.  They must
+                # not unlock scoring without a source-owned receipt transport.
                 store.insert_truth_observations(
                     (
                         TruthObservation(
@@ -869,10 +921,13 @@ class CliMarketOutcomeRegressionTests(unittest.TestCase):
                     issues=issues,
                 )
                 outcome = tuple(store.iter_outcomes())[0]
-        self.assertTrue(outcome.mature)
-        self.assertEqual(str(outcome.realized_value), "1.2")
-        self.assertTrue(outcome.fundamental_hit)
-        self.assertEqual(outcome.truth_unit, "CNY/share")
+        self.assertFalse(outcome.mature)
+        self.assertIsNone(outcome.realized_value)
+        self.assertIsNone(outcome.fundamental_hit)
+        self.assertIn(
+            "OFFICIAL_TRUTH_RECEIPT_REQUIRED",
+            {item["code"] for item in issues},
+        )
         self.assertIn(
             "TRUTH_REVISIONS_STORED_BUT_EXCLUDED",
             {item["code"] for item in issues},
@@ -1031,7 +1086,7 @@ class CliMarketOutcomeRegressionTests(unittest.TestCase):
         )
         self.assertFalse(_is_market_truth_source("unapproved.vendor", config))
 
-    def test_structured_claim_does_not_suppress_pdf_extraction(self) -> None:
+    def test_audit_defers_pdf_downloads_to_bounded_commands(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             root = Path(directory)
             source_report = make_report(
@@ -1046,11 +1101,11 @@ class CliMarketOutcomeRegressionTests(unittest.TestCase):
                 store.upsert_claim(claim)
             with patch(
                 "research.broker_report_audit.cli._extract_pdf_texts",
-                return_value={},
+                side_effect=AssertionError("audit must not fetch the full PDF population"),
             ) as extract_pdf, patch(
                 "research.broker_report_audit.cli._write_state_bundle",
                 return_value=None,
-            ):
+            ) as write_bundle:
                 run_audit(
                     offline=True,
                     dimensions="stock",
@@ -1059,14 +1114,249 @@ class CliMarketOutcomeRegressionTests(unittest.TestCase):
                     cache_directory=root / "cache",
                     output_directory=root / "out",
                 )
-            selected_reports = list(extract_pdf.call_args.args[0])
-        self.assertEqual(
-            [report.report_id for report in selected_reports],
-            [source_report.report_id],
+            self.assertFalse(extract_pdf.called)
+            issue_codes = {
+                item["code"] for item in write_bundle.call_args.kwargs["issues"]
+            }
+        self.assertIn("PDF_EXTRACTION_DEFERRED_TO_BOUNDED_COMMAND", issue_codes)
+
+    def test_deep_read_pdf_preselection_is_deterministic_and_hard_capped(self) -> None:
+        from research.broker_report_audit.cli import _bounded_pdf_candidates
+
+        rows = [
+            make_report(
+                f"pdf-{index:02d}",
+                day=date(2026, 7, 1) + timedelta(days=index),
+                pdf_url=f"https://example.test/{index}.pdf",
+            )
+            for index in range(25)
+        ]
+        selected = _bounded_pdf_candidates(reversed(rows), limit=100)
+        self.assertEqual(len(selected), 20)
+        self.assertEqual(selected[0].report_id, "pdf-24")
+        self.assertEqual(selected[-1].report_id, "pdf-05")
+
+
+class MarketDataV2IntegrationTests(unittest.TestCase):
+    @staticmethod
+    def _batch(request: object, *, batch_id: str) -> MarketDataBatch:
+        requested_at = request.requested_at
+        available_at = datetime.combine(
+            request.start_date,
+            datetime.min.time(),
+            tzinfo=CHINA_TZ,
+        ).replace(hour=15, minute=30)
+        return MarketDataBatch(
+            batch_id=batch_id,
+            provider_id="baostock",
+            upstream_source="baostock.query_history_k_data_plus",
+            dataset_type="daily_bar",
+            schema_version="daily-bar-v1",
+            adapter_version="baostock-adapter-v1",
+            request_fingerprint=request.fingerprint(
+                "baostock", "baostock-adapter-v1"
+            ),
+            request_payload=request.fingerprint_payload(
+                "baostock", "baostock-adapter-v1"
+            ),
+            retrieval_mode=request.retrieval_mode,
+            requested_at=requested_at,
+            fetched_at=requested_at,
+            available_at_min=available_at,
+            available_at_max=available_at,
+            raw_content_sha256="a" * 64,
+            normalized_content_sha256="b" * 64,
+            record_count=1,
+            completeness_status="complete",
+            freshness_status="historical_backfill",
+            admission_status="validated_research_only",
+            point_in_time_status="historical_backfill_not_original_capture",
+            synthetic=False,
+            issues=(),
+            records=(
+                {
+                    "instrument_id": request.instrument_id,
+                    "trading_date": request.start_date.isoformat(),
+                    "open": "10",
+                    "high": "11",
+                    "low": "9",
+                    "close": "10.5",
+                    "preclose": "10",
+                    "volume": "100",
+                    "amount": "1000",
+                    "currency": "CNY",
+                    "adjustment": "none",
+                    "trading_status": "traded",
+                    "available_at": available_at.isoformat(),
+                    "availability_status": "policy_estimated",
+                    "source_record_id": "d" * 64,
+                },
+            ),
         )
+
+    def test_default_is_v2_and_v1_requires_explicit_selection(self) -> None:
+        default = load_config()
+        legacy = load_config(V1_CONFIG_PATH)
+        self.assertEqual(DEFAULT_CONFIG_PATH.name, "broker_report_audit.v2.json")
+        self.assertEqual(default["model_id"], "broker-report-audit-v2")
+        self.assertEqual(default["sources"]["market"]["provider"], "baostock")
+        self.assertEqual(default["sources"]["market"]["truth_source_allowlist"], [])
+        self.assertEqual(legacy["model_id"], "broker-report-audit-v1")
+        self.assertEqual(
+            legacy["sources"]["market"]["provider"],
+            "eastmoney_public.push2his",
+        )
+
+    def test_v2_uses_whole_baostock_batches_and_records_manifest_evidence(self) -> None:
+        config = admitted_config(DEFAULT_CONFIG_PATH)
+        report = make_report(
+            "v2-market",
+            subject_id="000333",
+            industry_id="BK_FORBIDDEN",
+        )
+        claim = make_claim(
+            report.report_id,
+            subject_id="000333",
+            benchmark="",
+            horizon_days=2,
+        )
+        decision = at(date(2024, 2, 1), 23)
+        captured_at = decision - timedelta(minutes=1)
+        requests: list[object] = []
+
+        class FakeRegistry:
+            def fetch(self, request: object, *, provider_id: str) -> MarketDataBatch:
+                self.provider_id = provider_id
+                requests.append(request)
+                return MarketDataV2IntegrationTests._batch(
+                    request,
+                    batch_id=f"batch-{request.instrument_id}",
+                )
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with AuditStore(root / "audit.sqlite3", decision_time=decision) as store:
+                issues: list[dict[str, object]] = []
+                with patch.object(
+                    MarketDataRegistry,
+                    "configured",
+                    return_value=FakeRegistry(),
+                ), patch(
+                    "research.broker_report_audit.cli._market_data_requested_at",
+                    return_value=captured_at,
+                ), patch(
+                    "research.broker_report_audit.sources.EastmoneyMarketSource",
+                    side_effect=AssertionError("V2 must not call Eastmoney market data"),
+                ):
+                    evidence = _ingest_market_bars(
+                        store,
+                        reports=[report],
+                        claims=[claim],
+                        config=config,
+                        decision=decision,
+                        cache_directory=root / "cache",
+                        offline=False,
+                        issues=issues,
+                    )
+                bars = list(store.iter_daily_bars())
+            bundle = write_report_bundle(
+                root / "out",
+                as_of="2024-02-01",
+                command="audit",
+                config=config,
+                report_source={"provider_id": "eastmoney_public_report_sample"},
+                market_data_batches=[{**evidence[0], "records": [{"forbidden": True}]}],
+            )
+            replay_bundle = write_report_bundle(
+                root / "other-temp-output",
+                as_of="2024-02-01",
+                command="audit",
+                config=config,
+                report_source={"provider_id": "eastmoney_public_report_sample"},
+                market_data_batches=[{**evidence[0], "records": [{"different": "ignored"}]}],
+            )
+            manifest = json.loads(
+                bundle.paths["run_manifest.json"].read_text(encoding="utf-8")
+            )
+
+        self.assertEqual({request.instrument_id for request in requests}, {"000333.SZ", "000300.SH"})
+        self.assertTrue(all(request.retrieval_mode == "historical_backfill" for request in requests))
+        self.assertTrue(all(request.requested_at == captured_at for request in requests))
+        self.assertTrue(all(request.requested_at != decision for request in requests))
+        self.assertEqual(len(evidence), 2)
+        self.assertEqual(len(bars), 2)
+        self.assertTrue(all("batch=batch-" in bar.source for bar in bars))
+        self.assertTrue(all(bar.content_hash == "b" * 64 for bar in bars))
+        self.assertNotIn("records", manifest["market_data_batches"][0])
+        self.assertEqual(manifest["source_snapshot"]["market_data_batches"], manifest["market_data_batches"])
+        self.assertEqual(bundle.run_id, replay_bundle.run_id)
+        self.assertEqual(bundle.hashes, replay_bundle.hashes)
+        self.assertFalse(_is_market_truth_source(bars[0].source, config))
+
+    def test_v2_provider_failure_is_truthful_and_never_falls_back(self) -> None:
+        config = admitted_config(DEFAULT_CONFIG_PATH)
+        report = make_report("v2-failure", industry_id="BK_FORBIDDEN")
+        claim = make_claim(report.report_id, benchmark="", horizon_days=2)
+        decision = at(date(2024, 2, 1), 23)
+
+        class MissingDependency(RuntimeError):
+            status = "dependency_missing"
+            code = "dependency_missing"
+
+        class FailingRegistry:
+            def fetch(self, request: object, *, provider_id: str) -> MarketDataBatch:
+                raise MissingDependency("baostock is unavailable")
+
+        with tempfile.TemporaryDirectory() as directory:
+            root = Path(directory)
+            with AuditStore(root / "audit.sqlite3", decision_time=decision) as store:
+                issues: list[dict[str, object]] = []
+                with patch.object(
+                    MarketDataRegistry,
+                    "configured",
+                    return_value=FailingRegistry(),
+                ), patch(
+                    "research.broker_report_audit.sources.EastmoneyMarketSource",
+                    side_effect=AssertionError("fallback is forbidden"),
+                ):
+                    evidence = _ingest_market_bars(
+                        store,
+                        reports=[report],
+                        claims=[claim],
+                        config=config,
+                        decision=decision,
+                        cache_directory=root / "cache",
+                        offline=True,
+                        issues=issues,
+                    )
+                self.assertEqual(list(store.iter_daily_bars()), [])
+        failures = [item for item in issues if item["code"] == "MARKET_DATA_BATCH_FAILED"]
+        self.assertEqual(evidence, [])
+        self.assertTrue(failures)
+        self.assertTrue(all(item["details"]["status"] == "dependency_missing" for item in failures))
+        self.assertTrue(all(item["details"]["retrieval_mode"] == "offline_replay" for item in failures))
 
 
 class CliContractTests(unittest.TestCase):
+    def test_validation_manifest_runtime_anchor_hashes_and_rejects_mismatch(self) -> None:
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "extractor_validation.v3.json"
+            path.write_text('{"contract_version":"test"}\n', encoding="utf-8")
+            config = load_config()
+            digest = sha256(path.read_bytes()).hexdigest()
+            with self.assertRaises(ConfigurationError):
+                _apply_validation_manifest_override(config, path)
+            resolved, anchored_digest = _apply_validation_manifest_override(
+                config, path, digest
+            )
+            self.assertEqual(Path(resolved), path)
+            self.assertEqual(anchored_digest, digest)
+            self.assertEqual(
+                config["acceptance"]["validation_manifest_sha256"], digest
+            )
+            with self.assertRaises(ConfigurationError):
+                _apply_validation_manifest_override(config, path, "0" * 64)
+
     def test_trading_calendar_loader_is_strict_and_cli_option_is_wired(self) -> None:
         parsed = build_parser().parse_args(
             ["build-factor", "--trading-calendar", "calendar.csv"]
@@ -1102,7 +1392,7 @@ class CliContractTests(unittest.TestCase):
                 load_trading_calendar(invalid)
 
     def test_v1_skill_and_admission_constants_are_locked(self) -> None:
-        config = load_config()
+        config = load_config(V1_CONFIG_PATH)
         config["skill"]["half_life_days"] = 999
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "config.json"

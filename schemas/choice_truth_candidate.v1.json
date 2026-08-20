@@ -1,0 +1,43 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant-research-os.local/schemas/choice_truth_candidate.v1.json",
+  "title": "Choice secondary truth candidate v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "candidate_id",
+    "source",
+    "admission_status",
+    "subject_id",
+    "target_type",
+    "forecast_period",
+    "value",
+    "unit",
+    "basis",
+    "observed_at",
+    "available_at",
+    "fetched_at",
+    "endpoint_name",
+    "request_params",
+    "raw_response_sha256"
+  ],
+  "properties": {
+    "contract_version": {"const": "choice-truth-candidate.v1"},
+    "candidate_id": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source": {"const": "choice"},
+    "admission_status": {"const": "diagnostic_choice_secondary_not_admitted"},
+    "subject_id": {"type": "string", "minLength": 1},
+    "target_type": {"type": "string", "minLength": 1},
+    "forecast_period": {"type": "string", "minLength": 1},
+    "value": {"type": "string", "pattern": "^-?[0-9]+(?:\\.[0-9]+)?$"},
+    "unit": {"type": "string", "minLength": 1},
+    "basis": {"type": "string", "minLength": 1},
+    "observed_at": {"type": "string", "format": "date-time"},
+    "available_at": {"type": "string", "format": "date-time"},
+    "fetched_at": {"type": "string", "format": "date-time"},
+    "endpoint_name": {"type": "string", "minLength": 1},
+    "request_params": {"type": "object"},
+    "raw_response_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

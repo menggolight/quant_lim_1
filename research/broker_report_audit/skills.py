@@ -150,6 +150,7 @@ def estimate_skill(
     prior_strength: float = 5.0,
     lower_bound_z: float = 1.645,
     consensus_power: float = 1.0,
+    precomputed_consensus_weight_field: str | None = None,
 ) -> dict[str, Any]:
     """Estimate weighted Bernoulli skill with empirical-Bayes shrinkage.
 
@@ -188,7 +189,22 @@ def estimate_skill(
         cluster_weights: dict[tuple[Any, ...], list[float]] = defaultdict(list)
         for record in valid:
             cluster_size = max(1, counts[_consensus_key(record)])
-            correlation_discount = cluster_size ** (-consensus_power)
+            if precomputed_consensus_weight_field:
+                raw_discount = _get(
+                    record, precomputed_consensus_weight_field, default=None
+                )
+                try:
+                    correlation_discount = float(raw_discount)
+                except (TypeError, ValueError) as exc:
+                    raise SkillEstimationError(
+                        "precomputed consensus weight must be numeric"
+                    ) from exc
+                if not 0.0 < correlation_discount <= 1.0:
+                    raise SkillEstimationError(
+                        "precomputed consensus weight must lie in (0, 1]"
+                    )
+            else:
+                correlation_discount = cluster_size ** (-consensus_power)
             weight = time_decay_weight(_event_time(record), decision, half_life) * correlation_discount
             hit_value = 1.0 if bool(_get(record, "hit")) else 0.0
             weighted_hits += weight * hit_value

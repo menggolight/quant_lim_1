@@ -22,6 +22,14 @@ VALIDATION_CONTRACT_VERSION = "broker-report-extractor-validation.v3"
 VALID_DIMENSIONS = ("macro", "industry", "stock")
 METADATA_FIELDS = ("broker", "title", "date", "subject")
 EXTRACTION_FIELDS = ("variable", "direction", "value", "horizon")
+EVIDENCE_PROVENANCE_FIELDS = (
+    "extractor_version",
+    "evidence_source_kind",
+    "evidence_source_hash",
+    "evidence_parser_version",
+    "evidence_prompt_version",
+    "extractor_bundle_sha256",
+)
 
 
 class ValidationManifestError(ValueError):
@@ -36,6 +44,13 @@ def _get(record: Any, name: str, default: Any = "") -> Any:
 
 def _sha256_bytes(payload: bytes) -> str:
     return hashlib.sha256(payload).hexdigest()
+
+
+def _binding_time(value: Any) -> str:
+    if isinstance(value, datetime):
+        ensure_aware(value, "available_at")
+        return value.isoformat()
+    return str(value or "").strip()
 
 
 def claim_validation_payload_sha256(claim: Any) -> str:
@@ -78,6 +93,17 @@ def claim_validation_payload_sha256(claim: Any) -> str:
 def population_snapshot(
     reports: Iterable[Any],
 ) -> tuple[str, dict[tuple[str, str], dict[str, str]]]:
+    """Bind the full report population without requiring every report PDF.
+
+    Only the deterministic manual-review sample is allowed to require PDF
+    bytes.  Requiring ``pdf_sha256`` for the entire public listing population
+    would force tens of thousands of downloads and contradict the bounded
+    90-report validation contract.  The population identity therefore uses
+    stable source-record fields; the returned lookup retains an optional PDF
+    hash so :func:`load_validation_manifest` can require it for each selected
+    sample.
+    """
+
     records: dict[tuple[str, str], dict[str, str]] = {}
     for report in reports:
         dimension = str(_get(report, "dimension")).lower().strip()
@@ -93,10 +119,16 @@ def population_snapshot(
                 f"population report {report_id} lacks source record hash"
             )
         pdf_document_hash = str(_get(report, "pdf_sha256")).lower().strip()
-        if not re.fullmatch(r"[0-9a-f]{64}", pdf_document_hash):
+        if pdf_document_hash and not re.fullmatch(r"[0-9a-f]{64}", pdf_document_hash):
             raise ValidationManifestError(
-                f"population report {report_id} lacks verified PDF document hash"
+                f"population report {report_id} has an invalid PDF document hash"
             )
+        available_at_value = _get(report, "available_at")
+        if isinstance(available_at_value, datetime):
+            ensure_aware(available_at_value, "available_at")
+            available_at = available_at_value.isoformat()
+        else:
+            available_at = str(available_at_value).strip()
         records[key] = {
             "dimension": dimension,
             "report_id": report_id,
@@ -104,9 +136,21 @@ def population_snapshot(
             "pdf_document_hash": pdf_document_hash,
             "source_url": str(_get(report, "source_url")).strip(),
             "pdf_url": str(_get(report, "pdf_url")).strip(),
-            "available_at": str(_get(report, "available_at")).strip(),
+            "available_at": available_at,
         }
-    canonical = sorted(records.values(), key=lambda item: (item["dimension"], item["report_id"]))
+    canonical = sorted(
+        (
+            {
+                "dimension": item["dimension"],
+                "report_id": item["report_id"],
+                "source_record_hash": item["source_record_hash"],
+                "source_url": item["source_url"],
+                "available_at": item["available_at"],
+            }
+            for item in records.values()
+        ),
+        key=lambda item: (item["dimension"], item["report_id"]),
+    )
     body = json.dumps(
         canonical, ensure_ascii=False, sort_keys=True, separators=(",", ":")
     ).encode("utf-8")
@@ -249,7 +293,9 @@ def validate_claim_evidence_bindings(
             raise ValidationManifestError(
                 f"claim {claim_id} subject_id does not match its report"
             )
-        if _get(claim, "available_at") != _get(report, "available_at"):
+        if _binding_time(_get(claim, "available_at")) != _binding_time(
+            _get(report, "available_at")
+        ):
             raise ValidationManifestError(
                 f"claim {claim_id} available_at does not match its report"
             )
@@ -274,6 +320,8 @@ def load_validation_manifest(
     """Verify evidence and recompute each dimension's gate from row-level checks."""
 
     ensure_aware(as_of, "as_of")
+    report_rows = tuple(population_reports)
+    claim_rows = tuple(population_claims)
     resolved = Path(path)
     if not resolved.is_file():
         raise ValidationManifestError(f"validation manifest does not exist: {resolved}")
@@ -309,7 +357,7 @@ def load_validation_manifest(
             raise ValidationManifestError(f"validation manifest {field} mismatch")
     if not str(payload.get("sample_seed") or "").strip():
         raise ValidationManifestError("sample_seed is required")
-    population_hash, population = population_snapshot(population_reports)
+    population_hash, population = population_snapshot(report_rows)
     if str(payload.get("population_snapshot_hash") or "").lower() != population_hash:
         raise ValidationManifestError("population_snapshot_hash does not match current sample population")
     if not str(payload.get("reviewer") or "").strip():
@@ -321,14 +369,48 @@ def load_validation_manifest(
     if not isinstance(samples, list) or not samples:
         raise ValidationManifestError("samples must be a non-empty list")
 
+    expected_samples = deterministic_sample_ids(
+        population,
+        sample_seed=str(payload["sample_seed"]),
+        count_per_dimension=minimum_samples_per_dimension,
+    )
+    sampled_report_ids = {
+        report_id
+        for report_ids in expected_samples.values()
+        for report_id in report_ids
+    }
+    sampled_reports = tuple(
+        report
+        for report in report_rows
+        if str(_get(report, "report_id")).strip() in sampled_report_ids
+    )
+    sampled_claims = tuple(
+        claim
+        for claim in claim_rows
+        if str(_get(claim, "report_id")).strip() in sampled_report_ids
+    )
+    validate_claim_evidence_bindings(
+        sampled_claims,
+        sampled_reports,
+        expected_extractor_version=expected_versions["extractor_version"],
+        expected_extractor_bundle_sha256=expected_versions[
+            "extractor_bundle_sha256"
+        ],
+        expected_parser_version=expected_versions["parser_version"],
+        expected_prompt_version=expected_versions["prompt_version"],
+    )
+    population_evidence_kinds: dict[str, set[str]] = defaultdict(set)
+    for claim in claim_rows:
+        dimension = str(_get(claim, "dimension")).strip().lower()
+        evidence_kind = str(_get(claim, "evidence_source_kind")).strip()
+        if dimension in VALID_DIMENSIONS and evidence_kind:
+            population_evidence_kinds[dimension].add(evidence_kind)
+
     grouped: dict[str, list[Mapping[str, Any]]] = defaultdict(list)
     claims_by_report: dict[str, dict[str, dict[str, str]]] = defaultdict(dict)
-    population_report_ids = {report_id for _dimension, report_id in population}
-    for claim in population_claims:
+    for claim in sampled_claims:
         report_id = str(_get(claim, "report_id")).strip()
         claim_id = str(_get(claim, "claim_id")).strip()
-        if report_id not in population_report_ids:
-            continue
         if not claim_id or claim_id in claims_by_report[report_id]:
             raise ValidationManifestError(
                 f"population claims contain missing/duplicate claim_id for {report_id}"
@@ -339,12 +421,23 @@ def load_validation_manifest(
             "target_type": str(_get(claim, "target_type")).strip(),
             "evidence_span_sha256": _sha256_bytes(evidence_span.encode("utf-8")),
             "claim_payload_sha256": claim_validation_payload_sha256(claim),
+            "extractor_version": str(_get(claim, "extractor_version")).strip(),
+            "evidence_source_kind": str(
+                _get(claim, "evidence_source_kind")
+            ).strip(),
+            "evidence_source_hash": str(
+                _get(claim, "evidence_source_hash")
+            ).strip().lower(),
+            "evidence_parser_version": str(
+                _get(claim, "evidence_parser_version")
+            ).strip(),
+            "evidence_prompt_version": str(
+                _get(claim, "evidence_prompt_version")
+            ).strip(),
+            "extractor_bundle_sha256": str(
+                _get(claim, "extractor_bundle_sha256")
+            ).strip().lower(),
         }
-    expected_samples = deterministic_sample_ids(
-        population,
-        sample_seed=str(payload["sample_seed"]),
-        count_per_dimension=minimum_samples_per_dimension,
-    )
     seen_report_ids: set[tuple[str, str]] = set()
     for index, sample in enumerate(samples):
         if not isinstance(sample, Mapping):
@@ -387,6 +480,12 @@ def load_validation_manifest(
             raise ValidationManifestError(f"samples[{index}] is outside current population")
         if source_record_hash != population_record["source_record_hash"]:
             raise ValidationManifestError(f"samples[{index}] source record hash mismatch")
+        if not re.fullmatch(
+            r"[0-9a-f]{64}", population_record["pdf_document_hash"]
+        ):
+            raise ValidationManifestError(
+                f"samples[{index}] current sampled PDF has no verified document hash"
+            )
         if pdf_document_hash != population_record["pdf_document_hash"]:
             raise ValidationManifestError(f"samples[{index}] PDF document hash mismatch")
         if source_url != population_record["source_url"]:
@@ -413,6 +512,7 @@ def load_validation_manifest(
                 "target_type",
                 "evidence_span_sha256",
                 "claim_payload_sha256",
+                *EVIDENCE_PROVENANCE_FIELDS,
                 *EXTRACTION_FIELDS,
             }
             if not isinstance(check, Mapping) or set(check) != expected_fields:
@@ -447,6 +547,14 @@ def load_validation_manifest(
                 raise ValidationManifestError(
                     f"samples[{index}] claim payload hash does not match current scoring fields"
                 )
+            for provenance_field in EVIDENCE_PROVENANCE_FIELDS:
+                observed_value = str(check.get(provenance_field) or "").strip()
+                if provenance_field.endswith("sha256") or provenance_field == "evidence_source_hash":
+                    observed_value = observed_value.lower()
+                if observed_value != expected_claim[provenance_field]:
+                    raise ValidationManifestError(
+                        f"samples[{index}] {provenance_field} does not match current claim"
+                    )
             observed_claim_ids.add(claim_id)
         if observed_claim_ids != set(expected_claims):
             raise ValidationManifestError(
@@ -482,18 +590,58 @@ def load_validation_manifest(
             field_precision[field] = (
                 sum(decisions) / len(decisions) if decisions else 0.0
             )
-        passed = (
+        common_passed = (
             len(dimension_samples) >= int(minimum_samples_per_dimension)
             and metadata_rate == 1.0
-            and all(
-                field_counts[field] >= int(minimum_samples_per_dimension)
-                and field_precision[field] >= float(minimum_field_precision)
-                for field in EXTRACTION_FIELDS
-            )
             and all(
                 sample["claim_set_complete"] is True
                 for sample in dimension_samples
             )
+        )
+        observed_kinds = {
+            str(check["evidence_source_kind"])
+            for sample in dimension_samples
+            for check in sample["extraction_checks"]
+        }
+        # This v3 contract validates the PDF extractor named at the manifest
+        # root.  Structured source records may be reviewed alongside it, but
+        # they cannot substitute for thirty PDF decisions per field.  Every
+        # additional evidence channel present in the sample must independently
+        # meet the same threshold as well.
+        required_kinds = sorted(
+            observed_kinds
+            | population_evidence_kinds.get(dimension, set())
+            | {"textual/pdf"}
+        )
+        evidence_source_validation: dict[str, dict[str, Any]] = {}
+        for evidence_kind in required_kinds:
+            kind_precision: dict[str, float] = {}
+            kind_counts: dict[str, int] = {}
+            for field in EXTRACTION_FIELDS:
+                decisions = [
+                    bool(check[field])
+                    for sample in dimension_samples
+                    for check in sample["extraction_checks"]
+                    if check["evidence_source_kind"] == evidence_kind
+                ]
+                kind_counts[field] = len(decisions)
+                kind_precision[field] = (
+                    sum(decisions) / len(decisions) if decisions else 0.0
+                )
+            kind_passed = common_passed and all(
+                kind_counts[field] >= int(minimum_samples_per_dimension)
+                and kind_precision[field] >= float(minimum_field_precision)
+                for field in EXTRACTION_FIELDS
+            )
+            evidence_source_validation[evidence_kind] = {
+                "field_precision": min(kind_precision.values(), default=0.0),
+                "field_precision_by_field": kind_precision,
+                "field_decision_count": kind_counts,
+                "passed": kind_passed,
+            }
+        passed = common_passed and bool(evidence_source_validation) and all(
+            row["passed"] is True
+            for row in evidence_source_validation.values()
         )
         result[dimension] = {
             "sample_count": len(dimension_samples),
@@ -501,6 +649,15 @@ def load_validation_manifest(
             "field_precision": min(field_precision.values(), default=0.0),
             "field_precision_by_field": field_precision,
             "field_decision_count": field_counts,
+            "field_precision_by_evidence_kind": {
+                kind: dict(values["field_precision_by_field"])
+                for kind, values in evidence_source_validation.items()
+            },
+            "field_decision_count_by_evidence_kind": {
+                kind: dict(values["field_decision_count"])
+                for kind, values in evidence_source_validation.items()
+            },
+            "evidence_source_validation": evidence_source_validation,
             "claim_set_complete_rate": (
                 sum(sample["claim_set_complete"] is True for sample in dimension_samples)
                 / len(dimension_samples)
@@ -525,6 +682,7 @@ def load_validation_manifest(
 
 
 __all__ = [
+    "EVIDENCE_PROVENANCE_FIELDS",
     "EXTRACTION_FIELDS",
     "METADATA_FIELDS",
     "VALIDATION_CONTRACT_VERSION",

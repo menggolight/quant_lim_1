@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant-research-os.local/schemas/broker_report_extractor_review.v1.json",
+  "title": "Broker report extractor manual review export v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "contract_version",
+    "package_sha256",
+    "reviewer_id",
+    "reviewed_at",
+    "samples"
+  ],
+  "properties": {
+    "contract_version": {
+      "const": "broker-report-extractor-review.v1"
+    },
+    "package_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "reviewer_id": {
+      "type": "string",
+      "minLength": 2,
+      "maxLength": 128
+    },
+    "reviewed_at": {
+      "type": "string",
+      "format": "date-time"
+    },
+    "samples": {
+      "type": "array",
+      "minItems": 90,
+      "maxItems": 90,
+      "items": {
+        "$ref": "#/$defs/sample"
+      }
+    }
+  },
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "decision": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["decision", "corrected_value"],
+      "properties": {
+        "decision": {
+          "enum": ["pass", "correct", "reject"]
+        },
+        "corrected_value": {
+          "type": "string"
+        }
+      }
+    },
+    "metadata_reviews": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["broker", "title", "date", "subject"],
+      "properties": {
+        "broker": {"$ref": "#/$defs/decision"},
+        "title": {"$ref": "#/$defs/decision"},
+        "date": {"$ref": "#/$defs/decision"},
+        "subject": {"$ref": "#/$defs/decision"}
+      }
+    },
+    "claim_fields": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "subject_id",
+        "target_type",
+        "direction",
+        "value_min",
+        "value_max",
+        "unit",
+        "benchmark",
+        "forecast_period",
+        "horizon_days",
+        "evidence_span"
+      ],
+      "properties": {
+        "subject_id": {"$ref": "#/$defs/decision"},
+        "target_type": {"$ref": "#/$defs/decision"},
+        "direction": {"$ref": "#/$defs/decision"},
+        "value_min": {"$ref": "#/$defs/decision"},
+        "value_max": {"$ref": "#/$defs/decision"},
+        "unit": {"$ref": "#/$defs/decision"},
+        "benchmark": {"$ref": "#/$defs/decision"},
+        "forecast_period": {"$ref": "#/$defs/decision"},
+        "horizon_days": {"$ref": "#/$defs/decision"},
+        "evidence_span": {"$ref": "#/$defs/decision"}
+      }
+    },
+    "claim_review": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["claim_id", "fields"],
+      "properties": {
+        "claim_id": {"type": "string", "minLength": 1},
+        "fields": {"$ref": "#/$defs/claim_fields"}
+      }
+    },
+    "sample": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "report_id",
+        "dimension",
+        "metadata_reviews",
+        "claim_set_review",
+        "extraction_reviews"
+      ],
+      "properties": {
+        "report_id": {"type": "string", "minLength": 1},
+        "dimension": {"enum": ["macro", "industry", "stock"]},
+        "metadata_reviews": {"$ref": "#/$defs/metadata_reviews"},
+        "claim_set_review": {"$ref": "#/$defs/decision"},
+        "extraction_reviews": {
+          "type": "array",
+          "minItems": 0,
+          "items": {"$ref": "#/$defs/claim_review"}
+        }
+      }
+    }
+  }
+}

@@ -1,0 +1,38 @@
+{
+  "schema_version": "2.0",
+  "extends": "broker_report_audit.v1.json",
+  "model_id": "broker-report-audit-v2",
+  "status": "research_only_not_trade_eligible",
+  "research_only": true,
+  "automatic_trading_enabled": false,
+  "sources": {
+    "market": {
+      "provider": "baostock",
+      "truth_source_allowlist": [],
+      "csi300_instrument_id": "000300.SH",
+      "instrument_aliases": {
+        "CSI300": "000300.SH",
+        "沪深300": "000300.SH",
+        "沪深300指数": "000300.SH"
+      },
+      "industry_instrument_map": {},
+      "macro_target_instruments": {
+        "market_direction": "000300.SH"
+      },
+      "mapping_policy": "V2 does not infer Eastmoney BK identifiers or treat a provider name as official truth; industry mappings require separately admitted point-in-time evidence"
+    }
+  },
+  "market_data": {
+    "registry_config": "configs/market_data.v1.json",
+    "provider": "baostock",
+    "online_retrieval_mode": "historical_backfill",
+    "offline_retrieval_mode": "offline_replay",
+    "admitted_batch_statuses": [
+      "validated_research_only"
+    ],
+    "fallback_providers": [],
+    "provider_name_is_official_truth": false,
+    "whole_batch_only": true,
+    "allow_synthetic": false
+  }
+}
