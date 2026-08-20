@@ -1,0 +1,56 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/factor_hypothesis.v1.json",
+  "title": "Pre-registered factor hypothesis v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "hypothesis_id", "created_at", "decision_time",
+    "universe_version", "screen_index_ids", "confirm_index_ids", "benchmark_id",
+    "signal_name", "signal_definition", "direction", "horizons_trading_days",
+    "entry_price_policy", "exit_price_policy", "benchmark_policy", "required_fields",
+    "subjective_thesis_id", "subjective_thesis_sha256", "confounders",
+    "falsification_conditions", "status"
+  ],
+  "properties": {
+    "schema_version": {"const": "factor-hypothesis-v1"},
+    "hypothesis_id": {"type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$"},
+    "created_at": {"$ref": "#/$defs/dateTime"},
+    "decision_time": {"$ref": "#/$defs/dateTime"},
+    "universe_version": {"const": "csi-level1-screen-confirm-v1"},
+    "screen_index_ids": {"$ref": "#/$defs/industryIndexArray"},
+    "confirm_index_ids": {"$ref": "#/$defs/industryIndexArray"},
+    "benchmark_id": {"const": "000985.CSI"},
+    "signal_name": {"type": "string", "minLength": 1, "maxLength": 128},
+    "signal_definition": {"type": "string", "minLength": 1},
+    "direction": {"enum": ["positive", "negative", "two_sided"]},
+    "horizons_trading_days": {
+      "type": "array", "minItems": 1, "uniqueItems": true,
+      "items": {"type": "integer", "minimum": 1}
+    },
+    "entry_price_policy": {"enum": ["next_trading_session_close"]},
+    "exit_price_policy": {"enum": ["nth_future_trading_session_close"]},
+    "benchmark_policy": {"enum": ["same_sessions_same_price_field"]},
+    "required_fields": {
+      "type": "array", "minItems": 1, "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "subjective_thesis_id": {"type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$"},
+    "subjective_thesis_sha256": {"$ref": "#/$defs/sha256"},
+    "confounders": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "falsification_conditions": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+    "status": {"enum": ["preregistered", "retired"]}
+  },
+  "$defs": {
+    "dateTime": {
+      "type": "string", "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "indexId": {"type": "string", "pattern": "^[0-9]{6}\\.CSI$"},
+    "industryIndexArray": {
+      "type": "array", "minItems": 11, "maxItems": 11, "uniqueItems": true,
+      "items": {"$ref": "#/$defs/indexId"}
+    },
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

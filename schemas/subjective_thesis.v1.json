@@ -1,0 +1,57 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/subjective_thesis.v1.json",
+  "title": "Versioned user subjective thesis v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "thesis_id", "version", "parent_thesis_sha256",
+    "content_sha256", "created_at", "as_of", "author_scope", "statement",
+    "preferred_index_ids", "avoided_index_ids", "confidence_0_to_1",
+    "evidence_for", "evidence_against", "invalidation_conditions", "expires_at", "status"
+  ],
+  "properties": {
+    "schema_version": {"const": "subjective-thesis-v1"},
+    "thesis_id": {"type": "string", "pattern": "^[A-Za-z0-9._:-]{1,128}$"},
+    "version": {"type": "integer", "minimum": 1},
+    "parent_thesis_sha256": {
+      "oneOf": [
+        {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        {"type": "null"}
+      ]
+    },
+    "content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "created_at": {"$ref": "#/$defs/dateTime"},
+    "as_of": {"$ref": "#/$defs/dateTime"},
+    "author_scope": {"const": "user"},
+    "statement": {"type": "string"},
+    "preferred_index_ids": {"$ref": "#/$defs/indexArray"},
+    "avoided_index_ids": {"$ref": "#/$defs/indexArray"},
+    "confidence_0_to_1": {
+      "oneOf": [
+        {"type": "number", "minimum": 0, "maximum": 1},
+        {"type": "null"}
+      ]
+    },
+    "evidence_for": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "evidence_against": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "invalidation_conditions": {"type": "array", "items": {"type": "string", "minLength": 1}},
+    "expires_at": {
+      "oneOf": [
+        {"$ref": "#/$defs/dateTime"},
+        {"type": "null"}
+      ]
+    },
+    "status": {"enum": ["user_view_not_provided", "active", "expired", "withdrawn"]}
+  },
+  "$defs": {
+    "dateTime": {
+      "type": "string", "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "indexArray": {
+      "type": "array", "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[0-9]{6}\\.CSI$"}
+    }
+  }
+}

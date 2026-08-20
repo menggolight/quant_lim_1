@@ -1,0 +1,181 @@
+{
+  "schema_version": "factor-lab-config.v1",
+  "factor_hypothesis": {
+    "schema_version": "factor-hypothesis-v1",
+    "hypothesis_id": "csi11-relative-momentum-csi-same-source-holdout-v2",
+    "created_at": "2026-08-13T12:00:00+08:00",
+    "decision_time": "2026-08-13T12:00:00+08:00",
+    "universe_version": "csi-level1-screen-confirm-v1",
+    "screen_index_ids": [
+      "000986.CSI", "000987.CSI", "000988.CSI", "000989.CSI", "000990.CSI",
+      "000991.CSI", "932075.CSI", "000993.CSI", "000994.CSI", "000995.CSI", "932076.CSI"
+    ],
+    "confirm_index_ids": [
+      "932077.CSI", "932078.CSI", "932079.CSI", "932080.CSI", "932081.CSI",
+      "932082.CSI", "932083.CSI", "932084.CSI", "932085.CSI", "932086.CSI", "931775.CSI"
+    ],
+    "benchmark_id": "000985.CSI",
+    "signal_name": "CSI11 relative momentum same-source temporal/cross-generation holdout",
+    "signal_definition": "log(C_t/C_t-L)-log(B_t/B_t-L), L in {20,60,120} trading sessions",
+    "direction": "positive",
+    "horizons_trading_days": [20, 60, 120],
+    "entry_price_policy": "next_trading_session_close",
+    "exit_price_policy": "nth_future_trading_session_close",
+    "benchmark_policy": "same_sessions_same_price_field",
+    "required_fields": ["index_id", "trading_date", "close", "available_at", "source_record_id"],
+    "subjective_thesis_id": "csi11-user-view",
+    "subjective_thesis_sha256": "412d3e1ab4ee43be3caa67728a8a8e7555b68f3370727ce3358bbd5a5ee7f71a",
+    "confounders": [
+      "20-session labels overlap at weekly sampling frequency",
+      "screen and confirm share the same CSI source and may share corrections or construction conventions",
+      "legacy-series versus current-series definition drift",
+      "historical backfill is not an original decision-time capture",
+      "survivorship and point-in-time classification risk"
+    ],
+    "falsification_conditions": [
+      "screen family fails Holm-adjusted one-sided block-bootstrap gate",
+      "frozen winner fails current-series temporal/cross-generation holdout",
+      "leave-one-industry-out or contribution-concentration gates fail",
+      "result is represented as independent-source replication"
+    ],
+    "status": "preregistered"
+  },
+  "subjective_thesis_path": "configs/factor_hypotheses/subjective_thesis.csi11.v1.json",
+  "universe": {
+    "classification": "CSI_PRIMARY_11",
+    "point_in_time": true,
+    "benchmark": {"canonical_id": "CSI_ALL_SHARE", "name": "中证全指"},
+    "industries": [
+      {"canonical_id": "CSI_ENERGY", "name": "能源"},
+      {"canonical_id": "CSI_MATERIALS", "name": "原材料"},
+      {"canonical_id": "CSI_INDUSTRIALS", "name": "工业"},
+      {"canonical_id": "CSI_CONSUMER_DISCRETIONARY", "name": "可选消费"},
+      {"canonical_id": "CSI_CONSUMER_STAPLES", "name": "主要消费"},
+      {"canonical_id": "CSI_HEALTH_CARE", "name": "医药卫生"},
+      {"canonical_id": "CSI_FINANCIALS", "name": "金融"},
+      {"canonical_id": "CSI_INFORMATION_TECHNOLOGY", "name": "信息技术"},
+      {"canonical_id": "CSI_COMMUNICATION_SERVICES", "name": "通信服务"},
+      {"canonical_id": "CSI_UTILITIES", "name": "公用事业"},
+      {"canonical_id": "CSI_REAL_ESTATE", "name": "房地产"}
+    ],
+    "source_index_ids": {
+      "csi_legacy_screen": {
+        "CSI_ENERGY": "000986",
+        "CSI_MATERIALS": "000987",
+        "CSI_INDUSTRIALS": "000988",
+        "CSI_CONSUMER_DISCRETIONARY": "000989",
+        "CSI_CONSUMER_STAPLES": "000990",
+        "CSI_HEALTH_CARE": "000991",
+        "CSI_FINANCIALS": "932075",
+        "CSI_INFORMATION_TECHNOLOGY": "000993",
+        "CSI_COMMUNICATION_SERVICES": "000994",
+        "CSI_UTILITIES": "000995",
+        "CSI_REAL_ESTATE": "932076"
+      },
+      "csi_confirm": {
+        "CSI_ENERGY": "932077",
+        "CSI_MATERIALS": "932078",
+        "CSI_INDUSTRIALS": "932079",
+        "CSI_CONSUMER_DISCRETIONARY": "932080",
+        "CSI_CONSUMER_STAPLES": "932081",
+        "CSI_HEALTH_CARE": "932082",
+        "CSI_FINANCIALS": "932083",
+        "CSI_INFORMATION_TECHNOLOGY": "932084",
+        "CSI_COMMUNICATION_SERVICES": "932085",
+        "CSI_UTILITIES": "932086",
+        "CSI_REAL_ESTATE": "931775"
+      },
+      "benchmark": "000985"
+    }
+  },
+  "candidates": [
+    {"candidate_id": "RM20", "lookback_sessions": 20, "expected_sign": "positive", "formula": "log_industry_close_return_minus_log_benchmark_close_return"},
+    {"candidate_id": "RM60", "lookback_sessions": 60, "expected_sign": "positive", "formula": "log_industry_close_return_minus_log_benchmark_close_return"},
+    {"candidate_id": "RM120", "lookback_sessions": 120, "expected_sign": "positive", "formula": "log_industry_close_return_minus_log_benchmark_close_return"}
+  ],
+  "observation": {
+    "frequency": "weekly_last_trading_session",
+    "signal_price": "close",
+    "label": "next_session_close_to_20th_future_session_close",
+    "label_horizon_sessions": 20,
+    "complete_case": true
+  },
+  "stages": {
+    "screen": {
+      "total_weeks": 260,
+      "window_count": 5,
+      "weeks_per_window": 52,
+      "minimum_total_weeks": 220,
+      "minimum_weeks_per_window": 44,
+      "gates": {
+        "minimum_combined_mean_ic": 0.05,
+        "minimum_positive_ic_windows": 4,
+        "minimum_positive_spread_windows": 4,
+        "maximum_holm_p_value": 0.05
+      }
+    },
+    "confirm": {
+      "total_weeks": 104,
+      "window_count": 2,
+      "weeks_per_window": 52,
+      "minimum_total_weeks": 88,
+      "minimum_weeks_per_window": 44,
+      "gates": {
+        "minimum_combined_mean_ic": 0.05,
+        "minimum_positive_ic_windows": 2,
+        "bootstrap_lower_95_strictly_positive": true,
+        "minimum_combined_gross_spread": 0.0,
+        "minimum_positive_leave_one_industry_out_count": 10,
+        "maximum_permutation_p_value": 0.05,
+        "maximum_industry_contribution_share": 0.35
+      }
+    }
+  },
+  "statistics": {
+    "block_length_weeks": 5,
+    "resamples": 10000,
+    "familywise_alpha": 0.05,
+    "multiple_testing": "holm",
+    "permutation": "confirm_weekly_cross_sectional_label_shuffle",
+    "portfolio": {"long_count": 3, "short_count": 3}
+  },
+  "source_policy": {
+    "screen": {
+      "source_id": "csi",
+      "source_authority": "official",
+      "transport": "index_evidence_service",
+      "integrity_flag_required": true
+    },
+    "confirm": {
+      "source_id": "csi",
+      "source_authority": "official",
+      "transport": "factor_evidence_probe",
+      "integrity_flag_required": true
+    },
+    "weekly": {
+      "source_id": "csi",
+      "source_authority": "official",
+      "transport": "factor_evidence_probe",
+      "integrity_flag_required": true
+    },
+    "official_transport_status": "not_configured",
+    "reconciliation": {"mode": "not_applicable_same_source"}
+  },
+  "time_policy": {
+    "screen_signal_cutoff": "2023-03-10",
+    "confirm_series_inception": "2023-03-13",
+    "screen_labels_may_mature_after_cutoff": false
+  },
+  "winner_rule": {
+    "primary": "highest_median_window_ic_among_passers",
+    "near_tie_absolute_ic_difference_strictly_below": 0.01,
+    "near_tie_tiebreaker": "shorter_lookback",
+    "confirm_cannot_replace_screen_winner": true
+  },
+  "artifacts": [
+    "hypothesis_card.json", "universe_manifest.json", "source_reconciliation.csv",
+    "factor_observations.csv", "weekly_metrics.csv", "window_metrics.csv",
+    "exceptions.csv", "factor_report.md", "run_manifest.json"
+  ],
+  "safety": {"mode": "research_only", "live": "not_supported", "trading_bridge": "forbidden"}
+}

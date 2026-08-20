@@ -1,0 +1,19 @@
+{
+  "schema_version": "subjective-thesis-v1",
+  "thesis_id": "csi11-user-view",
+  "version": 1,
+  "parent_thesis_sha256": null,
+  "content_sha256": "d7df8684102285b5a8e0abd77caa3c675964e5b828f5a800de5ae02a65426a26",
+  "created_at": "2026-08-13T00:00:00+08:00",
+  "as_of": "2026-08-13T00:00:00+08:00",
+  "author_scope": "user",
+  "statement": "",
+  "preferred_index_ids": [],
+  "avoided_index_ids": [],
+  "confidence_0_to_1": null,
+  "evidence_for": [],
+  "evidence_against": [],
+  "invalidation_conditions": [],
+  "expires_at": null,
+  "status": "user_view_not_provided"
+}
