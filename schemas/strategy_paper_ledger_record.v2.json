@@ -1,0 +1,345 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "strategy_paper_ledger_record.v2.json",
+  "title": "Adaptive-exposure daily Paper ledger record v2",
+  "description": "One canonical JSONL record. Semantic replay in paper_ledger_v2.py remains authoritative for accounting, chronology, retry and risk-latch invariants.",
+  "oneOf": [
+    {"$ref": "#/$defs/headerRecord"},
+    {"$ref": "#/$defs/dailySessionRecord"}
+  ],
+  "$defs": {
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "decimal": {
+      "type": "string",
+      "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$"
+    },
+    "nonNegativeDecimal": {
+      "allOf": [
+        {"$ref": "#/$defs/decimal"},
+        {"pattern": "^(0|[1-9][0-9]*)(\\.[0-9]+)?$"}
+      ]
+    },
+    "headerContent": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "producer",
+        "status",
+        "created_at",
+        "strategy_id",
+        "policy_schema_version",
+        "policy_sha256",
+        "portfolio_intent_schema_version",
+        "controlled_trading_dates",
+        "controlled_calendar_sha256",
+        "initial_cash",
+        "drawdown_trigger",
+        "exposure_definition",
+        "manual_execution_required",
+        "auto_submit",
+        "live_supported",
+        "execution_authority"
+      ],
+      "properties": {
+        "schema_version": {"const": "strategy-paper-ledger-record.v2"},
+        "producer": {"const": "controlled-paper-ledger-v2"},
+        "status": {"const": "forward-paper-daily-append-only-not-live"},
+        "created_at": {"type": "string", "format": "date-time"},
+        "strategy_id": {"const": "a-share-small-account-adaptive-exposure-v2"},
+        "policy_schema_version": {"const": "strategy-adaptive-exposure-policy.v1"},
+        "policy_sha256": {"$ref": "#/$defs/sha256"},
+        "portfolio_intent_schema_version": {"const": "portfolio-intent.v1"},
+        "controlled_trading_dates": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "format": "date"}
+        },
+        "controlled_calendar_sha256": {"$ref": "#/$defs/sha256"},
+        "initial_cash": {"const": "10000.00"},
+        "drawdown_trigger": {"const": "0.12"},
+        "exposure_definition": {
+          "const": {
+            "target_gross_exposure": "closing_intent_target",
+            "feasible_gross_exposure": "post_constraint_evidenced_close_mark",
+            "realized_gross_exposure": "actual_post_fill_close_mark",
+            "p0_feasible_equals_realized": true
+          }
+        },
+        "manual_execution_required": {"const": true},
+        "auto_submit": {"const": false},
+        "live_supported": {"const": false},
+        "execution_authority": {"const": "none"}
+      },
+      "additionalProperties": false
+    },
+    "portfolioIntent": {
+      "type": "object",
+      "required": [
+        "schema_version",
+        "intent_id",
+        "strategy_id",
+        "intent_type",
+        "decision_at",
+        "available_at",
+        "frozen_at",
+        "target_gross_exposure",
+        "target_weights",
+        "reason_codes",
+        "signal_sha256",
+        "market_data_sha256",
+        "model_sha256",
+        "risk_state_sha256",
+        "intent_sha256",
+        "live_supported"
+      ],
+      "properties": {
+        "schema_version": {"const": "portfolio-intent.v1"},
+        "intent_id": {"type": "string", "minLength": 1},
+        "strategy_id": {"const": "a-share-small-account-adaptive-exposure-v2"},
+        "intent_type": {
+          "enum": [
+            "ALPHA_REBALANCE",
+            "NO_ALPHA_CASH",
+            "DEFENSIVE_REDUCTION",
+            "RISK_OFF",
+            "ACCOUNT_DRAWDOWN_EXIT",
+            "DATA_FAIL_CLOSED",
+            "MANUAL_PAUSE"
+          ]
+        },
+        "decision_at": {"type": "string", "format": "date-time"},
+        "available_at": {"type": "string", "format": "date-time"},
+        "frozen_at": {"type": "string", "format": "date-time"},
+        "target_gross_exposure": {"$ref": "#/$defs/nonNegativeDecimal"},
+        "target_weights": {
+          "type": "object",
+          "additionalProperties": {"$ref": "#/$defs/nonNegativeDecimal"}
+        },
+        "reason_codes": {
+          "type": "array",
+          "minItems": 1,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "signal_sha256": {"$ref": "#/$defs/sha256"},
+        "market_data_sha256": {"$ref": "#/$defs/sha256"},
+        "model_sha256": {"$ref": "#/$defs/sha256"},
+        "risk_state_sha256": {"$ref": "#/$defs/sha256"},
+        "intent_sha256": {"$ref": "#/$defs/sha256"},
+        "live_supported": {"const": false}
+      },
+      "additionalProperties": false
+    },
+    "executionAttempt": {
+      "type": "object",
+      "required": [
+        "attempt_id",
+        "intent_id",
+        "intent_sha256",
+        "instrument_id",
+        "side",
+        "status",
+        "requested_quantity",
+        "filled_quantity",
+        "execution_session",
+        "attempted_at",
+        "reference_open",
+        "fill_price",
+        "evidence_sha256",
+        "blocked_reason",
+        "manual_confirmed",
+        "auto_submitted",
+        "live_order_id",
+        "notional",
+        "commission",
+        "sell_tax",
+        "transfer_fee",
+        "slippage_cost",
+        "total_cost"
+      ],
+      "properties": {
+        "attempt_id": {"type": "string", "minLength": 1},
+        "intent_id": {"type": "string", "minLength": 1},
+        "intent_sha256": {"$ref": "#/$defs/sha256"},
+        "instrument_id": {"type": "string", "pattern": "^[0-9A-Z][0-9A-Z.]{2,31}$"},
+        "side": {"enum": ["BUY", "SELL"]},
+        "status": {"enum": ["FILLED", "PARTIAL", "UNFILLED"]},
+        "requested_quantity": {"type": "integer", "minimum": 1},
+        "filled_quantity": {"type": "integer", "minimum": 0},
+        "execution_session": {"type": "string", "format": "date"},
+        "attempted_at": {"type": "string", "format": "date-time"},
+        "reference_open": {"$ref": "#/$defs/nonNegativeDecimal"},
+        "fill_price": {
+          "oneOf": [
+            {"$ref": "#/$defs/nonNegativeDecimal"},
+            {"type": "null"}
+          ]
+        },
+        "evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "blocked_reason": {
+          "enum": [
+            null,
+            "t_plus_one",
+            "suspended",
+            "limit_down_locked",
+            "sellable_quantity",
+            "quote_stale",
+            "account_position_mismatch",
+            "broker_rejected"
+          ]
+        },
+        "manual_confirmed": {"const": true},
+        "auto_submitted": {"const": false},
+        "live_order_id": {"type": "null"},
+        "notional": {"$ref": "#/$defs/nonNegativeDecimal"},
+        "commission": {"$ref": "#/$defs/nonNegativeDecimal"},
+        "sell_tax": {"$ref": "#/$defs/nonNegativeDecimal"},
+        "transfer_fee": {"$ref": "#/$defs/nonNegativeDecimal"},
+        "slippage_cost": {"$ref": "#/$defs/nonNegativeDecimal"},
+        "total_cost": {"$ref": "#/$defs/nonNegativeDecimal"}
+      },
+      "additionalProperties": false
+    },
+    "positionMark": {
+      "type": "object",
+      "required": [
+        "instrument_id",
+        "quantity",
+        "close_price",
+        "price_source_sha256",
+        "market_value"
+      ],
+      "properties": {
+        "instrument_id": {"type": "string", "pattern": "^[0-9A-Z][0-9A-Z.]{2,31}$"},
+        "quantity": {"type": "integer", "minimum": 1},
+        "close_price": {"$ref": "#/$defs/nonNegativeDecimal"},
+        "price_source_sha256": {"$ref": "#/$defs/sha256"},
+        "market_value": {"$ref": "#/$defs/nonNegativeDecimal"}
+      },
+      "additionalProperties": false
+    },
+    "blockedExit": {
+      "type": "object",
+      "required": ["attempt_id", "instrument_id", "reason", "residual_quantity"],
+      "properties": {
+        "attempt_id": {"type": "string", "minLength": 1},
+        "instrument_id": {"type": "string", "pattern": "^[0-9A-Z][0-9A-Z.]{2,31}$"},
+        "reason": {
+          "enum": [
+            "t_plus_one",
+            "suspended",
+            "limit_down_locked",
+            "sellable_quantity",
+            "quote_stale",
+            "account_position_mismatch",
+            "broker_rejected"
+          ]
+        },
+        "residual_quantity": {"type": "integer", "minimum": 1}
+      },
+      "additionalProperties": false
+    },
+    "dailySessionContent": {
+      "type": "object",
+      "required": [
+        "trading_date",
+        "calendar_index",
+        "recorded_at",
+        "policy_sha256",
+        "controlled_calendar_sha256",
+        "mark_bundle_sha256",
+        "execution_intent",
+        "closing_intent",
+        "attempts",
+        "positions",
+        "cash",
+        "strategy_positions_value",
+        "strategy_nav",
+        "peak_nav",
+        "drawdown",
+        "target_gross_exposure",
+        "feasible_gross_exposure",
+        "realized_gross_exposure",
+        "blocked_exit_reasons",
+        "session_transaction_cost",
+        "cumulative_transaction_cost",
+        "risk_latched",
+        "risk_trigger_date",
+        "exit_pending",
+        "manual_execution_required",
+        "auto_submit",
+        "live_supported",
+        "execution_authority"
+      ],
+      "properties": {
+        "trading_date": {"type": "string", "format": "date"},
+        "calendar_index": {"type": "integer", "minimum": 0},
+        "recorded_at": {"type": "string", "format": "date-time"},
+        "policy_sha256": {"$ref": "#/$defs/sha256"},
+        "controlled_calendar_sha256": {"$ref": "#/$defs/sha256"},
+        "mark_bundle_sha256": {"$ref": "#/$defs/sha256"},
+        "execution_intent": {"$ref": "#/$defs/portfolioIntent"},
+        "closing_intent": {"$ref": "#/$defs/portfolioIntent"},
+        "attempts": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/executionAttempt"}
+        },
+        "positions": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/positionMark"}
+        },
+        "cash": {"$ref": "#/$defs/nonNegativeDecimal"},
+        "strategy_positions_value": {"$ref": "#/$defs/nonNegativeDecimal"},
+        "strategy_nav": {"$ref": "#/$defs/nonNegativeDecimal"},
+        "peak_nav": {"$ref": "#/$defs/nonNegativeDecimal"},
+        "drawdown": {"$ref": "#/$defs/nonNegativeDecimal"},
+        "target_gross_exposure": {"$ref": "#/$defs/nonNegativeDecimal"},
+        "feasible_gross_exposure": {"$ref": "#/$defs/nonNegativeDecimal"},
+        "realized_gross_exposure": {"$ref": "#/$defs/nonNegativeDecimal"},
+        "blocked_exit_reasons": {
+          "type": "array",
+          "items": {"$ref": "#/$defs/blockedExit"}
+        },
+        "session_transaction_cost": {"$ref": "#/$defs/nonNegativeDecimal"},
+        "cumulative_transaction_cost": {"$ref": "#/$defs/nonNegativeDecimal"},
+        "risk_latched": {"type": "boolean"},
+        "risk_trigger_date": {
+          "oneOf": [
+            {"type": "string", "format": "date"},
+            {"type": "null"}
+          ]
+        },
+        "exit_pending": {"type": "boolean"},
+        "manual_execution_required": {"const": true},
+        "auto_submit": {"const": false},
+        "live_supported": {"const": false},
+        "execution_authority": {"const": "none"}
+      },
+      "additionalProperties": false
+    },
+    "headerRecord": {
+      "type": "object",
+      "required": ["record_type", "content", "record_sha256"],
+      "properties": {
+        "record_type": {"const": "header"},
+        "content": {"$ref": "#/$defs/headerContent"},
+        "record_sha256": {"$ref": "#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    },
+    "dailySessionRecord": {
+      "type": "object",
+      "required": ["record_type", "previous_record_sha256", "content", "record_sha256"],
+      "properties": {
+        "record_type": {"const": "daily_session"},
+        "previous_record_sha256": {"$ref": "#/$defs/sha256"},
+        "content": {"$ref": "#/$defs/dailySessionContent"},
+        "record_sha256": {"$ref": "#/$defs/sha256"}
+      },
+      "additionalProperties": false
+    }
+  }
+}

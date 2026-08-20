@@ -16,6 +16,7 @@
 |---|---|---|---|
 | [D-20260820-01](#d-20260820-01-以仓库作为跨-agent-交接界面) | 2026-08-20 | `accepted` | 以仓库作为跨 Agent 交接界面 |
 | [D-20260820-02](#d-20260820-02-按证据价值清理仓库) | 2026-08-20 | `accepted` | 按证据价值清理仓库 |
+| [D-20260820-03](#d-20260820-03-隔离自适应仓位-v2-p0不替换质量成长-v1) | 2026-08-20 | `accepted` | 隔离自适应仓位V2 P0，不替换质量成长V1 |
 
 ## D-20260820-01 以仓库作为跨 Agent 交接界面
 
@@ -97,6 +98,55 @@ Strategy Workspace 是唯一默认策略主线，但仓库内的研报审计、F
 ### 重新评估条件
 
 当某项兼容能力由用户明确退役、其历史证据已迁移到可校验归档，或当前未提交实现形成可恢复 commit 后，可以按完整 capability slice 再做第二阶段瘦身。
+
+## D-20260820-03 隔离自适应仓位 V2 P0，不替换质量成长 V1
+
+- 日期：2026-08-20
+- 状态：`accepted`
+- 影响范围：策略版本、研究到执行契约、风险退出、Paper账本、样本外边界
+
+### 背景
+
+质量成长V1冻结Top2、20%最低现金、20日决策记录和既有政策哈希；原地扩展到0%—100%动态仓位、显式现金意图和日频风险退出会破坏历史重放。裸权重映射也无法区分“没有Alpha”“普通调仓”和“风险清仓”，而把所有卖出计入普通换手会在12%回撤后阻断必要退出。
+
+### 决策
+
+- 新建 `a-share-small-account-adaptive-exposure-v2`，保留V1配置、默认入口、Top2/20%现金和历史回测行为不变；历史结果与准入状态不跨版本转移。
+- 月净收益10%只作挑战报告，不是保证、模型损失函数、参数优化目标或准入门。
+- 使用版本化 `PortfolioIntent` 表达普通调仓、现金和风险退出；普通空目标拒绝，仅明确的现金/回撤退出类型可用空权重表达0%。
+- 从意图与账户状态推导订单风险方向。`RISK_REDUCING` / `FORCED_EXIT` 卖单豁免普通换手限制，但不豁免T+1、停牌、跌停、行情时效、账户完整性、可卖数量和幂等。
+- 分离稳定 `intent_id` 与逐受控执行时段 `attempt_id`：同一尝试重放幂等，后续交易日重试使用新attempt。
+- D日收盘首次达到12%回撤即粘滞锁定，按传入内部受控日历的下一session开盘开始退出，残仓逐session重试；12%是触发值，不是最大亏损保证。日历与执行报价均使用规范化payload哈希绑定，但在官方registry接入前不证明来源或日历无遗漏。该 latch 在当前受控账本和策略运行周期内永久有效，平仓只结束 `exit_pending`，不恢复买入。该语义只进入V2，不回写V1历史回测器。
+- 新建独立日频Paper账本V2，绑定政策和受控日历哈希；V1账本不原地扩展。账本只提供对账证据，不授予Paper或交易准入。
+- 固定Train 2018—2022、Validation 2023、Locked Test 2024—2025一次受控运行；V2规格冻结前的2026数据视为 `retrospective_consumed`。
+
+### 证据与真源
+
+- [自适应仓位V2规格](ADAPTIVE_EXPOSURE_V2.md)
+- [V2政策配置](../configs/strategy_adaptive_exposure.v2.json)
+- [PortfolioIntent Schema](../schemas/portfolio_intent.v1.json)
+- [Execution Plan Schema](../schemas/portfolio_execution_plan.v1.json)
+- [日频Paper账本Schema](../schemas/strategy_paper_ledger_record.v2.json)
+- [P0对抗测试](../tests/test_adaptive_exposure_p0.py)
+
+### 放弃的方案
+
+- 原地修改V1政策、历史回测器或账本：会改变既有重放语义。
+- 把普通空映射解释成清仓：无法区分缺数据、无Alpha和风险退出，容易误卖。
+- 让所有风险退出继续受普通换手上限：会使风险门本身阻止减仓。
+- 复用单一decision ID做跨日订单幂等：首日受阻的终态会堵死次日重试。
+
+### 后果与取舍
+
+- P0能表达并审计现金、局部受阻退出、D+1卖出和逐日重试，同时保持V1兼容。
+- 当前没有 latch reset、自动换新账本或恢复入场的标准编排；外部新生命周期必须另行形成受控证据，不能改写旧账本或自动提升Paper状态。
+- 普通Alpha当前只允许同session执行；D收盘Alpha到下一开盘的正式编排、官方日历/行情registry以及Gate approval对独立费率表的绑定尚未实现，均是Paper准入前的治理债。
+- 新Schema、SQLite字段和日频账本增加了契约面；必须保留迁移、防篡改和跨重启回归。
+- `p0_runtime_implemented_not_admitted` 只表示安全运行时实现，不代表Alpha/仓位模型、正式PIT回测、统计有效性或Paper准入。
+
+### 重新评估条件
+
+只有在Alpha与exposure engine参数预注册、受控实验V3冻结、完整Choice PIT数据和全收益基准准入、唯一Locked Test运行及前向Paper证据完成后，才能评估研究或Paper状态；任何核心参数变化形成新策略版本。
 
 ## 新增记录模板
 

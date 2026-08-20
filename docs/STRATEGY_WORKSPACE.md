@@ -2,6 +2,12 @@
 
 `research.strategy_workspace` 的默认主线是 `a-share-small-account-quality-growth-v1`。它面向真实资金决策设计，但只生成研究、Paper 账本和人工复核候选；仓库永久不支持 LIVE 下单。
 
+## 非默认的自适应仓位 V2 P0
+
+`a-share-small-account-adaptive-exposure-v2` 是与本页 V1 主线并存的独立 P0 切片，规格见[自适应仓位 V2](ADAPTIVE_EXPOSURE_V2.md)。它已实现显式 `PortfolioIntent`、0%—100%目标仓位、风险退出的普通换手豁免、按内部受控日历下一session开始清仓与逐日重试、跨重启幂等，以及绑定政策/日历哈希的独立日频 Paper 账本。
+
+这不改变本页 V1 的默认入口、Top2/20%最低现金、Experiment v2 或既有账本哈希；V2 也尚未实现 Alpha/仓位模型、受控实验 V3、正式 PIT 回测或信号适配。当前日历与报价哈希只证明传入payload内部一致，不证明官方来源或日历无遗漏；普通Alpha还仅允许同session执行，Gate approval也未直接绑定独立费率表。其 `contract_status=p0_runtime_implemented_not_admitted` 只描述P0内部契约实现，所有 Paper、交易、真实资金和 LIVE 状态仍关闭。
+
 ## 当前真实状态（2026-08-19）
 
 | 层级 | 状态 | 结论 |

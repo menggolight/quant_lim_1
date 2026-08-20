@@ -2,6 +2,8 @@
 
 `research/` 的唯一默认量化策略入口是 `python -m research.strategy_workspace`。当前主线为 A 股中证800质量成长 V1：六个首披财务因子、PIT截面残差化、固定线性模型、100万元 Top Decile与1万元Top2成本账本，以及append-only Paper账本内核。后者尚缺受控信号适配和日频盯市，不等于两阶段准入已跑通。研究模块不能调用券商写接口，也不能把诊断产物直接转换成订单。
 
+`research.strategy_workspace.adaptive_exposure` 与 `paper_ledger_v2` 是独立、非默认的自适应仓位V2 P0运行时：前者冻结并校验政策哈希，后者逐受控交易日重算Paper账户与风险退出证据。它们不生成Alpha或仓位状态，不读取锁定测试收益，不替代V1入口，也不授予Paper/交易权限。完整边界见[自适应仓位 V2](../docs/ADAPTIVE_EXPOSURE_V2.md)。
+
 ## 默认主线：Strategy Workspace
 
 ```powershell
@@ -18,7 +20,7 @@ python -m research.strategy_workspace quality-status `
 
 `ExperimentSpec v2` 还会冻结 Andrews 自动 HAC 滞后、最少2个可用时段、Holm `alpha=0.05`、验证/锁定测试/审计三段 Rank IC（均值>0、正值占比≥0.5）、因子在锁定测试与审计段同时显著、金融2因子/非金融6因子子模型及带截距 Ridge。降级诊断也只接受恰好800只当前中证800成分和匹配的成分/行业 receipt 与内容哈希。
 
-append-only Paper 账本已能重放费用、成交/未成交、持仓、现金和哈希链；但每决策点 signal/model/source 哈希仍由调用者提供，且缺日频NAV/回撤盯市，所以 Stage B 固定 `blocked_missing_controlled_paper_signal_adapter` 与 `blocked_missing_daily_paper_risk_marks`，当前不存在可达的真实资金候选。LIVE 永久不支持。
+质量成长V1的append-only Paper账本已能重放费用、成交/未成交、持仓、现金和哈希链；但每决策点 signal/model/source 哈希仍由调用者提供，且缺日频NAV/回撤盯市，所以其 Stage B 固定 `blocked_missing_controlled_paper_signal_adapter` 与 `blocked_missing_daily_paper_risk_marks`。V2独立日频账本不能反向补足V1证据；当前不存在可达的真实资金候选。LIVE 永久不支持。
 
 ## 非默认模块的统一边界
 

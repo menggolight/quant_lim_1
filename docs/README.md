@@ -5,6 +5,7 @@
 ## 当前入口
 
 - [量化策略工作区](STRATEGY_WORKSPACE.md)：唯一默认策略主线；A股质量成长六因子、Choice PIT门、Experiment v2、Top Decile/Top2账本、两阶段Paper与当前阻塞状态。
+- [自适应仓位 V2](ADAPTIVE_EXPOSURE_V2.md)：独立、非默认的P0安全切片；显式现金/退出意图、0%—100%仓位、风险退出优先、跨日幂等和日频Paper对账。尚无Alpha/仓位模型、正式回测或Paper准入。
 - [市场数据 V2](MARKET_DATA.md)：Strategy Workspace 的证据适配层；说明 Provider、时点、校验、准入、真实探针和离线回放。
 - [中证行业因子挖掘器 V1](FACTOR_LAB.md)：冻结兼容文档；旧候选、双轨指数和历史统计产物不再独立发展策略主线。
 - [项目架构与数据契约](ARCHITECTURE.md)：目录职责、依赖方向、时点、证据层和执行边界。
@@ -27,7 +28,7 @@
 - [交易执行层](../trading/README.md)
 - [外部集成](../integrations/README.md)
 
-Factor Lab V1、研报审计、行业雷达、个股诊断以及 `agent` 的 market observation/dashboard 保留用于证据、复现或兼容，不物理删除，也不能直接形成交易信号。当前质量成长主线因Choice未激活和PIT批次缺失而 `blocked_missing_pit_data`，未运行正式回测；旧 CSI `RM20` 负结果仅为反证。Paper 尚未准入，LIVE 永久不支持。
+Factor Lab V1、研报审计、行业雷达、个股诊断以及 `agent` 的 market observation/dashboard 保留用于证据、复现或兼容，不物理删除，也不能直接形成交易信号。当前质量成长主线虽已完成Choice只读诊断探针，但正式PIT批次仍缺失，因而保持 `blocked_missing_pit_data` 且未运行正式回测；旧 CSI `RM20` 负结果仅为反证。Paper 尚未准入，LIVE 永久不支持。
 
 ## 历史版本化规格与接入记录（冻结）
 

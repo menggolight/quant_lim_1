@@ -16,6 +16,8 @@ from trading.models import (
     LIVE_NOT_SUPPORTED_CODE,
     LIVE_NOT_SUPPORTED_MESSAGE,
     ExecutionMode,
+    PortfolioIntent,
+    PortfolioIntentType,
     is_live_execution_mode,
 )
 
@@ -52,18 +54,20 @@ def _reject(code: str, message: str) -> None:
     raise SignalRejected(code, message)
 
 
-def targets_from_signal(
+def _validate_signal(
     signal: SignalEnvelope,
     decision_time: datetime,
     mode: ExecutionMode,
-    maximum_age: timedelta = timedelta(hours=24),
-) -> dict[str, Decimal]:
-    """Validate provenance/admission and return weights, never orders."""
-
+    maximum_age: timedelta,
+) -> None:
     if is_live_execution_mode(mode):
         _reject(LIVE_NOT_SUPPORTED_CODE, LIVE_NOT_SUPPORTED_MESSAGE)
     if not isinstance(mode, ExecutionMode):
         _reject("invalid_execution_mode", "执行模式必须使用 ExecutionMode")
+    if decision_time.tzinfo is None:
+        _reject("invalid_decision_time", "决策时间必须包含时区")
+    if maximum_age < timedelta(0):
+        _reject("invalid_maximum_age", "最大信号时效不得为负")
     if signal.model_id == "industry-radar-r0" or signal.source_kind == "industry_radar":
         _reject("research_radar_not_trade_signal", "行业雷达只能产生研究候选，不能直接触发订单")
     if signal.synthetic:
@@ -90,11 +94,74 @@ def targets_from_signal(
     if signal.model_admission not in permitted_admissions[mode]:
         _reject(f"model_not_approved_for_{mode.value.lower()}", f"模型未获准进入 {mode.value} 阶段")
 
+
+def _validated_targets(signal: SignalEnvelope, *, allow_empty: bool) -> dict[str, Decimal]:
     targets = {instrument_id: Decimal(str(weight)) for instrument_id, weight in signal.target_weights.items()}
-    if not targets:
+    if not targets and not allow_empty:
         _reject("empty_targets", "信号没有目标权重")
     if any(weight < 0 for weight in targets.values()):
         _reject("negative_target_weight", "目标权重不得为负")
     if sum(targets.values(), Decimal("0")) > Decimal("1"):
         _reject("target_weight_sum_exceeded", "目标权重总和超过100%")
     return targets
+
+
+def targets_from_signal(
+    signal: SignalEnvelope,
+    decision_time: datetime,
+    mode: ExecutionMode,
+    maximum_age: timedelta = timedelta(hours=24),
+) -> dict[str, Decimal]:
+    """Compatibility boundary for ordinary alpha weights, never cash intent."""
+
+    _validate_signal(signal, decision_time, mode, maximum_age)
+    return _validated_targets(signal, allow_empty=False)
+
+
+def intent_from_signal(
+    signal: SignalEnvelope,
+    decision_time: datetime,
+    mode: ExecutionMode,
+    *,
+    strategy_id: str,
+    intent_type: PortfolioIntentType,
+    target_gross_exposure: Decimal | None = None,
+    reason_codes: tuple[str, ...],
+    signal_sha256: str,
+    model_sha256: str,
+    risk_state_sha256: str,
+    maximum_age: timedelta = timedelta(hours=24),
+) -> PortfolioIntent:
+    """Validate a signal and retain the intent semantics needed by the planner."""
+
+    _validate_signal(signal, decision_time, mode, maximum_age)
+    allow_empty = intent_type in {
+        PortfolioIntentType.NO_ALPHA_CASH,
+        PortfolioIntentType.RISK_OFF,
+        PortfolioIntentType.ACCOUNT_DRAWDOWN_EXIT,
+    }
+    targets = _validated_targets(signal, allow_empty=allow_empty)
+    exposure = (
+        Decimal(str(target_gross_exposure))
+        if target_gross_exposure is not None
+        else sum(targets.values(), Decimal("0"))
+    )
+    try:
+        return PortfolioIntent(
+            intent_id=signal.signal_id,
+            strategy_id=strategy_id,
+            intent_type=intent_type,
+            decision_at=decision_time,
+            available_at=signal.available_at,
+            frozen_at=signal.frozen_at,
+            target_gross_exposure=exposure,
+            target_weights=targets,
+            reason_codes=reason_codes,
+            signal_sha256=signal_sha256,
+            market_data_sha256=signal.data_snapshot_hash,
+            model_sha256=model_sha256,
+            risk_state_sha256=risk_state_sha256,
+        )
+    except ValueError as exc:
+        _reject("invalid_portfolio_intent", str(exc))
+    raise AssertionError("unreachable")

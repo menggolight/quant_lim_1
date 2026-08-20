@@ -13,6 +13,7 @@ from trading.models import (
     AccountSnapshot,
     ExecutionMode,
     InstrumentRule,
+    OrderRiskDirection,
     OrderStatus,
     OrderIntent,
     Position,
@@ -107,8 +108,18 @@ class PaperBroker:
             for order in plan.orders
             if self._order_store.status(order.client_order_id) is not OrderStatus.FILLED
         ]
-        pending_notional = sum((order.notional for order in pending_orders), Decimal("0"))
-        cumulative_turnover = (usage.notional + pending_notional) / plan.strategy_equity
+        pending_ordinary_notional = sum(
+            (
+                order.notional
+                for order in pending_orders
+                if order.risk_direction
+                not in {OrderRiskDirection.RISK_REDUCING, OrderRiskDirection.FORCED_EXIT}
+            ),
+            Decimal("0"),
+        )
+        cumulative_turnover = (
+            usage.ordinary_notional + pending_ordinary_notional
+        ) / plan.strategy_equity
         if cumulative_turnover > approval.turnover_limit:
             raise ValueError("Persisted daily turnover limit would be exceeded")
         if usage.order_count + len(pending_orders) > approval.max_orders_per_day:

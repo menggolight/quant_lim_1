@@ -24,6 +24,14 @@ python -m unittest discover -s tests -p "test_broker_report_audit*.py" -v
 python -m unittest discover -s tests -p "test_strategy_workspace*.py" -v
 ```
 
+自适应仓位 V2 P0 专项：
+
+```powershell
+python -m unittest tests.test_strategy_adaptive_exposure_policy tests.test_adaptive_exposure_p0 tests.test_strategy_workspace_paper_ledger_v2 -v
+```
+
+该组验证政策哈希、普通空意图拒绝、显式现金意图、风险退出普通换手豁免、物理受阻不连坐、intent/attempt跨重启幂等、旧SQLite迁移、账户CAS、规范化报价包、内部日历相邻性、费用后仓位上限、D日收盘触发后下一受控session退出、逐日重试、永久no-reentry latch，以及日频现金/持仓/NAV/回撤/三类仓位重放。它不包含Alpha/仓位模型、正式PIT数据、官方日历/行情registry或Locked Test运行；Gate approval也尚未直接绑定独立费率表，因此这些测试不能证明策略有效或Paper准入。
+
 该组覆盖精确六因子与首披时点、动态中证800成分、Choice完整覆盖门、Experiment v2防改写、train-only Ridge、D+1→D+21 open-to-open标签、20交易日 cadence/purge、100万元Top Decile研究账本、成功子样本拒绝、A股整手/停复牌/涨跌停/T+1、账户行业集中度、基础/压力成本、回撤/换手和 append-only Paper 账本重放。Choice 正式适配器、真实数据与正式回测尚未运行；Paper 每决策点 signal/model/source 哈希仍由调用者提供且缺日频 NAV/回撤盯市，因此这些测试不证明历史→12个月的两阶段准入已跑通，Stage B 依然 `blocked_missing_controlled_paper_signal_adapter` 与 `blocked_missing_daily_paper_risk_marks`。
 
 数据门的负向用例还要求 Choice receipt 枚举完整成分 `subject_ids`、中证800全收益 open/close 和 `single_quarter`/`consolidated`/`CNY` 财务口径；Experiment 覆盖 Andrews HAC、Holm、三段Rank IC及金融/非金融子模型的冻结检查。降级路径还验证两列当前成分与16列行业快照的独立导入/重放、800只逐项绑定、无有效日期行业不得升级为PIT、V2 `sample.json + manifest.json` 从双源artifact逐字节重建、恰好60只与exact 11行业、行业等覆盖不得冒充指数代表性，以及调用者自备universe JSON和占位receipt哈希不能绕过；产物始终保持 Paper/trade/real-money为 `false`、LIVE为 `not_supported`。单元测试通过不等于真实数据、统计效力、Paper准入或盈利。

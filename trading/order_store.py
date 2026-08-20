@@ -10,8 +10,14 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Mapping
 
-from trading.integrity import account_fingerprint
-from trading.models import AccountSnapshot, OrderStatus, Position, RebalancePlan
+from trading.integrity import account_fingerprint, is_lower_sha256
+from trading.models import (
+    AccountSnapshot,
+    OrderRiskDirection,
+    OrderStatus,
+    Position,
+    RebalancePlan,
+)
 
 
 FINAL_STATUSES = {
@@ -48,6 +54,10 @@ class InvalidOrderTransition(ValueError):
     pass
 
 
+class ConcurrentPaperAccountUpdate(RuntimeError):
+    pass
+
+
 @dataclass(frozen=True)
 class OrderEvent:
     sequence: int
@@ -62,6 +72,7 @@ class OrderEvent:
 class DailyUsage:
     order_count: int
     notional: Decimal
+    ordinary_notional: Decimal
 
 
 class OrderStore:
@@ -87,12 +98,28 @@ class OrderStore:
                     quantity INTEGER NOT NULL,
                     limit_price TEXT NOT NULL,
                     estimated_fee TEXT NOT NULL,
+                    intent_id TEXT NOT NULL DEFAULT '',
+                    attempt_id TEXT NOT NULL DEFAULT '',
+                    risk_direction TEXT NOT NULL DEFAULT 'RISK_NEUTRAL',
                     status TEXT NOT NULL,
                     created_at TEXT NOT NULL,
                     updated_at TEXT NOT NULL
                 )
                 """
             )
+            columns = {
+                row["name"]
+                for row in self._connection.execute("PRAGMA table_info(orders)").fetchall()
+            }
+            for name, definition in (
+                ("intent_id", "TEXT NOT NULL DEFAULT ''"),
+                ("attempt_id", "TEXT NOT NULL DEFAULT ''"),
+                ("risk_direction", "TEXT NOT NULL DEFAULT 'RISK_NEUTRAL'"),
+            ):
+                if name not in columns:
+                    self._connection.execute(
+                        f"ALTER TABLE orders ADD COLUMN {name} {definition}"
+                    )
             self._connection.execute(
                 """
                 CREATE TABLE IF NOT EXISTS paper_accounts (
@@ -144,6 +171,9 @@ class OrderStore:
                     order.quantity,
                     str(order.limit_price),
                     str(order.estimated_fee),
+                    order.intent_id,
+                    order.attempt_id,
+                    order.risk_direction.value,
                 )
                 if row is not None:
                     stored = tuple(
@@ -156,6 +186,9 @@ class OrderStore:
                             "quantity",
                             "limit_price",
                             "estimated_fee",
+                            "intent_id",
+                            "attempt_id",
+                            "risk_direction",
                         )
                     )
                     if stored != immutable:
@@ -165,8 +198,9 @@ class OrderStore:
                     """
                     INSERT INTO orders (
                         client_order_id, plan_id, strategy_id, instrument_id, side,
-                        quantity, limit_price, estimated_fee, status, created_at, updated_at
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                        quantity, limit_price, estimated_fee, intent_id, attempt_id,
+                        risk_direction, status, created_at, updated_at
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (order.client_order_id, *immutable, OrderStatus.PLANNED.value, timestamp, timestamp),
                 )
@@ -293,6 +327,74 @@ class OrderStore:
                 (account.strategy_id,),
             )
 
+    def reconcile_paper_account(
+        self,
+        account: AccountSnapshot,
+        event_time: datetime,
+        *,
+        expected_fingerprint: str,
+    ) -> None:
+        """Advance a Paper snapshot without silently changing economic state.
+
+        This is the explicit boundary used before a cross-session retry.  It may
+        refresh the snapshot identity/time and release previously unsellable
+        quantities, but cash, instruments, and total quantities must still
+        match the persisted ledger.
+        """
+
+        if event_time.tzinfo is None:
+            raise ValueError("event_time must be timezone-aware")
+        if not is_lower_sha256(expected_fingerprint):
+            raise ValueError("expected_fingerprint must be a lowercase SHA-256")
+        if not account.snapshot_id or account.as_of is None:
+            raise ValueError("Reconciled Paper account requires snapshot_id and as_of")
+        if account.as_of != event_time:
+            raise ValueError("Reconciled Paper account as_of must equal event_time")
+        persisted = self.load_paper_account(account.strategy_id)
+        if account_fingerprint(persisted) != expected_fingerprint:
+            raise ConcurrentPaperAccountUpdate(
+                "Paper account changed before reconciliation"
+            )
+        if account.cash != persisted.cash:
+            raise ValueError("Paper reconciliation cannot change cash")
+        if set(account.positions) != set(persisted.positions):
+            raise ValueError("Paper reconciliation cannot change held instruments")
+        for instrument_id, position in account.positions.items():
+            previous = persisted.positions[instrument_id]
+            if position.quantity != previous.quantity:
+                raise ValueError("Paper reconciliation cannot change total quantity")
+            if position.sellable_quantity < previous.sellable_quantity:
+                raise ValueError("Paper reconciliation cannot reduce sellable quantity")
+        if persisted.as_of is not None and account.as_of <= persisted.as_of:
+            raise ValueError("Paper reconciliation must advance snapshot time")
+
+        cash, positions_json, snapshot_id, as_of, fingerprint = self._account_values(
+            account
+        )
+        with self._connection:
+            cursor = self._connection.execute(
+                """
+                UPDATE paper_accounts
+                SET cash = ?, positions_json = ?, snapshot_id = ?, as_of = ?,
+                    fingerprint = ?, updated_at = ?
+                WHERE strategy_id = ? AND fingerprint = ?
+                """,
+                (
+                    cash,
+                    positions_json,
+                    snapshot_id,
+                    as_of,
+                    fingerprint,
+                    event_time.isoformat(),
+                    account.strategy_id,
+                    expected_fingerprint,
+                ),
+            )
+            if cursor.rowcount != 1:
+                raise ConcurrentPaperAccountUpdate(
+                    "Paper account changed during reconciliation"
+                )
+
     def load_paper_account(self, strategy_id: str) -> AccountSnapshot:
         row = self._connection.execute(
             "SELECT * FROM paper_accounts WHERE strategy_id = ?", (strategy_id,)
@@ -387,15 +489,31 @@ class OrderStore:
     def daily_usage(self, strategy_id: str, local_date: str) -> DailyUsage:
         rows = self._connection.execute(
             """
-            SELECT quantity, limit_price FROM orders
+            SELECT quantity, limit_price, risk_direction FROM orders
             WHERE strategy_id = ? AND status = ? AND substr(updated_at, 1, 10) = ?
             """,
             (strategy_id, OrderStatus.FILLED.value, local_date),
         ).fetchall()
+        notionals = [
+            (
+                Decimal(str(row["quantity"])) * Decimal(row["limit_price"]),
+                row["risk_direction"],
+            )
+            for row in rows
+        ]
         return DailyUsage(
             order_count=len(rows),
-            notional=sum(
-                (Decimal(str(row["quantity"])) * Decimal(row["limit_price"]) for row in rows),
+            notional=sum((value for value, _ in notionals), Decimal("0")),
+            ordinary_notional=sum(
+                (
+                    value
+                    for value, direction in notionals
+                    if direction
+                    not in {
+                        OrderRiskDirection.RISK_REDUCING.value,
+                        OrderRiskDirection.FORCED_EXIT.value,
+                    }
+                ),
                 Decimal("0"),
             ),
         )

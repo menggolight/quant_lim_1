@@ -6,6 +6,7 @@
 
 | 文件 | 职责 |
 |---|---|
+| `strategy_adaptive_exposure.v2.json` | A股1万元自适应仓位V2的P0契约：月净收益10%仅作挑战报告，目标总仓位0%—100%、显式现金意图、风险退出优先和严格样本外边界；P0安全运行时已实现，但未实现Alpha/仓位模型且不具备Paper或交易准入 |
 | `strategy_quality_growth.v1.json` | A股1万元质量成长V1的六因子、PIT数据门、Top2仓位、成本、风险、历史门、Paper与降级诊断真源；当前 `blocked_missing_pit_data` |
 | `market_data.v1.json` | BaoStock 默认主源、Provider allowlist、dataset-specific admission、整批 fallback、三层存储和可选核验政策 |
 | `factor_hypotheses/csi11_relative_momentum.v1.json` | Factor Lab V1 的三候选、公式、双轨指数、标签、Screen/Confirm 窗口与不可变门槛 |
@@ -33,6 +34,7 @@
 - Factor Lab `confirm` 只能读取冻结卡；增加候选、修改窗口、门槛、标签、基准或 holdout 均须新建版本，不能覆盖 V1。
 - 配置中只能记录环境变量名，不得保存密码、账户、Token、Cookie、验证码或绑定秘密。
 - Provider `enabled=true` 只表示允许 Registry 选择，不表示 SDK 已安装、网络可达或数据已准入。
-- V1 配置保留历史语义；V2 通过新增配置成为默认，不能静默改写 V1。
+- V1 配置保留历史语义；V2 只能通过新增配置演进，且在运行时、迁移和回归证据完成前不能成为默认，更不能静默改写 V1。
+- 自适应仓位 V2 的 `10%` 月收益目标只能进入报告，不能成为收益保证、模型损失函数、参数优化目标或布尔准入门；P0安全运行时存在也不代表策略有效、数据已准入或Paper已获准。
 - LIVE 永久不支持。任何 `execution_status="live"`、令牌、白名单或 readiness 都不能由配置打开。
 - 修改后运行对应专项测试和完整测试，并核对 README、Schema 与 CLI 默认值一致。

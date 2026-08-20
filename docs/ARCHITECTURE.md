@@ -28,8 +28,9 @@ flowchart TD
     D -->|通过| F["dataset-specific admission"]
     F -->|研究准入| G["validated snapshot"]
     G --> H["研究、评价与只读展示"]
-    H --> I["显式 Signal Contract"]
-    I --> J["Paper / Read-only Shadow"]
+    H --> I["显式 Signal / PortfolioIntent"]
+    I --> J["Execution Plan + Risk Gate"]
+    J --> K["Paper / Read-only Shadow"]
 ```
 
 关键约束：
@@ -39,6 +40,8 @@ flowchart TD
 - 报告来源、市场数据 Provider、真实上游和真值来源分别记录，不能用一个 `source` 字段混为一谈。
 - `research/` 不依赖券商写接口；`trading/` 不解析原始研报、Markdown 或行业榜。
 - 券商完整账户与策略账本分离，未显式划入的长期持仓不得被策略认领。
+
+自适应仓位V2在兼容V1裸权重入口之外新增 `PortfolioIntent`：普通空目标失败关闭，只有明确现金/退出意图可表达0%目标。计划器从意图和账户状态推导订单风险方向，使用稳定 `intent_id` 与逐日 `attempt_id` 区分同次重放和跨日退出重试；调用方不能仅靠自报枚举绕过普通换手。独立日频Paper账本从前态、证据绑定成交和收盘估值重算账户，不反向授权风险门或券商边界。
 
 ## 4. 市场数据生命周期
 
