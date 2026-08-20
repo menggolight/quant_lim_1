@@ -280,7 +280,7 @@ class SmallAccountTradingTest(unittest.TestCase):
         self.assertLessEqual(len(plan.orders), 2)
         self.assertIn("max_position_count", {item.code for item in plan.rejections})
 
-    def test_execution_gate_blocks_kill_switch_and_unreported_live_trading(self):
+    def test_execution_gate_blocks_kill_switch_and_live_permanently(self):
         account = AccountSnapshot(strategy_id="paper-10k", cash=D("10000"), positions={})
         plan = build_rebalance_plan(
             account=account,
@@ -324,16 +324,12 @@ class SmallAccountTradingTest(unittest.TestCase):
 
         self.assertTrue(paper.allowed)
         self.assertFalse(live.allowed)
-        live_codes = set(live.block_codes)
-        self.assertIn("programmatic_report_missing", live_codes)
-        self.assertIn("broker_api_not_authorized", live_codes)
-        self.assertIn("paper_stage_incomplete", live_codes)
-        self.assertIn("shadow_stage_incomplete", live_codes)
-        self.assertIn("live_enable_token_missing", live_codes)
+        self.assertEqual(live.block_codes, ("live_not_supported",))
+        self.assertIsNone(live.approval)
         self.assertFalse(killed.allowed)
         self.assertIn("kill_switch_active", set(killed.block_codes))
 
-    def test_live_gate_opens_only_after_all_stages_and_explicit_unlock(self):
+    def test_live_gate_stays_closed_with_forged_readiness_and_allowlist(self):
         account = AccountSnapshot(strategy_id="paper-10k", cash=D("10000"), positions={})
         plan = build_rebalance_plan(
             account=account,
@@ -355,8 +351,6 @@ class SmallAccountTradingTest(unittest.TestCase):
             paper_started_at=NOW - timedelta(days=91),
             paper_trade_events=30,
             shadow_sessions=5,
-            live_enable_token="ENABLE_LIVE_ORDERS",
-            live_adapter_implemented=True,
         )
 
         result = ExecutionGate(live_limits).evaluate(
@@ -369,8 +363,40 @@ class SmallAccountTradingTest(unittest.TestCase):
             readiness=readiness,
         )
 
+        self.assertFalse(result.allowed)
+        self.assertEqual(result.block_codes, ("live_not_supported",))
+        self.assertIsNone(result.approval)
+
+    def test_shadow_gate_remains_available_after_paper_stage(self):
+        account = AccountSnapshot(strategy_id="paper-10k", cash=D("10000"), positions={})
+        plan = build_rebalance_plan(
+            account=account,
+            target_weights={"ETF_A": D("0.30")},
+            instruments={"ETF_A": etf("ETF_A")},
+            quotes={"ETF_A": quote("ETF_A", "2")},
+            fees=fee_schedule(),
+            limits=risk_limits(),
+            decision_time=NOW,
+            bootstrap=True,
+        )
+
+        result = ExecutionGate(risk_limits()).evaluate(
+            mode=ExecutionMode.SHADOW,
+            plan=plan,
+            account=account,
+            decision_time=NOW,
+            daily_pnl_ratio=D("0"),
+            kill_switch_active=False,
+            readiness=LiveReadiness(
+                paper_started_at=NOW - timedelta(days=91),
+                paper_trade_events=30,
+            ),
+        )
+
         self.assertTrue(result.allowed)
         self.assertEqual(result.block_codes, ())
+        self.assertIsNotNone(result.approval)
+        self.assertIs(result.approval.mode, ExecutionMode.SHADOW)
 
     def test_any_partial_plan_rejection_blocks_execution(self):
         account = AccountSnapshot(strategy_id="paper-10k", cash=D("10000"), positions={})

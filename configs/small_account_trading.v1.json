@@ -2,7 +2,7 @@
   "schema_version": "1.0",
   "strategy_id": "small-account-etf-v0",
   "execution_status": "paper_only",
-  "description": "1万元独立策略账本；ETF、低换手、只做多；当前严禁实盘下单。",
+  "description": "1万元独立策略账本；ETF、低换手、只做多；仓库永久不支持LIVE或真实委托。",
   "capital": {
     "strategy_capital_limit": "10000",
     "cash_reserve_ratio": "0.10",
@@ -21,11 +21,11 @@
     "turnaround_policy": "per_instrument_metadata"
   },
   "fee_assumption": {
-    "commission_rate": "0.0003",
+    "commission_rate": "0.00018",
     "minimum_commission": "5",
     "exchange_fee_rate": "0",
-    "verified_for_user_account": false,
-    "note": "仅用于保守纸面验证；实盘前必须用华泰交割单或客服确认ETF实际佣金及最低收费。"
+    "verified_for_user_account": true,
+    "note": "用户已确认账户佣金为万1.8且单笔最低5元；税费、滑点及品种差异仍须在研究运行中单独披露，不得用于自动实盘。"
   },
   "risk": {
     "minimum_trade_notional": "2000",
@@ -45,16 +45,6 @@
   "stage_gates": {
     "paper_minimum_calendar_days": 90,
     "paper_minimum_trade_events": 30,
-    "shadow_minimum_sessions": 5,
-    "programmatic_trade_report_required": true,
-    "official_broker_api_required": true,
-    "explicit_live_unlock_required": true
-  },
-  "live_readiness": {
-    "broker": "华泰证券",
-    "broker_adapter": null,
-    "broker_api_authorized": false,
-    "programmatic_report_confirmed": false,
-    "live_order_submission_enabled": false
+    "shadow_minimum_sessions": 5
   }
 }

@@ -9,6 +9,7 @@ from pathlib import Path
 from typing import Any
 
 from trading.costs import FeeSchedule
+from trading.models import LiveNotSupportedError, is_live_execution_mode
 from trading.risk import RiskLimits
 
 
@@ -23,6 +24,14 @@ class TradingConfig:
     broker_adapter: str | None
     live_order_submission_enabled: bool
     raw: dict[str, Any]
+
+    def __post_init__(self) -> None:
+        if is_live_execution_mode(self.execution_status):
+            raise LiveNotSupportedError()
+        if self.execution_status not in {"paper_only", "shadow_only"}:
+            raise ValueError("Invalid execution_status")
+        if self.broker_adapter is not None or self.live_order_submission_enabled is not False:
+            raise LiveNotSupportedError()
 
 
 def _decimal(value: Any, field: str) -> Decimal:
@@ -43,14 +52,16 @@ def load_trading_config(path: Path | str) -> TradingConfig:
     payload = json.loads(source.read_text(encoding="utf-8"))
     if payload.get("schema_version") != "1.0":
         raise ValueError("Unsupported trading config schema")
-    if payload.get("execution_status") not in {"paper_only", "shadow_only", "live"}:
+    execution_status = payload.get("execution_status")
+    if is_live_execution_mode(execution_status):
+        raise LiveNotSupportedError()
+    if execution_status not in {"paper_only", "shadow_only"}:
         raise ValueError("Invalid execution_status")
 
     capital = payload["capital"]
     universe = payload["universe"]
     fee = payload["fee_assumption"]
     risk = payload["risk"]
-    readiness = payload["live_readiness"]
     fees = FeeSchedule(
         commission_rate=_decimal(fee["commission_rate"], "commission_rate"),
         minimum_commission=_decimal(fee["minimum_commission"], "minimum_commission"),
@@ -79,24 +90,15 @@ def load_trading_config(path: Path | str) -> TradingConfig:
     )
     config = TradingConfig(
         strategy_id=str(payload["strategy_id"]),
-        execution_status=str(payload["execution_status"]),
+        execution_status=str(execution_status),
         fees=fees,
         limits=limits,
         fee_verified_for_user_account=_boolean(
             fee["verified_for_user_account"], "verified_for_user_account"
         ),
         real_trading_whitelist=tuple(universe["real_trading_whitelist"]),
-        broker_adapter=readiness["broker_adapter"],
-        live_order_submission_enabled=_boolean(
-            readiness["live_order_submission_enabled"], "live_order_submission_enabled"
-        ),
+        broker_adapter=None,
+        live_order_submission_enabled=False,
         raw=payload,
     )
-    if config.execution_status == "live":
-        if not config.fee_verified_for_user_account:
-            raise ValueError("Live config requires verified account fees")
-        if not config.real_trading_whitelist:
-            raise ValueError("Live config requires a non-empty trading whitelist")
-        if not config.broker_adapter or not config.live_order_submission_enabled:
-            raise ValueError("Live config requires an enabled official broker adapter")
     return config

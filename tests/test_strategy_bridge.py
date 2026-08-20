@@ -55,11 +55,30 @@ class StrategyBridgeTest(unittest.TestCase):
 
         self.assertEqual(targets, {"ETF_A": Decimal("0.30")})
 
-    def test_live_requires_separate_model_admission(self):
-        with self.assertRaises(SignalRejected) as caught:
-            targets_from_signal(signal(), decision_time=NOW, mode=ExecutionMode.LIVE)
+    def test_shadow_admission_remains_available(self):
+        targets = targets_from_signal(
+            signal(model_admission="approved_for_shadow"),
+            decision_time=NOW,
+            mode=ExecutionMode.SHADOW,
+        )
 
-        self.assertEqual(caught.exception.code, "model_not_approved_for_live")
+        self.assertEqual(targets, {"ETF_A": Decimal("0.30")})
+
+    def test_live_is_permanently_unsupported_for_enum_and_strings(self):
+        for mode in (ExecutionMode.LIVE, "LIVE", "live"):
+            with self.subTest(mode=mode):
+                with self.assertRaises(SignalRejected) as caught:
+                    targets_from_signal(
+                        signal(model_admission="approved_for_live"),
+                        decision_time=NOW,
+                        mode=mode,  # type: ignore[arg-type]
+                    )
+
+                self.assertEqual(caught.exception.code, "live_not_supported")
+                self.assertEqual(
+                    str(caught.exception),
+                    "LIVE execution is not supported by this repository",
+                )
 
 
 if __name__ == "__main__":

@@ -9,9 +9,12 @@ from pathlib import Path
 from trading.config import load_trading_config
 from trading.costs import FeeSchedule
 from trading.models import (
+    LIVE_NOT_SUPPORTED_CODE,
+    LIVE_NOT_SUPPORTED_MESSAGE,
     AccountSnapshot,
     ExecutionMode,
     InstrumentRule,
+    LiveNotSupportedError,
     MarketQuote,
     OrderIntent,
     Position,
@@ -20,7 +23,7 @@ from trading.models import (
 from trading.order_store import OrderStore
 from trading.paper import PaperBroker
 from trading.planner import build_rebalance_plan
-from trading.risk import ExecutionGate, LiveReadiness, RiskLimits
+from trading.risk import ExecutionApproval, ExecutionGate, LiveReadiness, RiskLimits
 from trading.strategy_bridge import SignalEnvelope
 
 
@@ -115,7 +118,7 @@ class ExecutionBoundaryTest(unittest.TestCase):
         )
 
         self.assertFalse(result.allowed)
-        self.assertEqual(result.block_codes, ("invalid_execution_mode",))
+        self.assertEqual(result.block_codes, (LIVE_NOT_SUPPORTED_CODE,))
         self.assertIsNone(result.approval)
 
     def test_string_false_cannot_impersonate_live_readiness(self):
@@ -126,15 +129,30 @@ class ExecutionBoundaryTest(unittest.TestCase):
                 account_fee_schedule_verified="false",  # type: ignore[arg-type]
                 account_reconciled="false",  # type: ignore[arg-type]
                 trading_universe_frozen="false",  # type: ignore[arg-type]
-                live_adapter_implemented="false",  # type: ignore[arg-type]
             )
+
+    def test_live_approval_cannot_be_constructed_directly(self):
+        with self.assertRaises(LiveNotSupportedError) as caught:
+            ExecutionApproval(
+                mode=ExecutionMode.LIVE,
+                plan_fingerprint="plan",
+                account_fingerprint="account",
+                issued_at=NOW,
+                valid_until=NOW + timedelta(seconds=60),
+                turnover_limit=D("0.25"),
+                max_orders_per_day=3,
+                _issuer=object(),
+            )
+
+        self.assertEqual(caught.exception.code, LIVE_NOT_SUPPORTED_CODE)
+        self.assertEqual(str(caught.exception), LIVE_NOT_SUPPORTED_MESSAGE)
 
     def test_string_false_cannot_impersonate_trade_eligibility(self):
         with self.assertRaisesRegex(ValueError, "signal flags must be booleans"):
             SignalEnvelope(
                 signal_id="bad-signal",
                 model_id="model",
-                model_admission="approved_for_live",
+                model_admission="approved_for_paper",
                 source_kind="point_in_time_market_data",
                 available_at=NOW,
                 frozen_at=NOW,
@@ -270,16 +288,38 @@ class ExecutionBoundaryTest(unittest.TestCase):
                 decision_id="mapping-test",
             )
 
-    def test_config_rejects_string_false_as_boolean(self):
+    def test_config_rejects_live_even_with_legacy_unlock_fields(self):
         payload = json.loads(
             (ROOT / "configs" / "small_account_trading.v1.json").read_text(encoding="utf-8")
         )
-        payload["live_readiness"]["live_order_submission_enabled"] = "false"
+        payload["fee_assumption"]["verified_for_user_account"] = True
+        payload["universe"]["real_trading_whitelist"] = ["ETF_A"]
+        payload["live_readiness"] = {
+            "broker_adapter": "forged-official-adapter",
+            "broker_api_authorized": True,
+            "programmatic_report_confirmed": True,
+            "live_order_submission_enabled": True,
+        }
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "bad.json"
-            path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
-            with self.assertRaisesRegex(ValueError, "JSON boolean"):
-                load_trading_config(path)
+            for status in ("live", "LIVE", " live "):
+                with self.subTest(status=status):
+                    payload["execution_status"] = status
+                    path.write_text(json.dumps(payload, ensure_ascii=False), encoding="utf-8")
+                    with self.assertRaises(LiveNotSupportedError) as caught:
+                        load_trading_config(path)
+                    self.assertEqual(caught.exception.code, LIVE_NOT_SUPPORTED_CODE)
+                    self.assertEqual(str(caught.exception), LIVE_NOT_SUPPORTED_MESSAGE)
+
+    def test_loaded_config_cannot_be_replaced_with_a_live_representation(self):
+        config = load_trading_config(ROOT / "configs" / "small_account_trading.v1.json")
+        for changes in (
+            {"execution_status": "live"},
+            {"broker_adapter": "forged-adapter"},
+            {"live_order_submission_enabled": True},
+        ):
+            with self.subTest(changes=changes), self.assertRaises(LiveNotSupportedError):
+                replace(config, **changes)
 
     def test_bootstrap_allowance_is_persisted_and_one_time(self):
         account, instruments, first_plan = make_plan(decision_id="bootstrap-1")

@@ -20,6 +20,23 @@ class ExecutionMode(str, Enum):
     LIVE = "LIVE"
 
 
+LIVE_NOT_SUPPORTED_CODE = "live_not_supported"
+LIVE_NOT_SUPPORTED_MESSAGE = "LIVE execution is not supported by this repository"
+
+
+class LiveNotSupportedError(ValueError):
+    code = LIVE_NOT_SUPPORTED_CODE
+
+    def __init__(self) -> None:
+        super().__init__(LIVE_NOT_SUPPORTED_MESSAGE)
+
+
+def is_live_execution_mode(value: object) -> bool:
+    """Recognize legacy enum/string LIVE inputs so every boundary can reject them."""
+
+    return isinstance(value, str) and value.strip().upper() == ExecutionMode.LIVE.value
+
+
 class OrderStatus(str, Enum):
     PLANNED = "PLANNED"
     BLOCKED = "BLOCKED"

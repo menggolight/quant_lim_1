@@ -12,7 +12,12 @@ from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import Mapping
 
-from trading.models import ExecutionMode
+from trading.models import (
+    LIVE_NOT_SUPPORTED_CODE,
+    LIVE_NOT_SUPPORTED_MESSAGE,
+    ExecutionMode,
+    is_live_execution_mode,
+)
 
 
 @dataclass(frozen=True)
@@ -55,6 +60,10 @@ def targets_from_signal(
 ) -> dict[str, Decimal]:
     """Validate provenance/admission and return weights, never orders."""
 
+    if is_live_execution_mode(mode):
+        _reject(LIVE_NOT_SUPPORTED_CODE, LIVE_NOT_SUPPORTED_MESSAGE)
+    if not isinstance(mode, ExecutionMode):
+        _reject("invalid_execution_mode", "执行模式必须使用 ExecutionMode")
     if signal.model_id == "industry-radar-r0" or signal.source_kind == "industry_radar":
         _reject("research_radar_not_trade_signal", "行业雷达只能产生研究候选，不能直接触发订单")
     if signal.synthetic:
@@ -75,9 +84,8 @@ def targets_from_signal(
         _reject("signal_stale", "信号超过最大允许时效")
 
     permitted_admissions = {
-        ExecutionMode.PAPER: {"approved_for_paper", "approved_for_shadow", "approved_for_live"},
-        ExecutionMode.SHADOW: {"approved_for_shadow", "approved_for_live"},
-        ExecutionMode.LIVE: {"approved_for_live"},
+        ExecutionMode.PAPER: {"approved_for_paper", "approved_for_shadow"},
+        ExecutionMode.SHADOW: {"approved_for_shadow"},
     }
     if signal.model_admission not in permitted_admissions[mode]:
         _reject(f"model_not_approved_for_{mode.value.lower()}", f"模型未获准进入 {mode.value} 阶段")

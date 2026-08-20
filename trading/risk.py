@@ -8,7 +8,15 @@ from decimal import Decimal
 
 from trading.costs import money
 from trading.integrity import account_fingerprint, plan_fingerprint
-from trading.models import AccountSnapshot, ExecutionMode, RebalancePlan, Side
+from trading.models import (
+    LIVE_NOT_SUPPORTED_CODE,
+    AccountSnapshot,
+    ExecutionMode,
+    LiveNotSupportedError,
+    RebalancePlan,
+    Side,
+    is_live_execution_mode,
+)
 
 
 @dataclass(frozen=True)
@@ -59,8 +67,6 @@ class LiveReadiness:
     paper_started_at: datetime | None = None
     paper_trade_events: int = 0
     shadow_sessions: int = 0
-    live_enable_token: str = ""
-    live_adapter_implemented: bool = False
 
     def __post_init__(self) -> None:
         boolean_fields = (
@@ -69,7 +75,6 @@ class LiveReadiness:
             "account_fee_schedule_verified",
             "account_reconciled",
             "trading_universe_frozen",
-            "live_adapter_implemented",
         )
         for field_name in boolean_fields:
             if type(getattr(self, field_name)) is not bool:
@@ -80,8 +85,6 @@ class LiveReadiness:
                 raise ValueError(f"{field_name} must be a non-negative integer")
         if self.paper_started_at is not None and self.paper_started_at.tzinfo is None:
             raise ValueError("paper_started_at must be timezone-aware")
-        if type(self.live_enable_token) is not str:
-            raise ValueError("live_enable_token must be a string")
 
 
 @dataclass(frozen=True)
@@ -105,15 +108,17 @@ class ExecutionApproval:
     max_orders_per_day: int
     _issuer: object = field(repr=False, compare=False)
 
+    def __post_init__(self) -> None:
+        if is_live_execution_mode(self.mode):
+            raise LiveNotSupportedError()
+
     def was_issued_by_gate(self) -> bool:
         return self._issuer is _GATE_ISSUER
 
 
 class ExecutionGate:
-    REQUIRED_LIVE_TOKEN = "ENABLE_LIVE_ORDERS"
     MINIMUM_PAPER_CALENDAR_DAYS = 90
     MINIMUM_PAPER_TRADE_EVENTS = 30
-    MINIMUM_SHADOW_SESSIONS = 5
 
     def __init__(self, limits: RiskLimits) -> None:
         self.limits = limits
@@ -131,6 +136,8 @@ class ExecutionGate:
         daily_order_count_before_plan: int = 0,
     ) -> GateResult:
         blocks: list[str] = []
+        if is_live_execution_mode(mode):
+            return GateResult(False, (LIVE_NOT_SUPPORTED_CODE,), None)
         if not isinstance(mode, ExecutionMode):
             return GateResult(False, ("invalid_execution_mode",), None)
         if not isinstance(readiness, LiveReadiness):
@@ -214,7 +221,7 @@ class ExecutionGate:
         ):
             blocks.append("instrument_not_whitelisted")
 
-        if mode in {ExecutionMode.SHADOW, ExecutionMode.LIVE}:
+        if mode is ExecutionMode.SHADOW:
             paper_days = (
                 (decision_time - readiness.paper_started_at).days
                 if readiness.paper_started_at is not None and readiness.paper_started_at <= decision_time
@@ -225,26 +232,6 @@ class ExecutionGate:
                 or readiness.paper_trade_events < self.MINIMUM_PAPER_TRADE_EVENTS
             ):
                 blocks.append("paper_stage_incomplete")
-
-        if mode == ExecutionMode.LIVE:
-            if not self.limits.allowed_instrument_ids:
-                blocks.append("trading_universe_missing")
-            if not readiness.programmatic_report_confirmed:
-                blocks.append("programmatic_report_missing")
-            if not readiness.broker_api_authorized:
-                blocks.append("broker_api_not_authorized")
-            if not readiness.account_fee_schedule_verified:
-                blocks.append("account_fee_schedule_unverified")
-            if not readiness.account_reconciled:
-                blocks.append("account_reconciliation_missing")
-            if not readiness.trading_universe_frozen:
-                blocks.append("trading_universe_not_frozen")
-            if readiness.shadow_sessions < self.MINIMUM_SHADOW_SESSIONS:
-                blocks.append("shadow_stage_incomplete")
-            if readiness.live_enable_token != self.REQUIRED_LIVE_TOKEN:
-                blocks.append("live_enable_token_missing")
-            if not readiness.live_adapter_implemented:
-                blocks.append("live_adapter_not_implemented")
 
         approval = None
         if not blocks:
