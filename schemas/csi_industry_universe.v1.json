@@ -1,0 +1,50 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/csi_industry_universe.v1.json",
+  "title": "Frozen CSI level-one industry universe record v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "universe_version",
+    "index_id",
+    "official_index_code",
+    "official_index_name",
+    "industry_key",
+    "industry_name_cn",
+    "series_role",
+    "semantic_order",
+    "source_id",
+    "source_status",
+    "available_at",
+    "source_record_id"
+  ],
+  "properties": {
+    "schema_version": {"const": "csi-industry-universe-v1"},
+    "universe_version": {"const": "csi-level1-screen-confirm-v1"},
+    "index_id": {"type": "string", "pattern": "^[0-9]{6}\\.CSI$"},
+    "official_index_code": {"type": "string", "pattern": "^[0-9]{6}$"},
+    "official_index_name": {"type": "string", "minLength": 1},
+    "industry_key": {
+      "enum": [
+        "energy", "materials", "industrials", "consumer_discretionary",
+        "consumer_staples", "health_care", "financials",
+        "information_technology", "communication_services", "utilities",
+        "real_estate", "all_share_benchmark"
+      ]
+    },
+    "industry_name_cn": {"type": "string", "minLength": 1},
+    "series_role": {"enum": ["screen", "confirm", "benchmark"]},
+    "semantic_order": {"type": "integer", "minimum": 0, "maximum": 11},
+    "source_id": {"const": "csi_official"},
+    "source_status": {
+      "enum": ["unverified_until_probe", "verified_official_basic_info"]
+    },
+    "available_at": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "source_record_id": {"type": "string", "minLength": 1, "maxLength": 256}
+  }
+}

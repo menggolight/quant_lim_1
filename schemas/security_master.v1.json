@@ -1,0 +1,108 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/security_master.v1.json",
+  "title": "A-share security-master record v1",
+  "description": "Structural contract for one normalized BaoStock security-basic record. Current retrieval does not by itself prove a historical point-in-time universe.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "instrument_id",
+    "provider_instrument_id",
+    "security_name",
+    "exchange",
+    "security_type",
+    "listing_status",
+    "list_date",
+    "delist_date",
+    "available_at",
+    "availability_status",
+    "source_record_id"
+  ],
+  "properties": {
+    "instrument_id": {
+      "$ref": "#/$defs/instrumentId"
+    },
+    "provider_instrument_id": {
+      "type": "string",
+      "pattern": "^(?:sh|sz)\\.[0-9]{6}$"
+    },
+    "security_name": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    },
+    "exchange": {
+      "enum": [
+        "SH",
+        "SZ"
+      ]
+    },
+    "security_type": {
+      "enum": [
+        "stock",
+        "index",
+        "fund",
+        "bond",
+        "convertible_bond",
+        "other",
+        "unknown"
+      ]
+    },
+    "listing_status": {
+      "enum": [
+        "listed",
+        "delisted",
+        "suspended",
+        "unknown"
+      ]
+    },
+    "list_date": {
+      "$ref": "#/$defs/nullableDate"
+    },
+    "delist_date": {
+      "$ref": "#/$defs/nullableDate"
+    },
+    "available_at": {
+      "$ref": "#/$defs/timezoneDateTime"
+    },
+    "availability_status": {
+      "enum": [
+        "known",
+        "policy_estimated",
+        "unknown",
+        "current_snapshot_not_pit"
+      ]
+    },
+    "source_record_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    }
+  },
+  "$defs": {
+    "instrumentId": {
+      "type": "string",
+      "pattern": "^[0-9]{6}\\.(?:SH|SZ)$"
+    },
+    "date": {
+      "type": "string",
+      "format": "date",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "nullableDate": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/date"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "timezoneDateTime": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})$"
+    }
+  }
+}

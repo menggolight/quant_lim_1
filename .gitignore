@@ -22,6 +22,8 @@ venv/
 .tmp/
 data/tmp/
 data/cache/
+data/market_data/
+data/factor_evidence/
 
 # Research databases and generated audit bundles
 data/research_reports/

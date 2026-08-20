@@ -1,0 +1,240 @@
+{
+  "schema_version": "market-data-config-v1",
+  "status": "research_only_not_trade_eligible",
+  "default_provider": "baostock",
+  "provider_allowlist": [
+    "baostock",
+    "choice",
+    "tushare",
+    "akshare",
+    "eastmoney_legacy"
+  ],
+  "provider_name_does_not_prove_truth": true,
+  "providers": {
+    "baostock": {
+      "enabled": true,
+      "optional": false,
+      "optional_extra": "market-baostock",
+      "upstream_source": "baostock_public_sdk",
+      "adapter_version": "baostock-adapter-v1",
+      "credential_environment_variables": [],
+      "datasets": [
+        "daily_bar",
+        "trade_calendar",
+        "security_master"
+      ],
+      "allowed_upstream_sources": {
+        "daily_bar": [
+          "baostock.query_history_k_data_plus"
+        ],
+        "trade_calendar": [
+          "baostock.query_trade_dates"
+        ],
+        "security_master": [
+          "baostock.query_stock_basic"
+        ]
+      },
+      "admission_role": "primary_candidate",
+      "official_truth": false
+    },
+    "choice": {
+      "enabled": true,
+      "optional": true,
+      "optional_extra": null,
+      "upstream_source": "choice_licensed_emquantapi",
+      "adapter_version": "choice-emquantapi-adapter-v2",
+      "credential_environment_variables": [],
+      "datasets": [
+        "daily_bar",
+        "trade_calendar"
+      ],
+      "allowed_upstream_sources": {
+        "daily_bar": [
+          "choice.eastmoney_emquantapi.csd_with_tradedates"
+        ],
+        "trade_calendar": [
+          "choice.eastmoney_emquantapi.tradedates"
+        ]
+      },
+      "admission_role": "licensed_optional_read_only_secondary",
+      "source_access": "licensed_read_only_sdk",
+      "instrument_scope": "sh_sz_a_share_stock_qfq_and_000300_sh_index_none",
+      "allowed_sdk_functions": [
+        "start",
+        "stop",
+        "csd",
+        "tradedates",
+        "css",
+        "sector",
+        "edb",
+        "edbquery"
+      ],
+      "max_requests_per_minute": 300,
+      "sdk_distribution": "vendor_download_only",
+      "default_provider": false,
+      "automatic_fallback": false,
+      "state_changing_functions_allowed": false,
+      "official_truth": false
+    },
+    "tushare": {
+      "enabled": true,
+      "optional": true,
+      "optional_extra": "market-tushare",
+      "upstream_source": "tushare_public_api",
+      "adapter_version": "tushare-adapter-v1",
+      "credential_environment_variables": [
+        "TUSHARE_TOKEN"
+      ],
+      "datasets": [
+        "daily_bar"
+      ],
+      "allowed_upstream_sources": {
+        "daily_bar": [
+          "tushare.pro.daily"
+        ]
+      },
+      "admission_role": "optional_cross_validation_only",
+      "missing_configuration_status": "not_configured",
+      "official_truth": false
+    },
+    "akshare": {
+      "enabled": false,
+      "optional": true,
+      "optional_extra": "market-akshare",
+      "upstream_source": "dataset_specific_not_configured",
+      "adapter_version": "akshare-adapter-v1",
+      "credential_environment_variables": [],
+      "datasets": [],
+      "allowed_upstream_sources": {},
+      "admission_role": "extension_skeleton_not_admitted",
+      "forbid_arbitrary_function_execution": true,
+      "forbidden_upstreams": [
+        "eastmoney"
+      ],
+      "forbidden_interface_patterns": [
+        "*_em"
+      ],
+      "official_truth": false
+    },
+    "eastmoney_legacy": {
+      "enabled": true,
+      "optional": true,
+      "optional_extra": null,
+      "upstream_source": "eastmoney_public_endpoints",
+      "adapter_version": "eastmoney-legacy-adapter-v1",
+      "credential_environment_variables": [],
+      "datasets": [
+        "daily_bar"
+      ],
+      "allowed_upstream_sources": {
+        "daily_bar": [
+          "eastmoney_public.push2his"
+        ]
+      },
+      "admission_role": "diagnostic_only",
+      "default_provider": false,
+      "official_truth": false
+    }
+  },
+  "datasets": {
+    "daily_bar": {
+      "schema_version": "daily-bar-v1",
+      "schema_path": "schemas/daily_bar.v1.json",
+      "primary": "baostock",
+      "validation": [
+        "tushare"
+      ],
+      "eastmoney_legacy": "diagnostic_only",
+      "default_adjustment": "none",
+      "admission": "complete_validated_primary_batch_only",
+      "point_in_time": "policy_estimated_when_upstream_has_no_release_time",
+      "synthetic_allowed": false
+    },
+    "trade_calendar": {
+      "schema_version": "trade-calendar-v1",
+      "schema_path": "schemas/trade_calendar.v1.json",
+      "primary": "baostock",
+      "validation": [],
+      "admission": "complete_validated_primary_batch_only",
+      "weekday_approximation_allowed": false,
+      "synthetic_allowed": false
+    },
+    "security_master": {
+      "schema_version": "security-master-v1",
+      "schema_path": "schemas/security_master.v1.json",
+      "primary": "baostock",
+      "validation": [],
+      "admission": "complete_validated_primary_batch_only",
+      "synthetic_allowed": false
+    },
+    "industry_classification": {
+      "schema_version": "industry-classification-v1",
+      "schema_path": null,
+      "primary": "baostock",
+      "implementation_status": "not_configured_p2",
+      "validation": [],
+      "point_in_time": false,
+      "admission": "diagnostic_current_only",
+      "synthetic_allowed": false
+    },
+    "financial_indicator": {
+      "schema_version": "financial-indicator-v1",
+      "schema_path": null,
+      "primary": null,
+      "implementation_status": "not_configured_future",
+      "validation": [],
+      "admission": "research_only_unless_disclosure_time_present",
+      "point_in_time": "not_proven_without_reliable_disclosure_time",
+      "synthetic_allowed": false
+    }
+  },
+  "fallback_policy": {
+    "mode": "whole_batch_only",
+    "allow_partial_primary_secondary_merge": false,
+    "allow_secondary_fill": false,
+    "allow_default_data": false,
+    "allow_synthetic_data": false,
+    "on_all_sources_failed": "structured_failure"
+  },
+  "cache_policy": {
+    "layers": [
+      "raw",
+      "quarantine",
+      "validated"
+    ],
+    "raw_directory": "data/market_data/raw",
+    "quarantine_directory": "data/market_data/quarantine",
+    "validated_directory": "data/market_data/validated",
+    "validated_requires_schema_validation": true,
+    "validated_requires_domain_validation": true,
+    "validated_requires_local_admission": true,
+    "quarantine_readable_by_research_consumers": false,
+    "cache_key_fields": [
+      "provider_id",
+      "dataset_type",
+      "request_fingerprint",
+      "adapter_version",
+      "schema_version"
+    ]
+  },
+  "cross_validation_policy": {
+    "daily_bar": {
+      "provider": "tushare",
+      "mode": "optional_when_configured",
+      "merge_records": false,
+      "compare_fields": [
+        "trading_date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "volume"
+      ],
+      "difference_thresholds": null,
+      "threshold_status": "not_configured",
+      "on_difference_above_threshold": "quarantine_and_report",
+      "on_token_missing": "not_configured",
+      "required_for_baostock_main_chain": false
+    }
+  }
+}

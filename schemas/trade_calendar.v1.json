@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/trade_calendar.v1.json",
+  "title": "A-share trade-calendar record v1",
+  "description": "Structural contract for one provider-supplied calendar date. A weekday approximation does not satisfy this contract's local admission policy.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "calendar_date",
+    "is_trading_day",
+    "available_at",
+    "availability_status",
+    "source_record_id"
+  ],
+  "properties": {
+    "calendar_date": {
+      "$ref": "#/$defs/date"
+    },
+    "is_trading_day": {
+      "type": "boolean"
+    },
+    "available_at": {
+      "$ref": "#/$defs/timezoneDateTime"
+    },
+    "availability_status": {
+      "enum": [
+        "known",
+        "policy_estimated",
+        "unknown",
+        "current_snapshot_not_pit"
+      ]
+    },
+    "source_record_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256
+    }
+  },
+  "$defs": {
+    "date": {
+      "type": "string",
+      "format": "date",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "timezoneDateTime": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})$"
+    }
+  }
+}

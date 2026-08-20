@@ -1,0 +1,437 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/market_data_batch.v1.json",
+  "title": "Market data batch v1",
+  "description": "Provider-neutral market-data batch envelope. This Schema validates structure only; provider identity and hashes do not prove official provenance or research admission.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "batch_id",
+    "provider_id",
+    "upstream_source",
+    "dataset_type",
+    "schema_version",
+    "adapter_version",
+    "request_fingerprint",
+    "request_payload",
+    "retrieval_mode",
+    "requested_at",
+    "fetched_at",
+    "available_at_min",
+    "available_at_max",
+    "raw_content_sha256",
+    "normalized_content_sha256",
+    "record_count",
+    "completeness_status",
+    "freshness_status",
+    "admission_status",
+    "point_in_time_status",
+    "synthetic",
+    "issues",
+    "records"
+  ],
+  "properties": {
+    "batch_id": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 256,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "provider_id": {
+      "$ref": "#/$defs/identifier"
+    },
+    "upstream_source": {
+      "$ref": "#/$defs/nonEmptyString"
+    },
+    "dataset_type": {
+      "enum": [
+        "daily_bar",
+        "trade_calendar",
+        "security_master",
+        "industry_classification",
+        "financial_indicator"
+      ]
+    },
+    "schema_version": {
+      "enum": [
+        "daily-bar-v1",
+        "trade-calendar-v1",
+        "security-master-v1",
+        "industry-classification-v1",
+        "financial-indicator-v1"
+      ]
+    },
+    "adapter_version": {
+      "$ref": "#/$defs/identifier"
+    },
+    "request_fingerprint": {
+      "$ref": "#/$defs/sha256"
+    },
+    "request_payload": {
+      "$ref": "#/$defs/requestPayload"
+    },
+    "retrieval_mode": {
+      "enum": [
+        "live_capture",
+        "historical_backfill",
+        "offline_replay"
+      ]
+    },
+    "requested_at": {
+      "$ref": "#/$defs/timezoneDateTime"
+    },
+    "fetched_at": {
+      "$ref": "#/$defs/timezoneDateTime"
+    },
+    "available_at_min": {
+      "$ref": "#/$defs/nullableTimezoneDateTime"
+    },
+    "available_at_max": {
+      "$ref": "#/$defs/nullableTimezoneDateTime"
+    },
+    "raw_content_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "normalized_content_sha256": {
+      "$ref": "#/$defs/sha256"
+    },
+    "record_count": {
+      "type": "integer",
+      "minimum": 0
+    },
+    "completeness_status": {
+      "enum": [
+        "complete",
+        "incomplete",
+        "empty",
+        "failed"
+      ]
+    },
+    "freshness_status": {
+      "enum": [
+        "live_capture",
+        "historical_backfill",
+        "replayed",
+        "current_snapshot",
+        "not_assessed",
+        "unknown",
+        "stale"
+      ]
+    },
+    "admission_status": {
+      "enum": [
+        "validated_research_only",
+        "validated_secondary_not_primary",
+        "validated_optional_source",
+        "admitted_for_research",
+        "diagnostic_only",
+        "diagnostic_current_only",
+        "research_only_unless_disclosure_time_present",
+        "rejected_synthetic",
+        "rejected_provider_not_allowlisted",
+        "rejected_provider_disabled",
+        "rejected_provider_dataset_undeclared",
+        "rejected_unexpected_upstream",
+        "quarantined",
+        "not_admitted",
+        "failed"
+      ]
+    },
+    "point_in_time_status": {
+      "enum": [
+        "policy_estimated_availability",
+        "current_snapshot_not_pit",
+        "historical_backfill_not_original_capture",
+        "offline_replay_of_validated_capture",
+        "not_applicable",
+        "not_admitted",
+        "unknown",
+        "diagnostic_current_only",
+        "research_only_not_pit"
+      ]
+    },
+    "synthetic": {
+      "type": "boolean",
+      "description": "Local admission must reject true for every formal market-data path."
+    },
+    "issues": {
+      "type": "array",
+      "items": {
+        "$ref": "#/$defs/issue"
+      }
+    },
+    "records": {
+      "type": "array",
+      "items": {
+        "type": "object"
+      }
+    }
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "dataset_type": {
+            "const": "daily_bar"
+          }
+        },
+        "required": [
+          "dataset_type"
+        ]
+      },
+      "then": {
+        "properties": {
+          "schema_version": {
+            "const": "daily-bar-v1"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "dataset_type": {
+            "const": "trade_calendar"
+          }
+        },
+        "required": [
+          "dataset_type"
+        ]
+      },
+      "then": {
+        "properties": {
+          "schema_version": {
+            "const": "trade-calendar-v1"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "dataset_type": {
+            "const": "security_master"
+          }
+        },
+        "required": [
+          "dataset_type"
+        ]
+      },
+      "then": {
+        "properties": {
+          "schema_version": {
+            "const": "security-master-v1"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "dataset_type": {
+            "const": "industry_classification"
+          }
+        },
+        "required": [
+          "dataset_type"
+        ]
+      },
+      "then": {
+        "properties": {
+          "schema_version": {
+            "const": "industry-classification-v1"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "dataset_type": {
+            "const": "financial_indicator"
+          }
+        },
+        "required": [
+          "dataset_type"
+        ]
+      },
+      "then": {
+        "properties": {
+          "schema_version": {
+            "const": "financial-indicator-v1"
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "admission_status": {
+            "enum": [
+              "validated_research_only",
+              "admitted_for_research"
+            ]
+          }
+        },
+        "required": [
+          "admission_status"
+        ]
+      },
+      "then": {
+        "properties": {
+          "completeness_status": {
+            "const": "complete"
+          },
+          "synthetic": {
+            "const": false
+          },
+          "available_at_min": {
+            "$ref": "#/$defs/timezoneDateTime"
+          },
+          "available_at_max": {
+            "$ref": "#/$defs/timezoneDateTime"
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "requestPayload": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "provider_id",
+        "adapter_version",
+        "dataset_type",
+        "schema_version",
+        "instrument_id",
+        "start_date",
+        "end_date",
+        "adjustment",
+        "parameters"
+      ],
+      "properties": {
+        "provider_id": {
+          "$ref": "#/$defs/identifier"
+        },
+        "adapter_version": {
+          "$ref": "#/$defs/identifier"
+        },
+        "dataset_type": {
+          "enum": [
+            "daily_bar",
+            "trade_calendar",
+            "security_master",
+            "industry_classification",
+            "financial_indicator"
+          ]
+        },
+        "schema_version": {
+          "type": "string",
+          "minLength": 1,
+          "maxLength": 128
+        },
+        "instrument_id": {
+          "type": [
+            "string",
+            "null"
+          ]
+        },
+        "start_date": {
+          "$ref": "#/$defs/nullableDate"
+        },
+        "end_date": {
+          "$ref": "#/$defs/nullableDate"
+        },
+        "adjustment": {
+          "enum": [
+            "none",
+            "qfq",
+            "hfq"
+          ]
+        },
+        "parameters": {
+          "type": "object"
+        }
+      }
+    },
+    "identifier": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 128,
+      "pattern": "^[A-Za-z0-9._:-]+$"
+    },
+    "nonEmptyString": {
+      "type": "string",
+      "minLength": 1,
+      "maxLength": 4096
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "timezoneDateTime": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "date": {
+      "type": "string",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "nullableDate": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/date"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "nullableTimezoneDateTime": {
+      "oneOf": [
+        {
+          "$ref": "#/$defs/timezoneDateTime"
+        },
+        {
+          "type": "null"
+        }
+      ]
+    },
+    "issue": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "code",
+        "severity"
+      ],
+      "properties": {
+        "code": {
+          "$ref": "#/$defs/identifier"
+        },
+        "message": {
+          "$ref": "#/$defs/nonEmptyString"
+        },
+        "severity": {
+          "enum": [
+            "info",
+            "warning",
+            "error"
+          ]
+        },
+        "field": {
+          "type": "string",
+          "maxLength": 256
+        },
+        "record_index": {
+          "type": "integer",
+          "minimum": 0
+        },
+        "details": {
+          "type": "object"
+        }
+      }
+    }
+  }
+}

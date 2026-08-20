@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/index_level.v1.json",
+  "title": "CSI index level record v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "index_id",
+    "trading_date",
+    "open",
+    "high",
+    "low",
+    "close",
+    "currency",
+    "basis",
+    "available_at",
+    "availability_status",
+    "source_record_id"
+  ],
+  "properties": {
+    "schema_version": {"const": "index-level-v1"},
+    "index_id": {"$ref": "#/$defs/indexId"},
+    "trading_date": {"$ref": "#/$defs/date"},
+    "open": {
+      "oneOf": [
+        {"$ref": "#/$defs/positiveDecimalString"},
+        {"type": "null"}
+      ]
+    },
+    "high": {
+      "oneOf": [
+        {"$ref": "#/$defs/positiveDecimalString"},
+        {"type": "null"}
+      ]
+    },
+    "low": {
+      "oneOf": [
+        {"$ref": "#/$defs/positiveDecimalString"},
+        {"type": "null"}
+      ]
+    },
+    "close": {"$ref": "#/$defs/positiveDecimalString"},
+    "currency": {"const": "CNY"},
+    "basis": {"const": "index_points_unadjusted"},
+    "available_at": {"$ref": "#/$defs/timezoneDateTime"},
+    "availability_status": {
+      "enum": ["known", "policy_estimated"]
+    },
+    "source_record_id": {"type": "string", "minLength": 1, "maxLength": 256}
+  },
+  "$defs": {
+    "indexId": {"type": "string", "pattern": "^[0-9]{6}\\.CSI$"},
+    "date": {"type": "string", "format": "date", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+    "timezoneDateTime": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "positiveDecimalString": {
+      "type": "string",
+      "pattern": "^(?:0*[1-9][0-9]*)(?:\\.[0-9]+)?$|^0\\.[0-9]*[1-9][0-9]*$"
+    }
+  }
+}
