@@ -1,0 +1,183 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/stock_diagnostic_observation.v1.json",
+  "title": "Forward stock diagnostic case observation v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "observation_id", "created_at", "decision_time",
+    "information_cutoff_at", "status", "thesis", "selection_policy",
+    "candidate_pool", "pre_entry_check", "evaluation", "safety", "pipeline"
+  ],
+  "properties": {
+    "schema_version": {"const": "stock-diagnostic-observation-v1"},
+    "observation_id": {"type": "string", "pattern": "^[a-z0-9][a-z0-9-]{7,127}$"},
+    "created_at": {"$ref": "#/$defs/dateTime"},
+    "decision_time": {"$ref": "#/$defs/dateTime"},
+    "information_cutoff_at": {"$ref": "#/$defs/dateTime"},
+    "status": {"const": "diagnostic_only_not_admitted"},
+    "thesis": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["theme", "statement", "horizon_trading_sessions", "user_selection_constraint", "independence_warning"],
+      "properties": {
+        "theme": {"const": "innovation_drug"},
+        "statement": {"type": "string", "minLength": 1},
+        "horizon_trading_sessions": {"const": 60},
+        "user_selection_constraint": {"type": "string", "minLength": 1},
+        "independence_warning": {"type": "string", "minLength": 1}
+      }
+    },
+    "selection_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["snapshot_session", "price_source", "price_source_admission", "price_basis", "gates", "replacement_policy"],
+      "properties": {
+        "snapshot_session": {"$ref": "#/$defs/date"},
+        "price_source": {"type": "string", "minLength": 1},
+        "price_source_admission": {"const": "diagnostic_aggregator_not_registry_admitted"},
+        "price_basis": {"enum": ["qfq_close", "raw_close"]},
+        "gates": {
+          "type": "array", "minItems": 4, "maxItems": 4, "uniqueItems": true,
+          "items": {"enum": ["return_20d_gt_0", "return_60d_gt_0", "close_gt_ma20", "close_gt_ma60"]}
+        },
+        "replacement_policy": {"const": "no_replacement_after_snapshot"}
+      }
+    },
+    "candidate_pool": {
+      "type": "array", "minItems": 2, "uniqueItems": true,
+      "items": {"$ref": "#/$defs/candidate"}
+    },
+    "pre_entry_check": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["checked_at", "latest_complete_session", "source", "source_admission", "checks", "active_candidate_ids", "policy"],
+      "properties": {
+        "checked_at": {"$ref": "#/$defs/dateTime"},
+        "latest_complete_session": {"$ref": "#/$defs/date"},
+        "source": {"type": "string", "minLength": 1},
+        "source_admission": {"const": "diagnostic_aggregator_not_registry_admitted"},
+        "checks": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/preEntryCheck"}},
+        "active_candidate_ids": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/instrumentId"}},
+        "policy": {"const": "retain_original_cases_but_only_all_gate_passers_remain_active"}
+      }
+    },
+    "evaluation": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "entry_session", "entry_status", "entry_price_policy", "horizon_trading_sessions",
+        "exit_price_policy", "primary_benchmark_id", "context_benchmark_ids", "label_definition",
+        "price_return_basis", "early_falsification_conditions", "early_failure_retention_policy",
+        "maturity_outcomes"
+      ],
+      "properties": {
+        "entry_session": {"$ref": "#/$defs/date"},
+        "entry_status": {"const": "pending_official_close_capture"},
+        "entry_price_policy": {"const": "entry_session_official_close"},
+        "horizon_trading_sessions": {"const": 60},
+        "exit_price_policy": {"const": "60th_future_official_session_close"},
+        "primary_benchmark_id": {"const": "932082.CSI"},
+        "context_benchmark_ids": {"type": "array", "uniqueItems": true, "items": {"pattern": "^[0-9]{6}\\.CSI$"}},
+        "label_definition": {"type": "string", "minLength": 1},
+        "price_return_basis": {"const": "unadjusted_close_price_return_excluding_cash_distributions"},
+        "early_falsification_conditions": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}},
+        "early_failure_retention_policy": {"const": "append_failure_and_still_evaluate_fixed_60_session_endpoint"},
+        "maturity_outcomes": {
+          "type": "array", "uniqueItems": true,
+          "items": {"enum": ["direction_observed", "direction_not_observed", "data_insufficient"]}
+        }
+      }
+    },
+    "safety": {"$ref": "#/$defs/safety"},
+    "pipeline": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["producer", "standard_cli_generated", "sealed_at", "schema_path", "schema_sha256", "draft_sha256"],
+      "properties": {
+        "producer": {"const": "stock-diagnostic-observation-cli-v1"},
+        "standard_cli_generated": {"const": true},
+        "sealed_at": {"$ref": "#/$defs/dateTime"},
+        "schema_path": {"type": "string", "minLength": 1},
+        "schema_sha256": {"$ref": "#/$defs/sha256"},
+        "draft_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  },
+  "$defs": {
+    "date": {"type": "string", "format": "date", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+    "dateTime": {"type": "string", "format": "date-time", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "decimal": {"type": "string", "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
+    "instrumentId": {"type": "string", "pattern": "^[0-9]{6}\\.(?:SH|SZ)$"},
+    "gateResults": {
+      "type": "object", "additionalProperties": false,
+      "required": ["return_20d_gt_0", "return_60d_gt_0", "close_gt_ma20", "close_gt_ma60"],
+      "properties": {
+        "return_20d_gt_0": {"type": "boolean"},
+        "return_60d_gt_0": {"type": "boolean"},
+        "close_gt_ma20": {"type": "boolean"},
+        "close_gt_ma60": {"type": "boolean"}
+      }
+    },
+    "metrics": {
+      "type": "object", "additionalProperties": false,
+      "required": ["close", "return_20d_pct", "return_60d_pct", "ma20", "ma60"],
+      "properties": {
+        "close": {"$ref": "#/$defs/decimal"},
+        "return_20d_pct": {"$ref": "#/$defs/decimal"},
+        "return_60d_pct": {"$ref": "#/$defs/decimal"},
+        "ma20": {"$ref": "#/$defs/decimal"},
+        "ma60": {"$ref": "#/$defs/decimal"}
+      }
+    },
+    "candidate": {
+      "type": "object", "additionalProperties": false,
+      "required": ["instrument_id", "name", "snapshot_metrics", "gate_results", "snapshot_status", "selection_reason", "official_evidence", "invalidation_conditions"],
+      "properties": {
+        "instrument_id": {"$ref": "#/$defs/instrumentId"},
+        "name": {"type": "string", "minLength": 1},
+        "snapshot_metrics": {"$ref": "#/$defs/metrics"},
+        "gate_results": {"$ref": "#/$defs/gateResults"},
+        "snapshot_status": {"enum": ["selected_diagnostic_positive", "excluded_gate_failed"]},
+        "selection_reason": {"type": "string", "minLength": 1},
+        "official_evidence": {"type": "array", "items": {"$ref": "#/$defs/evidence"}},
+        "invalidation_conditions": {"type": "array", "items": {"type": "string", "minLength": 1}}
+      }
+    },
+    "evidence": {
+      "type": "object", "additionalProperties": false,
+      "required": ["source_authority", "title", "published_at", "url", "evidence_status"],
+      "properties": {
+        "source_authority": {"enum": ["issuer", "exchange"]},
+        "title": {"type": "string", "minLength": 1},
+        "published_at": {"$ref": "#/$defs/date"},
+        "url": {"type": "string", "format": "uri"},
+        "evidence_status": {"const": "reference_only_not_archived"}
+      }
+    },
+    "preEntryCheck": {
+      "type": "object", "additionalProperties": false,
+      "required": ["instrument_id", "metrics", "gate_results", "status", "reason"],
+      "properties": {
+        "instrument_id": {"$ref": "#/$defs/instrumentId"},
+        "metrics": {"$ref": "#/$defs/metrics"},
+        "gate_results": {"$ref": "#/$defs/gateResults"},
+        "status": {"enum": ["active_diagnostic_positive", "pre_entry_gate_failed"]},
+        "reason": {"type": "string", "minLength": 1}
+      }
+    },
+    "safety": {
+      "type": "object", "additionalProperties": false,
+      "required": ["research_action", "trade_action", "paper_eligibility", "trade_eligibility", "formal_factor_eligibility", "live_execution_status"],
+      "properties": {
+        "research_action": {"const": "observe_only"},
+        "trade_action": {"type": "null"},
+        "paper_eligibility": {"const": false},
+        "trade_eligibility": {"const": false},
+        "formal_factor_eligibility": {"const": false},
+        "live_execution_status": {"const": "live_not_supported"}
+      }
+    }
+  }
+}

@@ -1,0 +1,214 @@
+{
+  "schema_version": "stock-diagnostic-observation-v1",
+  "observation_id": "stock-diagnostic-innovation-drug-60td-20260818-v1",
+  "created_at": "2026-08-18T10:16:00+08:00",
+  "decision_time": "2026-08-18T10:16:00+08:00",
+  "information_cutoff_at": "2026-08-14T15:30:00+08:00",
+  "status": "diagnostic_only_not_admitted",
+  "thesis": {
+    "theme": "innovation_drug",
+    "statement": "经营兑现与价格趋势同时为正的创新药公司，未来60个交易日相对中证全指医药卫生可能保持更强方向。",
+    "horizon_trading_sessions": 60,
+    "user_selection_constraint": "用户希望至少给出两只具体股票；该数量要求不能覆盖客观门槛，门槛失效时必须如实减少活跃候选。",
+    "independence_warning": "两只原始入选股票同属创新药主题，不是两个独立因子样本，也不能据此推断创新药因子已统计有效。"
+  },
+  "selection_policy": {
+    "snapshot_session": "2026-08-14",
+    "price_source": "eastmoney_push2his_read_only",
+    "price_source_admission": "diagnostic_aggregator_not_registry_admitted",
+    "price_basis": "qfq_close",
+    "gates": [
+      "return_20d_gt_0",
+      "return_60d_gt_0",
+      "close_gt_ma20",
+      "close_gt_ma60"
+    ],
+    "replacement_policy": "no_replacement_after_snapshot"
+  },
+  "candidate_pool": [
+    {
+      "instrument_id": "688235.SH",
+      "name": "百济神州",
+      "snapshot_metrics": {
+        "close": "287.71",
+        "return_20d_pct": "14.85",
+        "return_60d_pct": "14.19",
+        "ma20": "275.60",
+        "ma60": "252.00"
+      },
+      "gate_results": {
+        "return_20d_gt_0": true,
+        "return_60d_gt_0": true,
+        "close_gt_ma20": true,
+        "close_gt_ma60": true
+      },
+      "snapshot_status": "selected_diagnostic_positive",
+      "selection_reason": "2026Q2收入、利润、自由现金流与核心产品收入同比增长，并上调全年收入指引；8月14日四项价格门同时通过。",
+      "official_evidence": [
+        {
+          "source_authority": "issuer",
+          "title": "BeiGene 2026 Q2 earnings materials",
+          "published_at": "2026-08-05",
+          "url": "https://ir-api.eqs.com/redirect/5f71f1c7-cac3-4b6e-add2-5901885150e3?disposition=inline&t=1785924728051",
+          "evidence_status": "reference_only_not_archived"
+        }
+      ],
+      "invalidation_conditions": [
+        "公司下调2026年收入或经营利润指引",
+        "出现重大临床失败、监管拒绝或核心产品安全性负面事件",
+        "连续两个计划周的20日相对中证全指医药卫生收益不为正"
+      ]
+    },
+    {
+      "instrument_id": "688578.SH",
+      "name": "艾力斯",
+      "snapshot_metrics": {
+        "close": "120.40",
+        "return_20d_pct": "4.97",
+        "return_60d_pct": "29.45",
+        "ma20": "118.13",
+        "ma60": "105.74"
+      },
+      "gate_results": {
+        "return_20d_gt_0": true,
+        "return_60d_gt_0": true,
+        "close_gt_ma20": true,
+        "close_gt_ma60": true
+      },
+      "snapshot_status": "selected_diagnostic_positive",
+      "selection_reason": "2026Q1营收、扣非利润和经营现金流同比增长，新适应症开始贡献增量；8月14日四项价格门同时通过。",
+      "official_evidence": [
+        {
+          "source_authority": "exchange",
+          "title": "艾力斯2026年第一季度报告",
+          "published_at": "2026-04-22",
+          "url": "https://dataclouds.cninfo.com.cn/shgonggao/hsomarket/2026/20260422/a7b4547c88eb4f3a85d8a6ae4979fd28.PDF",
+          "evidence_status": "reference_only_not_archived"
+        }
+      ],
+      "invalidation_conditions": [
+        "新适应症商业化明显低于已披露经营趋势",
+        "扣非利润或经营现金流转为同比负增长",
+        "连续两个计划周的20日相对中证全指医药卫生收益不为正"
+      ]
+    },
+    {
+      "instrument_id": "600276.SH",
+      "name": "恒瑞医药",
+      "snapshot_metrics": {
+        "close": "52.62",
+        "return_20d_pct": "-1.07",
+        "return_60d_pct": "2.27",
+        "ma20": "53.89",
+        "ma60": "51.84"
+      },
+      "gate_results": {
+        "return_20d_gt_0": false,
+        "return_60d_gt_0": true,
+        "close_gt_ma20": false,
+        "close_gt_ma60": true
+      },
+      "snapshot_status": "excluded_gate_failed",
+      "selection_reason": "8月14日20日收益为负且收盘低于MA20，未通过同一价格门。",
+      "official_evidence": [],
+      "invalidation_conditions": []
+    },
+    {
+      "instrument_id": "688192.SH",
+      "name": "迪哲医药",
+      "snapshot_metrics": {
+        "close": "60.91",
+        "return_20d_pct": "-0.83",
+        "return_60d_pct": "5.82",
+        "ma20": "56.06",
+        "ma60": "48.99"
+      },
+      "gate_results": {
+        "return_20d_gt_0": false,
+        "return_60d_gt_0": true,
+        "close_gt_ma20": true,
+        "close_gt_ma60": true
+      },
+      "snapshot_status": "excluded_gate_failed",
+      "selection_reason": "8月14日20日收益为负，未通过同一价格门。",
+      "official_evidence": [],
+      "invalidation_conditions": []
+    }
+  ],
+  "pre_entry_check": {
+    "checked_at": "2026-08-18T10:18:10+08:00",
+    "latest_complete_session": "2026-08-17",
+    "source": "tencent_ifzq_qfq_read_only",
+    "source_admission": "diagnostic_aggregator_not_registry_admitted",
+    "checks": [
+      {
+        "instrument_id": "688235.SH",
+        "metrics": {
+          "close": "289.90",
+          "return_20d_pct": "11.801003",
+          "return_60d_pct": "18.534571",
+          "ma20": "277.132500",
+          "ma60": "252.757500"
+        },
+        "gate_results": {
+          "return_20d_gt_0": true,
+          "return_60d_gt_0": true,
+          "close_gt_ma20": true,
+          "close_gt_ma60": true
+        },
+        "status": "active_diagnostic_positive",
+        "reason": "8月17日完整收盘复核后四项价格门仍全部通过。"
+      },
+      {
+        "instrument_id": "688578.SH",
+        "metrics": {
+          "close": "120.04",
+          "return_20d_pct": "-5.791869",
+          "return_60d_pct": "30.962252",
+          "ma20": "117.761000",
+          "ma60": "106.216833"
+        },
+        "gate_results": {
+          "return_20d_gt_0": false,
+          "return_60d_gt_0": true,
+          "close_gt_ma20": true,
+          "close_gt_ma60": true
+        },
+        "status": "pre_entry_gate_failed",
+        "reason": "8月17日完整收盘的20日收益转为负值，按原规则在观察起点前降级；保留该失败病例，不换股。"
+      }
+    ],
+    "active_candidate_ids": ["688235.SH"],
+    "policy": "retain_original_cases_but_only_all_gate_passers_remain_active"
+  },
+  "evaluation": {
+    "entry_session": "2026-08-18",
+    "entry_status": "pending_official_close_capture",
+    "entry_price_policy": "entry_session_official_close",
+    "horizon_trading_sessions": 60,
+    "exit_price_policy": "60th_future_official_session_close",
+    "primary_benchmark_id": "932082.CSI",
+    "context_benchmark_ids": ["000300.CSI"],
+    "label_definition": "log(stock_exit_close/stock_entry_close)-log(932082_exit_close/932082_entry_close); same official sessions and close field",
+    "price_return_basis": "unadjusted_close_price_return_excluding_cash_distributions",
+    "early_falsification_conditions": [
+      "公司下调关键经营指引",
+      "出现重大临床、监管或核心产品安全性负面事件",
+      "连续两个计划周最后一个交易日的20日相对中证全指医药卫生收益不为正"
+    ],
+    "early_failure_retention_policy": "append_failure_and_still_evaluate_fixed_60_session_endpoint",
+    "maturity_outcomes": [
+      "direction_observed",
+      "direction_not_observed",
+      "data_insufficient"
+    ]
+  },
+  "safety": {
+    "research_action": "observe_only",
+    "trade_action": null,
+    "paper_eligibility": false,
+    "trade_eligibility": false,
+    "formal_factor_eligibility": false,
+    "live_execution_status": "live_not_supported"
+  }
+}
