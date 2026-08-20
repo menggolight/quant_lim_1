@@ -1,0 +1,47 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/strategy_current_universe_diagnostic.v1.json",
+  "title": "Frozen current-universe diagnostic sample",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "status", "as_of", "source_universe_id", "source_member_count",
+    "source_membership_receipt_sha256", "source_membership_content_sha256",
+    "source_industry_receipt_sha256", "source_industry_content_sha256", "selection_policy",
+    "instrument_ids", "industry_by_instrument", "factor_ids", "safety", "sample_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "strategy-workspace-current-universe-diagnostic.v1"},
+    "status": {"const": "diagnostic_current_universe_not_pit"},
+    "as_of": {"type": "string", "format": "date"},
+    "source_universe_id": {"type": "string", "minLength": 1},
+    "source_member_count": {"const": 800},
+    "source_membership_receipt_sha256": {"type":"string","pattern":"^[0-9a-f]{64}$"},
+    "source_membership_content_sha256": {"type":"string","pattern":"^[0-9a-f]{64}$"},
+    "source_industry_receipt_sha256": {"type":"string","pattern":"^[0-9a-f]{64}$"},
+    "source_industry_content_sha256": {"type":"string","pattern":"^[0-9a-f]{64}$"},
+    "selection_policy": {"const": "sha256_instrument_id_stratified_by_current_industry"},
+    "instrument_ids": {
+      "type": "array", "minItems": 60, "maxItems": 60,
+      "uniqueItems": true, "items": {"type": "string", "minLength": 1}
+    },
+    "industry_by_instrument": {
+      "type": "object", "minProperties": 60,
+      "additionalProperties": {"type": "string", "minLength": 1}
+    },
+    "factor_ids": {
+      "const": ["RM20", "RM60", "RM120", "TREND_EFF60", "DOWNSIDE_VOL60", "BREAKOUT60"]
+    },
+    "safety": {
+      "type": "object", "additionalProperties": false,
+      "required": ["paper_eligibility", "trade_eligibility", "real_money_list_allowed", "live"],
+      "properties": {
+        "paper_eligibility": {"const": false},
+        "trade_eligibility": {"const": false},
+        "real_money_list_allowed": {"const": false},
+        "live": {"const": "not_supported"}
+      }
+    },
+    "sample_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

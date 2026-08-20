@@ -1,0 +1,68 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/strategy_current_universe_diagnostic.v2.json",
+  "title": "Frozen current-universe diagnostic sample v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "status", "information_cutoff_date", "market_snapshot_date",
+    "source_universe_id", "source_member_count", "source_membership_artifact_sha256",
+    "source_membership_payload_sha256", "source_membership_content_sha256",
+    "source_industry_artifact_sha256", "source_industry_payload_sha256",
+    "source_industry_content_sha256", "generator_code_bundle_files",
+    "generator_code_bundle_runtime", "generator_code_bundle_sha256", "selection_policy",
+    "representation", "instrument_ids", "industry_by_instrument", "factor_ids",
+    "sample_content_sha256", "safety", "sample_payload_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "strategy-workspace-current-universe-diagnostic.v2"},
+    "status": {"const": "diagnostic_current_universe_not_pit"},
+    "information_cutoff_date": {"type": "string", "format": "date"},
+    "market_snapshot_date": {"type": "string", "format": "date"},
+    "source_universe_id": {"const": "CSI800_CURRENT_CHOICE"},
+    "source_member_count": {"const": 800},
+    "source_membership_artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_membership_payload_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_membership_content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_industry_artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_industry_payload_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_industry_content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "generator_code_bundle_files": {
+      "type": "object", "additionalProperties": false,
+      "required": ["agent/current_industry_import.py", "agent/current_universe_import.py", "research/market_data/contracts.py", "research/strategy_workspace/contracts.py", "research/strategy_workspace/diagnostic.py"],
+      "properties": {
+        "agent/current_industry_import.py": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "agent/current_universe_import.py": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "research/market_data/contracts.py": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "research/strategy_workspace/contracts.py": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "research/strategy_workspace/diagnostic.py": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "generator_code_bundle_runtime": {"type": "string", "pattern": "^cpython-[0-9]+\\.[0-9]+\\.[0-9]+$"},
+    "generator_code_bundle_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "selection_policy": {"const": "sha256_instrument_id_equal_industry_coverage_round_robin_not_index_representative"},
+    "representation": {"const": "diagnostic_equal_industry_coverage_not_csi800_representative"},
+    "instrument_ids": {
+      "type": "array", "minItems": 60, "maxItems": 60, "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[0-9]{6}\\.(SH|SZ)$"}
+    },
+    "industry_by_instrument": {
+      "type": "object", "minProperties": 60, "maxProperties": 60,
+      "propertyNames": {"pattern": "^[0-9]{6}\\.(SH|SZ)$"},
+      "additionalProperties": {"enum": ["CSI2021_L1/能源", "CSI2021_L1/原材料", "CSI2021_L1/工业", "CSI2021_L1/可选消费", "CSI2021_L1/主要消费", "CSI2021_L1/医药卫生", "CSI2021_L1/金融", "CSI2021_L1/信息技术", "CSI2021_L1/通信服务", "CSI2021_L1/公用事业", "CSI2021_L1/房地产"]}
+    },
+    "factor_ids": {"const": ["RM20", "RM60", "RM120", "TREND_EFF60", "DOWNSIDE_VOL60", "BREAKOUT60"]},
+    "sample_content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "safety": {
+      "type": "object", "additionalProperties": false,
+      "required": ["paper_eligibility", "trade_eligibility", "real_money_list_allowed", "live"],
+      "properties": {
+        "paper_eligibility": {"const": false},
+        "trade_eligibility": {"const": false},
+        "real_money_list_allowed": {"const": false},
+        "live": {"const": "not_supported"}
+      }
+    },
+    "sample_payload_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

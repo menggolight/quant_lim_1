@@ -1,0 +1,128 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.quant/schemas/choice_quality_growth_batch.v1.json",
+  "title": "Choice Quality Growth Batch Manifest v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "adapter_version",
+    "provider_id",
+    "status",
+    "collection_status",
+    "admission_status",
+    "blocking_reasons",
+    "as_of",
+    "generated_at",
+    "point_in_time_status",
+    "source_authenticated",
+    "raw_semantics",
+    "integrity_semantics",
+    "plan_path",
+    "plan_sha256",
+    "checkpoint_path",
+    "checkpoint_sha256",
+    "completeness",
+    "missing_contract_items",
+    "formal_truth_eligible",
+    "paper_eligible",
+    "trade_eligible",
+    "real_money_candidate",
+    "live_execution_status",
+    "manifest_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "choice-quality-growth-batch.v1"},
+    "adapter_version": {"const": "choice-quality-growth-batch-adapter.v1"},
+    "provider_id": {"const": "choice"},
+    "status": {"enum": ["incomplete", "blocked"]},
+    "collection_status": {"enum": ["incomplete", "complete"]},
+    "admission_status": {"const": "blocked_missing_controlled_industry_adapter"},
+    "blocking_reasons": {
+      "type": "array",
+      "minItems": 2,
+      "uniqueItems": true,
+      "items": {
+        "enum": [
+          "incomplete_fixed_batch_contract",
+          "blocked_historical_backfill_not_original_pit",
+          "blocked_missing_controlled_industry_adapter",
+          "blocked_choice_calendar_not_reconciled_to_exchange_truth"
+        ]
+      }
+    },
+    "as_of": {"type": "string", "format": "date-time"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "point_in_time_status": {"const": "historical_backfill_not_original_capture"},
+    "source_authenticated": {"const": false},
+    "raw_semantics": {"const": "canonicalized_sdk_response_evidence_not_wire_bytes"},
+    "integrity_semantics": {"const": "content_integrity_not_source_authentication"},
+    "plan_path": {"type": "string", "minLength": 1},
+    "plan_sha256": {"$ref": "#/$defs/sha256"},
+    "checkpoint_path": {"type": "string", "minLength": 1},
+    "checkpoint_sha256": {"$ref": "#/$defs/sha256"},
+    "completeness": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "decision_dates",
+        "decision_dates_content_sha256",
+        "membership_union_count",
+        "membership_union_content_sha256",
+        "completed_task_counts",
+        "completed_task_refs_content_sha256",
+        "failed_task_count",
+        "missing_contract_item_count",
+        "missing_contract_item_sample",
+        "highlimit_lowlimit_semantics",
+        "price_basis_contract",
+        "industry_status",
+        "calendar_truth_status",
+        "source_authenticated",
+        "raw_semantics",
+        "integrity_semantics",
+        "suspended_execution_semantics"
+      ],
+      "properties": {
+        "decision_dates": {"type": "array", "items": {"type": "string", "format": "date"}},
+        "decision_dates_content_sha256": {"$ref": "#/$defs/sha256"},
+        "membership_union_count": {"type": "integer", "minimum": 0},
+        "membership_union_content_sha256": {"$ref": "#/$defs/sha256"},
+        "completed_task_counts": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["calendar", "membership", "csd", "css_state_batch", "css_list_date_batch"],
+          "properties": {
+            "calendar": {"type": "integer", "minimum": 0},
+            "membership": {"type": "integer", "minimum": 0},
+            "csd": {"type": "integer", "minimum": 0},
+            "css_state_batch": {"type": "integer", "minimum": 0},
+            "css_list_date_batch": {"type": "integer", "minimum": 0}
+          }
+        },
+        "completed_task_refs_content_sha256": {"$ref": "#/$defs/sha256"},
+        "failed_task_count": {"type": "integer", "minimum": 0},
+        "missing_contract_item_count": {"type": "integer", "minimum": 0},
+        "missing_contract_item_sample": {"type": "array", "maxItems": 20, "items": {"type": "string"}},
+        "highlimit_lowlimit_semantics": {"const": "touch_flags_not_prices"},
+        "price_basis_contract": {"const": "qfq_and_none_stored_separately"},
+        "industry_status": {"const": "blocked_missing_controlled_industry_adapter"},
+        "calendar_truth_status": {"const": "blocked_choice_calendar_not_reconciled_to_exchange_truth"},
+        "source_authenticated": {"const": false},
+        "raw_semantics": {"const": "canonicalized_sdk_response_evidence_not_wire_bytes"},
+        "integrity_semantics": {"const": "content_integrity_not_source_authentication"},
+        "suspended_execution_semantics": {"const": "mark_only_not_executable"}
+      }
+    },
+    "missing_contract_items": {"type": "array", "maxItems": 100, "items": {"type": "string"}},
+    "formal_truth_eligible": {"const": false},
+    "paper_eligible": {"const": false},
+    "trade_eligible": {"const": false},
+    "real_money_candidate": {"const": false},
+    "live_execution_status": {"const": "live_not_supported"},
+    "manifest_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

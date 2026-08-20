@@ -1,0 +1,127 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/strategy_current_industry_receipt.v2.json",
+  "title": "Choice current CSI800 diagnostic industry receipt v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "import_version", "source_kind", "source_file_name",
+    "source_file_sha256", "source_file_size", "received_date", "imported_at",
+    "market_snapshot_date", "industry_effective_date", "membership_basis",
+    "source_universe_id", "source_universe_name", "classification_system",
+    "classification_level", "member_count", "mappings",
+    "normalized_industry_sha256", "current_industry_content_sha256",
+    "source_membership_artifact_sha256", "source_membership_payload_sha256",
+    "source_membership_content_sha256", "workbook_structure_sha256",
+    "importer_source_sha256", "receipt_schema_sha256", "code_bundle_files",
+    "code_bundle_runtime", "code_bundle_sha256", "validation", "admission_status",
+    "source_authenticated", "industry_effective_at_proven", "historical_pit_proven",
+    "formal_truth_eligible", "limitations", "safety", "receipt_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "strategy-workspace-current-industry-receipt.v2"},
+    "import_version": {"const": "choice-current-csi800-industry-import-v2"},
+    "source_kind": {"const": "choice_terminal_xlsx_export"},
+    "source_file_name": {"type": "string", "minLength": 1, "maxLength": 255, "pattern": "^[^/\\\\]+$"},
+    "source_file_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_file_size": {"type": "integer", "minimum": 1, "maximum": 5242880},
+    "received_date": {"type": "string", "format": "date"},
+    "imported_at": {"type": "string", "format": "date-time"},
+    "market_snapshot_date": {"type": "string", "format": "date"},
+    "industry_effective_date": {"type": "null"},
+    "membership_basis": {"const": "current_not_pit"},
+    "source_universe_id": {"const": "CSI800_CURRENT_CHOICE"},
+    "source_universe_name": {"const": "中证800成份"},
+    "classification_system": {"const": "CSI_2021"},
+    "classification_level": {"const": 1},
+    "member_count": {"const": 800},
+    "mappings": {
+      "type": "array", "minItems": 800, "maxItems": 800, "uniqueItems": true,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["instrument_id", "security_name", "industry_id", "industry_name", "source_row"],
+        "properties": {
+          "instrument_id": {"type": "string", "pattern": "^[0-9]{6}\\.(SH|SZ)$"},
+          "security_name": {"type": "string", "minLength": 1, "maxLength": 128},
+          "industry_id": {"enum": ["CSI2021_L1/能源", "CSI2021_L1/原材料", "CSI2021_L1/工业", "CSI2021_L1/可选消费", "CSI2021_L1/主要消费", "CSI2021_L1/医药卫生", "CSI2021_L1/金融", "CSI2021_L1/信息技术", "CSI2021_L1/通信服务", "CSI2021_L1/公用事业", "CSI2021_L1/房地产"]},
+          "industry_name": {"enum": ["能源", "原材料", "工业", "可选消费", "主要消费", "医药卫生", "金融", "信息技术", "通信服务", "公用事业", "房地产"]},
+          "source_row": {"type": "integer", "minimum": 2, "maximum": 801}
+        }
+      }
+    },
+    "normalized_industry_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "current_industry_content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_membership_artifact_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_membership_payload_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_membership_content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "workbook_structure_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "importer_source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "receipt_schema_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "code_bundle_files": {
+      "type": "object", "additionalProperties": false,
+      "required": ["agent/current_industry_import.py", "agent/current_universe_import.py", "research/market_data/contracts.py", "research/strategy_workspace/contracts.py", "research/strategy_workspace/diagnostic.py"],
+      "properties": {
+        "agent/current_industry_import.py": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "agent/current_universe_import.py": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "research/market_data/contracts.py": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "research/strategy_workspace/contracts.py": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "research/strategy_workspace/diagnostic.py": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+      }
+    },
+    "code_bundle_runtime": {"type": "string", "pattern": "^cpython-[0-9]+\\.[0-9]+\\.[0-9]+$"},
+    "code_bundle_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "validation": {
+      "type": "object", "additionalProperties": false,
+      "required": ["sheet_count", "sheet_name", "formula_count", "external_link_count", "template_id", "headers", "source_footer_verified", "source_footer_cell", "source_footer_sha256", "member_count", "unique_instrument_count", "snapshot_date", "industry_counts", "listing_date_missing_count"],
+      "properties": {
+        "sheet_count": {"const": 1},
+        "sheet_name": {"const": "中证800成份"},
+        "formula_count": {"const": 0},
+        "external_link_count": {"const": 0},
+        "template_id": {"const": "choice_terminal_current_csi800_market_industry_v1"},
+        "headers": {"type": "array", "minItems": 16, "maxItems": 16, "items": {"type": "string", "minLength": 1, "maxLength": 128}},
+        "source_footer_verified": {"const": true},
+        "source_footer_cell": {"const": "A807"},
+        "source_footer_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "member_count": {"const": 800},
+        "unique_instrument_count": {"const": 800},
+        "snapshot_date": {"type": "string", "format": "date"},
+        "industry_counts": {
+          "type": "object", "additionalProperties": false,
+          "required": ["能源", "原材料", "工业", "可选消费", "主要消费", "医药卫生", "金融", "信息技术", "通信服务", "公用事业", "房地产"],
+          "properties": {
+            "能源": {"type": "integer", "minimum": 1, "maximum": 800},
+            "原材料": {"type": "integer", "minimum": 1, "maximum": 800},
+            "工业": {"type": "integer", "minimum": 1, "maximum": 800},
+            "可选消费": {"type": "integer", "minimum": 1, "maximum": 800},
+            "主要消费": {"type": "integer", "minimum": 1, "maximum": 800},
+            "医药卫生": {"type": "integer", "minimum": 1, "maximum": 800},
+            "金融": {"type": "integer", "minimum": 1, "maximum": 800},
+            "信息技术": {"type": "integer", "minimum": 1, "maximum": 800},
+            "通信服务": {"type": "integer", "minimum": 1, "maximum": 800},
+            "公用事业": {"type": "integer", "minimum": 1, "maximum": 800},
+            "房地产": {"type": "integer", "minimum": 1, "maximum": 800}
+          }
+        },
+        "listing_date_missing_count": {"type": "integer", "minimum": 0, "maximum": 800}
+      }
+    },
+    "admission_status": {"const": "diagnostic_current_industry_only"},
+    "source_authenticated": {"const": false},
+    "industry_effective_at_proven": {"const": false},
+    "historical_pit_proven": {"const": false},
+    "formal_truth_eligible": {"const": false},
+    "limitations": {"const": ["industry_field_has_no_effective_date", "current_industry_cannot_backfill_history", "st_field_is_latest_not_historical", "listing_date_is_missing_in_source", "workbook_hash_does_not_prove_official_origin"]},
+    "safety": {
+      "type": "object", "additionalProperties": false,
+      "required": ["paper_eligibility", "trade_eligibility", "real_money_list_allowed", "live"],
+      "properties": {
+        "paper_eligibility": {"const": false},
+        "trade_eligibility": {"const": false},
+        "real_money_list_allowed": {"const": false},
+        "live": {"const": "not_supported"}
+      }
+    },
+    "receipt_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

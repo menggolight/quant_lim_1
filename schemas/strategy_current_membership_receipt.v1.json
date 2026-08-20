@@ -1,0 +1,119 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/strategy_current_membership_receipt.v1.json",
+  "title": "Choice current CSI800 diagnostic membership receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "import_version", "source_kind", "source_file_name",
+    "source_file_sha256", "source_file_size", "received_date", "imported_at",
+    "membership_effective_date", "membership_basis",
+    "source_universe_id", "source_universe_name", "source_footer", "member_count",
+    "members", "normalized_members_sha256", "current_membership_content_sha256",
+    "workbook_structure_sha256", "importer_source_sha256", "receipt_schema_sha256",
+    "validation", "admission_status", "source_authenticated", "historical_pit_proven",
+    "formal_truth_eligible", "capabilities", "limitations", "safety", "receipt_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "strategy-workspace-current-membership-receipt.v1"},
+    "import_version": {"const": "choice-current-csi800-membership-import-v1"},
+    "source_kind": {"const": "choice_terminal_xlsx_export"},
+    "source_file_name": {"type": "string", "minLength": 1},
+    "source_file_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "source_file_size": {"type": "integer", "minimum": 1},
+    "received_date": {"type": "string", "format": "date"},
+    "imported_at": {"type": "string", "format": "date-time"},
+    "membership_effective_date": {"type": "null"},
+    "membership_basis": {"const": "current_not_pit"},
+    "source_universe_id": {"const": "CSI800_CURRENT_CHOICE"},
+    "source_universe_name": {"const": "中证800成份"},
+    "source_footer": {"const": "数据来源：妙想Choice"},
+    "member_count": {"const": 800},
+    "members": {
+      "type": "array", "minItems": 800, "maxItems": 800,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["instrument_id", "security_name", "source_row"],
+        "properties": {
+          "instrument_id": {"type": "string", "pattern": "^[0-9]{6}\\.(SH|SZ)$"},
+          "security_name": {"type": "string", "minLength": 1},
+          "source_row": {"type": "integer", "minimum": 2, "maximum": 801}
+        }
+      }
+    },
+    "normalized_members_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "current_membership_content_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "workbook_structure_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "importer_source_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "receipt_schema_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "validation": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "template_id", "workbook_profile", "sheet_count", "sheet_name", "headers",
+        "formula_count", "external_link_count", "source_footer_verified",
+        "source_footer_cell", "source_footer_sha256", "member_count",
+        "unique_instrument_count", "market_counts"
+      ],
+      "properties": {
+        "template_id": {"const": "choice_terminal_current_csi800_two_column_v1"},
+        "workbook_profile": {"const": "choice_terminal_simple_export_v1"},
+        "sheet_count": {"const": 1},
+        "sheet_name": {"const": "中证800成份"},
+        "headers": {"const": ["证券代码", "证券名称"]},
+        "formula_count": {"const": 0},
+        "external_link_count": {"const": 0},
+        "source_footer_verified": {"const": true},
+        "source_footer_cell": {"const": "A807"},
+        "source_footer_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+        "member_count": {"const": 800},
+        "unique_instrument_count": {"const": 800},
+        "market_counts": {
+          "type": "object", "additionalProperties": false,
+          "required": ["SH", "SZ"],
+          "properties": {
+            "SH": {"type": "integer", "minimum": 0},
+            "SZ": {"type": "integer", "minimum": 0}
+          }
+        }
+      }
+    },
+    "admission_status": {"const": "diagnostic_current_membership_only"},
+    "source_authenticated": {"const": false},
+    "historical_pit_proven": {"const": false},
+    "formal_truth_eligible": {"const": false},
+    "capabilities": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "current_csi800_membership", "industry_mapping", "historical_membership",
+        "point_in_time_membership", "total_return_benchmark", "financials"
+      ],
+      "properties": {
+        "current_csi800_membership": {"const": true},
+        "industry_mapping": {"const": false},
+        "historical_membership": {"const": false},
+        "point_in_time_membership": {"const": false},
+        "total_return_benchmark": {"const": false},
+        "financials": {"const": false}
+      }
+    },
+    "limitations": {
+      "const": [
+        "received_date_is_not_membership_effective_date",
+        "current_membership_cannot_backfill_history",
+        "industry_mapping_not_in_workbook",
+        "workbook_hash_does_not_prove_official_origin"
+      ]
+    },
+    "safety": {
+      "type": "object", "additionalProperties": false,
+      "required": ["paper_eligibility", "trade_eligibility", "real_money_list_allowed", "live"],
+      "properties": {
+        "paper_eligibility": {"const": false},
+        "trade_eligibility": {"const": false},
+        "real_money_list_allowed": {"const": false},
+        "live": {"const": "not_supported"}
+      }
+    },
+    "receipt_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}
