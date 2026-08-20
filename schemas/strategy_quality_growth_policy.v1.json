@@ -1,0 +1,247 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "strategy_quality_growth_policy.v1.json",
+  "title": "A-share small-account quality-growth policy v1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "strategy_id",
+    "research_status",
+    "execution_status",
+    "data_policy",
+    "target",
+    "factors",
+    "preprocessing",
+    "models",
+    "splits",
+    "portfolio",
+    "eligibility",
+    "costs",
+    "risk",
+    "historical_gates",
+    "paper",
+    "fallback",
+    "safety"
+  ],
+  "properties": {
+    "schema_version": {"const": "strategy-quality-growth-policy.v1"},
+    "strategy_id": {"const": "a-share-small-account-quality-growth-v1"},
+    "research_status": {"const": "blocked_missing_pit_data"},
+    "execution_status": {"const": "research_only"},
+    "description": {"type": "string", "minLength": 1},
+    "data_policy": {
+      "type": "object",
+      "const": {
+        "provider_id":"choice","single_source_required":true,"universe_id":"CSI800_PIT",
+        "price_index_id":"000906.CSI","total_return_benchmark_id":null,
+        "total_return_benchmark_must_be_provider_verified":true,
+        "financial_start_date":"2014-01-01","price_start_date":"2017-01-01",
+        "forbid_current_membership_backfill":true,"forbid_success_only_subset":true,
+        "forbid_mixed_provider_fill":true,"first_disclosure_only":true,
+        "qfq_does_not_prove_corporate_actions":true
+      },
+      "required": ["provider_id", "universe_id", "price_index_id", "total_return_benchmark_id", "single_source_required", "first_disclosure_only"],
+      "properties": {
+        "provider_id": {"const": "choice"},
+        "universe_id": {"const": "CSI800_PIT"},
+        "price_index_id": {"const": "000906.CSI"},
+        "total_return_benchmark_id": {"type": "null"},
+        "single_source_required": {"const": true},
+        "first_disclosure_only": {"const": true}
+      },
+      "additionalProperties": true
+    },
+    "target": {
+      "type": "object",
+      "required": ["horizon_sessions", "rebalance_sessions", "signal_time", "execution_time"],
+      "properties": {
+        "horizon_sessions": {"const": 20},
+        "rebalance_sessions": {"const": 20},
+        "signal_time": {"const": "after_close"},
+        "execution_time": {"const": "next_trading_session_open"}
+      },
+      "additionalProperties": false
+    },
+    "factors": {
+      "type": "array",
+      "const": [
+        {"factor_id":"QG_ROE_STABILITY","expected_sign":"positive","formula":"latest_quarter_roe - sample_std(last_12_quarters_roe,ddof=1)","financial_applicability":"all"},
+        {"factor_id":"QG_EARNINGS_TREND_DEVIATION","expected_sign":"positive","formula":"(latest_quarter_net_profit - preceding_8q_ols_trend_prediction) / sample_std(preceding_8q_ols_residuals,ddof=1)","financial_applicability":"all"},
+        {"factor_id":"QG_CASH_EARNINGS_QUALITY","expected_sign":"positive","formula":"(ttm_operating_cash_flow - ttm_operating_profit) / latest_total_assets","financial_applicability":"non_financial_only"},
+        {"factor_id":"QG_CASH_DEBT_COVERAGE","expected_sign":"positive","formula":"ttm_operating_cash_flow / latest_total_liabilities","financial_applicability":"non_financial_only"},
+        {"factor_id":"QG_GROSS_PROFITABILITY","expected_sign":"positive","formula":"ttm_gross_profit / mean(latest_total_assets,total_assets_4q_ago)","financial_applicability":"non_financial_only"},
+        {"factor_id":"QG_REVENUE_GROWTH_STABILITY","expected_sign":"positive","formula":"mean(last_8_quarterly_yoy_revenue_growth) - sample_std(last_8_quarterly_yoy_revenue_growth,ddof=1)","financial_applicability":"non_financial_only"}
+      ],
+      "minItems": 6,
+      "maxItems": 6,
+      "items": {
+        "type": "object",
+        "required": ["factor_id", "expected_sign", "formula", "financial_applicability"],
+        "properties": {
+          "factor_id": {"type": "string", "pattern": "^QG_[A-Z0-9_]+$"},
+          "expected_sign": {"const": "positive"},
+          "formula": {"type": "string", "minLength": 1},
+          "financial_applicability": {"enum": ["all", "non_financial_only"]}
+        },
+        "additionalProperties": false
+      }
+    },
+    "preprocessing": {
+      "const": {
+        "winsor_lower_quantile":"0.01",
+        "winsor_upper_quantile":"0.99",
+        "residualize_controls":["csi_level1_industry_dummies","log_float_market_cap","earnings_yield","rm120","volatility_60"],
+        "post_residualization":"cross_sectional_zscore",
+        "missing_value_policy":"drop_never_zero_fill"
+      }
+    },
+    "models": {
+      "type": "object",
+      "required": ["single_factor", "multi_factor", "ridge_alpha", "baseline"],
+      "properties": {
+        "single_factor": {"const": "fama_macbeth_newey_west"},
+        "multi_factor": {"const": "ridge"},
+        "ridge_alpha": {"const": "1"},
+        "baseline": {"const": "pre_registered_direction_equal_weight"}
+      },
+      "additionalProperties": false
+    },
+    "splits": {
+      "const": {
+        "train":["2018-01-01","2022-12-31"],
+        "validation":["2023-01-01","2023-12-31"],
+        "locked_test":["2024-01-01","2025-12-31"],
+        "second_audit":["2026-01-01","PRE_REGISTRATION_CUTOFF"],
+        "purge_sessions":20
+      }
+    },
+    "portfolio": {
+      "type": "object",
+      "const": {
+        "initial_cash":"10000","top_decile_research_capital":"1000000",
+        "max_positions":2,"max_position_weight":"0.40","minimum_cash_weight":"0.20",
+        "entry_top_fraction":"0.05","hold_top_fraction":"0.20",
+        "positive_prediction_required":true,"distinct_csi_level1_industries":true,
+        "combined_account_industry_cap":"0.45","manual_veto_policy":"leave_cash_no_substitute",
+        "lot_size_policy":"per_instrument_metadata",
+        "unmanaged_external_assets":[{"instrument_id":"000333.SZ","quantity":100,"status":"unmanaged_external"}]
+      },
+      "required": ["initial_cash", "top_decile_research_capital", "max_positions", "max_position_weight", "minimum_cash_weight", "distinct_csi_level1_industries", "combined_account_industry_cap", "unmanaged_external_assets"],
+      "properties": {
+        "initial_cash": {"const": "10000"},
+        "top_decile_research_capital": {"const": "1000000"},
+        "max_positions": {"const": 2},
+        "max_position_weight": {"const": "0.40"},
+        "minimum_cash_weight": {"const": "0.20"},
+        "distinct_csi_level1_industries": {"const": true},
+        "combined_account_industry_cap": {"const": "0.45"},
+        "unmanaged_external_assets": {"type": "array", "minItems": 1}
+      },
+      "additionalProperties": true
+    },
+    "eligibility": {
+      "const": {
+        "minimum_listing_sessions":250,
+        "minimum_average_amount_20":"100000000",
+        "new_buy_requires_not_st":true,
+        "new_buy_requires_not_suspended":true,
+        "new_buy_requires_not_limit_locked":true,
+        "sell_constraints":["t_plus_one","suspension","limit_down_locked"]
+      }
+    },
+    "costs": {
+      "type": "object",
+      "const": {
+        "commission_rate":"0.00018","minimum_commission":"5","sell_tax_rate":"0.0005",
+        "transfer_fee_rate_both_sides":"0.00001","base_slippage_bps_one_way":"10",
+        "stress_slippage_bps_one_way":"20","stress_commission_multiplier":"2",
+        "historical_rate_replay":false
+      },
+      "required": ["commission_rate", "minimum_commission", "sell_tax_rate", "transfer_fee_rate_both_sides", "base_slippage_bps_one_way", "stress_slippage_bps_one_way"],
+      "properties": {
+        "commission_rate": {"const": "0.00018"},
+        "minimum_commission": {"const": "5"},
+        "sell_tax_rate": {"const": "0.0005"},
+        "transfer_fee_rate_both_sides": {"const": "0.00001"},
+        "base_slippage_bps_one_way": {"const": "10"},
+        "stress_slippage_bps_one_way": {"const": "20"}
+      },
+      "additionalProperties": true
+    },
+    "risk": {
+      "type": "object",
+      "const": {
+        "drawdown_freeze":"0.12",
+        "drawdown_action":"freeze_new_buys_and_target_cash_next_tradable_decision",
+        "maximum_annualized_one_way_turnover":"4","leverage_allowed":false,
+        "short_selling_allowed":false
+      },
+      "required": ["drawdown_freeze", "maximum_annualized_one_way_turnover", "leverage_allowed", "short_selling_allowed"],
+      "properties": {
+        "drawdown_freeze": {"const": "0.12"},
+        "maximum_annualized_one_way_turnover": {"const": "4"},
+        "leverage_allowed": {"const": false},
+        "short_selling_allowed": {"const": false}
+      },
+      "additionalProperties": true
+    },
+    "historical_gates": {
+      "const": {
+        "data_complete_and_pit":true,
+        "top_decile_net_absolute_return_positive":true,
+        "top_decile_net_active_return_positive":true,
+        "top2_lot_net_absolute_return_positive":true,
+        "top2_lot_net_active_return_positive":true,
+        "oos_rank_ic_positive_and_stable":true,
+        "minimum_corrected_independent_factors":2,
+        "minimum_positive_half_year_windows":3,
+        "half_year_window_count":4,
+        "stress_net_active_return_nonnegative":true,
+        "maximum_drawdown":"0.12",
+        "maximum_annualized_one_way_turnover":"4",
+        "failure_policy":"reject_without_retuning"
+      }
+    },
+    "paper": {
+      "type": "object",
+      "required": ["minimum_calendar_months", "minimum_decision_points", "configuration_changes_allowed", "passing_status", "automatic_order_submission"],
+      "properties": {
+        "minimum_calendar_months": {"const": 12},
+        "minimum_decision_points": {"const": 12},
+        "configuration_changes_allowed": {"const": false},
+        "passing_status": {"const": "manual_real_money_candidate"},
+        "automatic_order_submission": {"const": false}
+      },
+      "additionalProperties": false
+    },
+    "fallback": {
+      "type": "object",
+      "const": {
+        "status":"diagnostic_current_universe_not_pit","sample_size":60,
+        "selection":"sha256_instrument_id_stratified_by_current_industry",
+        "factor_ids":["RM20","RM60","RM120","TREND_EFF60","DOWNSIDE_VOL60","BREAKOUT60"],
+        "paper_eligibility":false,"real_money_list_allowed":false
+      },
+      "required": ["status", "sample_size", "factor_ids", "paper_eligibility", "real_money_list_allowed"],
+      "properties": {
+        "status": {"const": "diagnostic_current_universe_not_pit"},
+        "sample_size": {"const": 60},
+        "factor_ids": {"type": "array", "minItems": 6, "maxItems": 6},
+        "paper_eligibility": {"const": false},
+        "real_money_list_allowed": {"const": false}
+      },
+      "additionalProperties": true
+    },
+    "safety": {
+      "type": "object",
+      "required": ["paper_eligibility", "trade_eligibility", "live"],
+      "properties": {
+        "paper_eligibility": {"const": false},
+        "trade_eligibility": {"const": false},
+        "live": {"const": "not_supported"}
+      },
+      "additionalProperties": false
+    }
+  },
+  "additionalProperties": false
+}

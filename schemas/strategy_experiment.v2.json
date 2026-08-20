@@ -1,0 +1,340 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/strategy_experiment.v2.json",
+  "title": "Frozen stock-factor ExperimentSpec v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "experiment_id", "created_at", "status", "universe",
+    "benchmark", "target", "factors", "controls", "splits", "ridge", "statistics", "cost",
+    "portfolio", "gates", "hashes", "consumed_test_intervals", "spec_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "strategy-experiment-v2"},
+    "experiment_id": {"$ref": "#/$defs/identifier"},
+    "created_at": {"$ref": "#/$defs/dateTime"},
+    "status": {"const": "preregistered_frozen"},
+    "universe": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "universe_id", "membership_dataset_id", "effective_interval", "selection_rule",
+        "backfill_policy", "membership_panel_receipt_sha256",
+        "membership_panel_content_sha256"
+      ],
+      "properties": {
+        "universe_id": {"$ref": "#/$defs/identifier"},
+        "membership_dataset_id": {"const": "CSI800_PIT"},
+        "effective_interval": {"$ref": "#/$defs/interval"},
+        "selection_rule": {"const": "membership_effective_at_decision"},
+        "backfill_policy": {"const": "forbid_current_constituent_backfill"},
+        "membership_panel_receipt_sha256": {"$ref": "#/$defs/sha256"},
+        "membership_panel_content_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "benchmark": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "instrument_id", "provider_id", "return_basis",
+        "instrument_id_source_receipt_sha256", "total_return_series_content_sha256"
+      ],
+      "properties": {
+        "instrument_id": {"$ref": "#/$defs/identifier"},
+        "provider_id": {"const": "choice"},
+        "return_basis": {"const": "total_return"},
+        "instrument_id_source_receipt_sha256": {"$ref": "#/$defs/sha256"},
+        "total_return_series_content_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "target": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "target_id", "horizon_trading_sessions", "definition", "signal_cutoff",
+        "entry_policy", "exit_policy", "benchmark_alignment", "rebalance_anchor_date",
+        "rebalance_anchor_rule", "trading_calendar_content_sha256"
+      ],
+      "properties": {
+        "target_id": {"$ref": "#/$defs/identifier"},
+        "horizon_trading_sessions": {"const": 20},
+        "definition": {"const": "future_20_session_open_to_open_excess_total_return"},
+        "signal_cutoff": {"const": "decision_session_close"},
+        "entry_policy": {"const": "next_trading_session_open"},
+        "exit_policy": {"const": "rebalance_open_after_20_trading_sessions"},
+        "benchmark_alignment": {"const": "same_sessions_same_return_basis"},
+        "rebalance_anchor_date": {"const": "2018-01-02"},
+        "rebalance_anchor_rule": {
+          "const": "first_controlled_session_on_or_after_2018-01-01"
+        },
+        "trading_calendar_content_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "factors": {
+      "type": "array", "minItems": 6, "maxItems": 6,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": [
+          "factor_id", "formula", "expected_sign", "financial_applicability",
+          "required_fields"
+        ],
+        "properties": {
+          "factor_id": {
+            "enum": [
+              "QG_ROE_STABILITY", "QG_EARNINGS_TREND_DEVIATION",
+              "QG_CASH_EARNINGS_QUALITY", "QG_CASH_DEBT_COVERAGE",
+              "QG_GROSS_PROFITABILITY", "QG_REVENUE_GROWTH_STABILITY"
+            ]
+          },
+          "formula": {"type": "string", "minLength": 1},
+          "expected_sign": {"const": "positive"},
+          "financial_applicability": {"enum": ["all", "non_financial_only"]},
+          "required_fields": {
+            "type": "array", "minItems": 1, "uniqueItems": true,
+            "items": {"$ref": "#/$defs/field"}
+          }
+        }
+      }
+    },
+    "controls": {
+      "type": "array", "minItems": 5, "maxItems": 5,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["control_id", "field", "transform", "availability_lag_sessions"],
+        "properties": {
+          "control_id": {
+            "enum": [
+              "csi_level1_industry_dummies", "log_float_market_cap",
+              "earnings_yield", "rm120", "volatility_60"
+            ]
+          },
+          "field": {"$ref": "#/$defs/field"},
+          "transform": {"$ref": "#/$defs/identifier"},
+          "availability_lag_sessions": {"type": "integer", "minimum": 0}
+        }
+      }
+    },
+    "splits": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "train", "validation", "locked_test", "second_audit",
+        "preregistration_cutoff", "purge_sessions", "locked_test_freshness",
+        "second_audit_freshness"
+      ],
+      "properties": {
+        "train": {
+          "type": "object", "additionalProperties": false,
+          "required": ["start_date", "end_date"],
+          "properties": {
+            "start_date": {"const": "2018-01-01"},
+            "end_date": {"const": "2022-12-31"}
+          }
+        },
+        "validation": {
+          "type": "object", "additionalProperties": false,
+          "required": ["start_date", "end_date"],
+          "properties": {
+            "start_date": {"const": "2023-01-01"},
+            "end_date": {"const": "2023-12-31"}
+          }
+        },
+        "locked_test": {
+          "type": "object", "additionalProperties": false,
+          "required": ["start_date", "end_date"],
+          "properties": {
+            "start_date": {"const": "2024-01-01"},
+            "end_date": {"const": "2025-12-31"}
+          }
+        },
+        "second_audit": {
+          "type": "object", "additionalProperties": false,
+          "required": ["start_date", "end_date"],
+          "properties": {
+            "start_date": {"const": "2026-01-01"},
+            "end_date": {"$ref": "#/$defs/date"}
+          }
+        },
+        "preregistration_cutoff": {"$ref": "#/$defs/date"},
+        "purge_sessions": {"const": 20},
+        "locked_test_freshness": {
+          "enum": ["fresh_unconsumed", "retrospective_consumed"]
+        },
+        "second_audit_freshness": {
+          "enum": ["fresh_unconsumed", "retrospective_consumed"]
+        }
+      }
+    },
+    "ridge": {
+      "type": "object", "additionalProperties": false,
+      "required": ["model", "alpha", "fit_intercept", "standardization", "fit_scope"],
+      "properties": {
+        "model": {"const": "ridge"},
+        "alpha": {"const": "1"},
+        "fit_intercept": {"const": true},
+        "standardization": {"const": "cross_sectional_train_parameters_only"},
+        "fit_scope": {"const": "train_only"}
+      }
+    },
+    "statistics": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "fama_macbeth_hac_lag_rule", "fama_macbeth_min_periods",
+        "multiple_testing", "familywise_alpha", "rank_ic_evaluation_splits",
+        "rank_ic_mean_threshold", "rank_ic_positive_fraction_threshold",
+        "factor_significance_splits", "ridge_submodel_policy"
+      ],
+      "properties": {
+        "fama_macbeth_hac_lag_rule": {"const": "andrews_automatic_floor_4_t_over_100_pow_2_over_9"},
+        "fama_macbeth_min_periods": {"const": 2},
+        "multiple_testing": {"const": "holm"},
+        "familywise_alpha": {"const": "0.05"},
+        "rank_ic_evaluation_splits": {
+          "const": ["validation", "locked_test", "audit"]
+        },
+        "rank_ic_mean_threshold": {"const": "0"},
+        "rank_ic_positive_fraction_threshold": {"const": "0.5"},
+        "factor_significance_splits": {"const": ["locked_test", "audit"]},
+        "ridge_submodel_policy": {"const": "financial_2_factor_nonfinancial_6_factor"}
+      }
+    },
+    "cost": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "currency", "commission_rate", "minimum_commission", "sell_stamp_tax_rate",
+        "transfer_fee_rate_both_sides", "base_slippage_bps_one_way",
+        "stress_slippage_bps_one_way", "stress_commission_multiplier",
+        "historical_rate_replay"
+      ],
+      "properties": {
+        "currency": {"const": "CNY"},
+        "commission_rate": {"const": "0.00018"},
+        "minimum_commission": {"const": "5"},
+        "sell_stamp_tax_rate": {"const": "0.0005"},
+        "transfer_fee_rate_both_sides": {"const": "0.00001"},
+        "base_slippage_bps_one_way": {"const": "10"},
+        "stress_slippage_bps_one_way": {"const": "20"},
+        "stress_commission_multiplier": {"const": "2"},
+        "historical_rate_replay": {"const": false}
+      }
+    },
+    "portfolio": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "initial_capital", "top_decile_research_capital", "lot_size_policy", "max_positions", "max_weight_per_position",
+        "cash_reserve_weight", "rebalance_sessions", "max_drawdown", "entry_top_fraction",
+        "hold_top_fraction", "positive_prediction_required", "manual_veto_policy",
+        "selected_positions_industry_policy",
+        "combined_account_level1_industry_cap", "annual_one_way_turnover_cap",
+        "trial_duration_months", "paper_decision_points", "execution_mode", "long_only",
+        "unmanaged_external_assets"
+      ],
+      "properties": {
+        "initial_capital": {"const": "10000"},
+        "top_decile_research_capital": {"const": "1000000"},
+        "lot_size_policy": {"const": "per_instrument_metadata"},
+        "max_positions": {"const": 2},
+        "max_weight_per_position": {"const": "0.4"},
+        "cash_reserve_weight": {"const": "0.2"},
+        "rebalance_sessions": {"const": 20},
+        "max_drawdown": {"const": "0.12"},
+        "entry_top_fraction": {"const": "0.05"},
+        "hold_top_fraction": {"const": "0.2"},
+        "positive_prediction_required": {"const": true},
+        "manual_veto_policy": {"const": "leave_cash_no_substitute"},
+        "selected_positions_industry_policy": {"const": "distinct_level1_industry"},
+        "combined_account_level1_industry_cap": {"const": "0.45"},
+        "annual_one_way_turnover_cap": {"const": "4"},
+        "trial_duration_months": {"const": 12},
+        "paper_decision_points": {"const": 12},
+        "execution_mode": {"const": "paper_only"},
+        "long_only": {"const": true},
+        "unmanaged_external_assets": {
+          "type": "array", "minItems": 1, "maxItems": 1,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": [
+              "instrument_id", "quantity", "status", "level1_industry_code",
+              "industry_source_receipt_sha256"
+            ],
+            "properties": {
+              "instrument_id": {"const": "000333.SZ"},
+              "quantity": {"const": 100},
+              "status": {"const": "unmanaged_external"},
+              "level1_industry_code": {"$ref": "#/$defs/identifier"},
+              "industry_source_receipt_sha256": {"$ref": "#/$defs/sha256"}
+            }
+          }
+        }
+      }
+    },
+    "gates": {
+      "type": "array", "minItems": 11, "maxItems": 11,
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["gate_id", "metric", "operator", "threshold", "scope", "failure_action"],
+        "properties": {
+          "gate_id": {
+            "enum": [
+              "data_pit_complete", "top_decile_net_absolute_positive",
+              "top_decile_net_active_positive", "top2_net_absolute_positive",
+              "top2_net_active_positive", "oos_rank_ic_stable",
+              "corrected_significant_factor_count_gte_2",
+              "positive_semiannual_windows_gte_3_of_4",
+              "stress_active_return_non_negative", "max_drawdown_lte_12pct",
+              "annualized_one_way_turnover_lte_4"
+            ]
+          },
+          "metric": {"$ref": "#/$defs/identifier"},
+          "operator": {"enum": ["gt", "gte", "lt", "lte"]},
+          "threshold": {"$ref": "#/$defs/decimalString"},
+          "scope": {"const": "validation_and_all_audits"},
+          "failure_action": {"const": "reject"}
+        }
+      }
+    },
+    "hashes": {
+      "type": "object", "additionalProperties": false,
+      "required": ["data_receipt_sha256", "code_sha256", "config_sha256"],
+      "properties": {
+        "data_receipt_sha256": {
+          "type": "array", "minItems": 1, "uniqueItems": true,
+          "items": {"$ref": "#/$defs/sha256"}
+        },
+        "code_sha256": {"$ref": "#/$defs/sha256"},
+        "config_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "consumed_test_intervals": {
+      "type": "array",
+      "items": {
+        "type": "object", "additionalProperties": false,
+        "required": ["start_date", "end_date", "source_experiment_id", "source_run_sha256"],
+        "properties": {
+          "start_date": {"$ref": "#/$defs/date"},
+          "end_date": {"$ref": "#/$defs/date"},
+          "source_experiment_id": {"$ref": "#/$defs/identifier"},
+          "source_run_sha256": {"$ref": "#/$defs/sha256"}
+        }
+      }
+    },
+    "spec_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "identifier": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "field": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+    "instrumentId": {"type": "string", "pattern": "^[0-9]{6}\\.(?:SH|SZ)$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "date": {"type": "string", "format": "date", "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"},
+    "dateTime": {
+      "type": "string", "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "decimalString": {"type": "string", "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
+    "nonNegativeDecimalString": {"type": "string", "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
+    "interval": {
+      "type": "object", "additionalProperties": false,
+      "required": ["start_date", "end_date"],
+      "properties": {
+        "start_date": {"$ref": "#/$defs/date"},
+        "end_date": {"$ref": "#/$defs/date"}
+      }
+    }
+  }
+}

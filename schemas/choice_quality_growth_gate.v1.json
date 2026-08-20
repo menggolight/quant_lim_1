@@ -1,0 +1,260 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/choice_quality_growth_gate.v1.json",
+  "title": "Controlled Choice quality-growth capability receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "receipt_id", "generated_at", "coverage_cutoff", "producer", "claim_scope",
+    "policies", "capabilities", "receipt_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "choice-quality-growth-gate-v1"},
+    "receipt_id": {"$ref": "#/$defs/identifier"},
+    "generated_at": {"$ref": "#/$defs/dateTime"},
+    "coverage_cutoff": {"$ref": "#/$defs/date"},
+    "producer": {"const": "choice-controlled-capability-audit-v1"},
+    "claim_scope": {"const": "capability_contract_only_not_live_connectivity"},
+    "policies": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "source_policy", "universe_completion_policy",
+        "membership_backfill_policy", "revision_policy"
+      ],
+      "properties": {
+        "source_policy": {
+          "enum": ["single_source_only", "mixed_source_allowed"]
+        },
+        "universe_completion_policy": {
+          "enum": ["complete_frozen_universe_only", "successful_subsample_allowed"]
+        },
+        "membership_backfill_policy": {
+          "enum": ["historical_as_of_only", "current_constituents_backfill"]
+        },
+        "revision_policy": {
+          "enum": ["first_disclosure_append_only", "latest_revision_overwrite"]
+        }
+      }
+    },
+    "capabilities": {
+      "type": "array",
+      "minItems": 11,
+      "maxItems": 11,
+      "items": {"$ref": "#/$defs/capabilityItem"}
+    },
+    "receipt_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "date": {
+      "type": "string",
+      "format": "date",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "dateTime": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "capability": {
+      "enum": [
+        "historical_constituents",
+        "qfq_daily_bars",
+        "daily_amount",
+        "trade_calendar",
+        "total_return_benchmark",
+        "pit_industry",
+        "pit_float_market_cap",
+        "historical_st_status",
+        "historical_suspension_status",
+        "historical_limit_status",
+        "first_disclosure_financials"
+      ]
+    },
+    "choiceField": {
+      "enum": [
+        "instrument_id", "membership_date", "effective_from", "effective_to",
+        "membership_status", "trading_date", "open", "high", "low",
+        "close", "preclose", "volume", "amount", "adjustment", "is_trading_day",
+        "total_return_level", "total_return_open", "total_return_close",
+        "industry_code", "float_market_cap", "is_st",
+        "is_suspended", "is_limit_up", "is_limit_down", "report_period",
+        "first_disclosed_at", "revision_id", "flow_basis", "statement_scope",
+        "currency", "revenue", "operating_cost",
+        "operating_profit", "gross_profit", "net_profit_attributable",
+        "operating_cash_flow", "return_on_equity", "total_assets", "total_equity",
+        "total_liabilities"
+      ]
+    },
+    "capabilityItem": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "capability", "verification", "provider_id", "dataset_contract", "subject_ids",
+        "return_basis", "financial_flow_basis", "financial_statement_scope",
+        "financial_currency", "fields", "coverage_start", "coverage_end", "row_count",
+        "distinct_subject_count", "evidence_receipt_sha256",
+        "normalized_content_sha256", "observed_at"
+      ],
+      "properties": {
+        "capability": {"$ref": "#/$defs/capability"},
+        "verification": {
+          "enum": [
+            "controlled_evidence_verified", "missing", "unverified", "unsupported"
+          ]
+        },
+        "provider_id": {"const": "choice"},
+        "dataset_contract": {
+          "oneOf": [{"$ref": "#/$defs/identifier"}, {"type": "null"}]
+        },
+        "subject_ids": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/identifier"}
+        },
+        "return_basis": {
+          "oneOf": [{"const": "total_return"}, {"type": "null"}]
+        },
+        "financial_flow_basis": {
+          "oneOf": [{"const": "single_quarter"}, {"type": "null"}]
+        },
+        "financial_statement_scope": {
+          "oneOf": [{"const": "consolidated"}, {"type": "null"}]
+        },
+        "financial_currency": {
+          "oneOf": [{"const": "CNY"}, {"type": "null"}]
+        },
+        "fields": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"$ref": "#/$defs/choiceField"}
+        },
+        "coverage_start": {
+          "oneOf": [{"$ref": "#/$defs/date"}, {"type": "null"}]
+        },
+        "coverage_end": {
+          "oneOf": [{"$ref": "#/$defs/date"}, {"type": "null"}]
+        },
+        "row_count": {
+          "oneOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]
+        },
+        "distinct_subject_count": {
+          "oneOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]
+        },
+        "evidence_receipt_sha256": {
+          "oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+        },
+        "normalized_content_sha256": {
+          "oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+        },
+        "observed_at": {
+          "oneOf": [{"$ref": "#/$defs/dateTime"}, {"type": "null"}]
+        }
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {
+              "verification": {"const": "controlled_evidence_verified"}
+            },
+            "required": ["verification"]
+          },
+          "then": {
+            "properties": {
+              "dataset_contract": {"$ref": "#/$defs/identifier"},
+              "subject_ids": {"minItems": 1},
+              "fields": {"minItems": 1},
+              "coverage_start": {"$ref": "#/$defs/date"},
+              "coverage_end": {"$ref": "#/$defs/date"},
+              "row_count": {"type": "integer", "minimum": 1},
+              "distinct_subject_count": {"type": "integer", "minimum": 1},
+              "evidence_receipt_sha256": {"$ref": "#/$defs/sha256"},
+              "normalized_content_sha256": {"$ref": "#/$defs/sha256"},
+              "observed_at": {"$ref": "#/$defs/dateTime"}
+            }
+          },
+          "else": {
+            "properties": {
+              "dataset_contract": {"type": "null"},
+              "subject_ids": {"maxItems": 0},
+              "return_basis": {"type": "null"},
+              "financial_flow_basis": {"type": "null"},
+              "financial_statement_scope": {"type": "null"},
+              "financial_currency": {"type": "null"},
+              "fields": {"maxItems": 0},
+              "coverage_start": {"type": "null"},
+              "coverage_end": {"type": "null"},
+              "row_count": {"type": "null"},
+              "distinct_subject_count": {"type": "null"},
+              "evidence_receipt_sha256": {"type": "null"},
+              "normalized_content_sha256": {"type": "null"},
+              "observed_at": {"type": "null"}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "capability": {"const": "total_return_benchmark"},
+              "verification": {"const": "controlled_evidence_verified"}
+            },
+            "required": ["capability", "verification"]
+          },
+          "then": {
+            "properties": {
+              "subject_ids": {"minItems": 1, "maxItems": 1},
+              "return_basis": {"const": "total_return"}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "capability": {"not": {"const": "total_return_benchmark"}}
+            },
+            "required": ["capability"]
+          },
+          "then": {
+            "properties": {"return_basis": {"type": "null"}}
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "capability": {"const": "first_disclosure_financials"},
+              "verification": {"const": "controlled_evidence_verified"}
+            },
+            "required": ["capability", "verification"]
+          },
+          "then": {
+            "properties": {
+              "financial_flow_basis": {"const": "single_quarter"},
+              "financial_statement_scope": {"const": "consolidated"},
+              "financial_currency": {"const": "CNY"}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "capability": {"not": {"const": "first_disclosure_financials"}}
+            },
+            "required": ["capability"]
+          },
+          "then": {
+            "properties": {
+              "financial_flow_basis": {"type": "null"},
+              "financial_statement_scope": {"type": "null"},
+              "financial_currency": {"type": "null"}
+            }
+          }
+        }
+      ]
+    }
+  }
+}

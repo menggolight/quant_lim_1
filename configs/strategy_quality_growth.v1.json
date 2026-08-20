@@ -1,0 +1,173 @@
+{
+  "schema_version": "strategy-quality-growth-policy.v1",
+  "strategy_id": "a-share-small-account-quality-growth-v1",
+  "research_status": "blocked_missing_pit_data",
+  "execution_status": "research_only",
+  "description": "A股中证800质量成长研究；正式链仅在完整Choice单源PIT数据门通过后运行。",
+  "data_policy": {
+    "provider_id": "choice",
+    "single_source_required": true,
+    "universe_id": "CSI800_PIT",
+    "price_index_id": "000906.CSI",
+    "total_return_benchmark_id": null,
+    "total_return_benchmark_must_be_provider_verified": true,
+    "financial_start_date": "2014-01-01",
+    "price_start_date": "2017-01-01",
+    "forbid_current_membership_backfill": true,
+    "forbid_success_only_subset": true,
+    "forbid_mixed_provider_fill": true,
+    "first_disclosure_only": true,
+    "qfq_does_not_prove_corporate_actions": true
+  },
+  "target": {
+    "horizon_sessions": 20,
+    "rebalance_sessions": 20,
+    "signal_time": "after_close",
+    "execution_time": "next_trading_session_open"
+  },
+  "factors": [
+    {
+      "factor_id": "QG_ROE_STABILITY",
+      "expected_sign": "positive",
+      "formula": "latest_quarter_roe - sample_std(last_12_quarters_roe,ddof=1)",
+      "financial_applicability": "all"
+    },
+    {
+      "factor_id": "QG_EARNINGS_TREND_DEVIATION",
+      "expected_sign": "positive",
+      "formula": "(latest_quarter_net_profit - preceding_8q_ols_trend_prediction) / sample_std(preceding_8q_ols_residuals,ddof=1)",
+      "financial_applicability": "all"
+    },
+    {
+      "factor_id": "QG_CASH_EARNINGS_QUALITY",
+      "expected_sign": "positive",
+      "formula": "(ttm_operating_cash_flow - ttm_operating_profit) / latest_total_assets",
+      "financial_applicability": "non_financial_only"
+    },
+    {
+      "factor_id": "QG_CASH_DEBT_COVERAGE",
+      "expected_sign": "positive",
+      "formula": "ttm_operating_cash_flow / latest_total_liabilities",
+      "financial_applicability": "non_financial_only"
+    },
+    {
+      "factor_id": "QG_GROSS_PROFITABILITY",
+      "expected_sign": "positive",
+      "formula": "ttm_gross_profit / mean(latest_total_assets,total_assets_4q_ago)",
+      "financial_applicability": "non_financial_only"
+    },
+    {
+      "factor_id": "QG_REVENUE_GROWTH_STABILITY",
+      "expected_sign": "positive",
+      "formula": "mean(last_8_quarterly_yoy_revenue_growth) - sample_std(last_8_quarterly_yoy_revenue_growth,ddof=1)",
+      "financial_applicability": "non_financial_only"
+    }
+  ],
+  "preprocessing": {
+    "winsor_lower_quantile": "0.01",
+    "winsor_upper_quantile": "0.99",
+    "residualize_controls": [
+      "csi_level1_industry_dummies",
+      "log_float_market_cap",
+      "earnings_yield",
+      "rm120",
+      "volatility_60"
+    ],
+    "post_residualization": "cross_sectional_zscore",
+    "missing_value_policy": "drop_never_zero_fill"
+  },
+  "models": {
+    "single_factor": "fama_macbeth_newey_west",
+    "multi_factor": "ridge",
+    "ridge_alpha": "1",
+    "baseline": "pre_registered_direction_equal_weight"
+  },
+  "splits": {
+    "train": ["2018-01-01", "2022-12-31"],
+    "validation": ["2023-01-01", "2023-12-31"],
+    "locked_test": ["2024-01-01", "2025-12-31"],
+    "second_audit": ["2026-01-01", "PRE_REGISTRATION_CUTOFF"],
+    "purge_sessions": 20
+  },
+  "portfolio": {
+    "initial_cash": "10000",
+    "top_decile_research_capital": "1000000",
+    "max_positions": 2,
+    "max_position_weight": "0.40",
+    "minimum_cash_weight": "0.20",
+    "entry_top_fraction": "0.05",
+    "hold_top_fraction": "0.20",
+    "positive_prediction_required": true,
+    "distinct_csi_level1_industries": true,
+    "combined_account_industry_cap": "0.45",
+    "manual_veto_policy": "leave_cash_no_substitute",
+    "lot_size_policy": "per_instrument_metadata",
+    "unmanaged_external_assets": [
+      {
+        "instrument_id": "000333.SZ",
+        "quantity": 100,
+        "status": "unmanaged_external"
+      }
+    ]
+  },
+  "eligibility": {
+    "minimum_listing_sessions": 250,
+    "minimum_average_amount_20": "100000000",
+    "new_buy_requires_not_st": true,
+    "new_buy_requires_not_suspended": true,
+    "new_buy_requires_not_limit_locked": true,
+    "sell_constraints": ["t_plus_one", "suspension", "limit_down_locked"]
+  },
+  "costs": {
+    "commission_rate": "0.00018",
+    "minimum_commission": "5",
+    "sell_tax_rate": "0.0005",
+    "transfer_fee_rate_both_sides": "0.00001",
+    "base_slippage_bps_one_way": "10",
+    "stress_slippage_bps_one_way": "20",
+    "stress_commission_multiplier": "2",
+    "historical_rate_replay": false
+  },
+  "risk": {
+    "drawdown_freeze": "0.12",
+    "drawdown_action": "freeze_new_buys_and_target_cash_next_tradable_decision",
+    "maximum_annualized_one_way_turnover": "4",
+    "leverage_allowed": false,
+    "short_selling_allowed": false
+  },
+  "historical_gates": {
+    "data_complete_and_pit": true,
+    "top_decile_net_absolute_return_positive": true,
+    "top_decile_net_active_return_positive": true,
+    "top2_lot_net_absolute_return_positive": true,
+    "top2_lot_net_active_return_positive": true,
+    "oos_rank_ic_positive_and_stable": true,
+    "minimum_corrected_independent_factors": 2,
+    "minimum_positive_half_year_windows": 3,
+    "half_year_window_count": 4,
+    "stress_net_active_return_nonnegative": true,
+    "maximum_drawdown": "0.12",
+    "maximum_annualized_one_way_turnover": "4",
+    "failure_policy": "reject_without_retuning"
+  },
+  "paper": {
+    "minimum_calendar_months": 12,
+    "minimum_decision_points": 12,
+    "configuration_changes_allowed": false,
+    "passing_status": "manual_real_money_candidate",
+    "automatic_order_submission": false
+  },
+  "fallback": {
+    "status": "diagnostic_current_universe_not_pit",
+    "sample_size": 60,
+    "selection": "sha256_instrument_id_stratified_by_current_industry",
+    "factor_ids": ["RM20", "RM60", "RM120", "TREND_EFF60", "DOWNSIDE_VOL60", "BREAKOUT60"],
+    "paper_eligibility": false,
+    "real_money_list_allowed": false
+  },
+  "safety": {
+    "paper_eligibility": false,
+    "trade_eligibility": false,
+    "live": "not_supported"
+  }
+}
