@@ -1,41 +1,151 @@
 # 采集与日常编排层
 
-`agent/` 负责把用户有权访问、在当时真实可见的内容转成可审计的本地记录，并将结果写入数据目录或 Obsidian。它不负责判断因子是否有效，也不具有交易权限。
+`agent/` 负责把用户有权访问、在当时真实可见的内容或只读 Provider 结果转成受控本地记录。它不判断因子是否统计有效，也没有交易权限。
 
-## 主要模块
+## 主要入口
 
-- `deepvan_visible_text.py`：解析复制或 OCR 的可见文本。
-- `deepvan_capture.py`：建立带来源与采集时间的结构化 capture。
-- `deepvan_daily_pipeline.py`：串联采集、评分和 Obsidian 同步。
-- `obsidian_writer.py`、`obsidian_dashboard.py`：生成研究笔记与面板。
-- `market_observation_dashboard.py`：将一份三层市场观察 JSON 渲染为本地只读单文件 HTML；不重新计算研究结论，也不产生交易动作。
-- `market_observation_pipeline.py`：标准密封入口；校验版本化 Schema、时点和安全状态，绑定上一期 observation/manifest，计算确定性变化并生成受控产物。
-- `eastmoney_source_probe.py`：只读检查东方财富历史行情与完整行业榜是否当前可访问；输出独立诊断 JSON，不改写已密封观察。
-- `portfolio_snapshot.py`：维护本地持仓快照；持仓不因此自动属于量化策略。
+| 模块 | 职责 |
+|---|---|
+| `market_data_probe.py` | 调用 Market Data Registry 做一次真实、只读探针，输出结构化状态和哈希 |
+| `choice_candidate_probe.py` | 显式捕获或离线重放 Choice SW2021、sector、EDB 候选证据；永不转正式真值 |
+| `factor_evidence_probe.py` | 固定捕获/重放 Choice 23 指数、中证当前 12 指数或上交所交易日证据；输出内容寻址 receipt，始终不自动准入 |
+| `choice_evidence_archive.py` | 在读取秘密前排除敏感路径，把现有 Choice raw/receipt/quarantine/checkpoint 复制为只读内容寻址归档；不删除源文件 |
+| `choice_quality_growth_batch.py` | 固定中证800历史成分、qfq/none日线与下一交易日资格快照的可续跑Choice批量采集；始终非PIT且不准入Paper/交易 |
+| `current_universe_import.py` | 严格导入 Choice 终端两列中证800工作簿，归档原始字节并生成可重放的当前成分诊断 receipt；不生成行业/PIT/Paper资格 |
+| `current_industry_import.py` | 严格导入并重放绑定当前成分receipt的16列Choice快照；生成当前行业诊断receipt，并作为冻结60只盲样本的唯一受控入口 |
+| `current_sample_snapshot.py` | 固定采集/重放60只盲样本的121个共同交易日与中证800价格指数，生成单截面六因子快照；不生成排名、信号、回测或买入名单 |
+| `market_observation_pipeline.py` | 校验、密封三层观察，绑定上一期 observation/manifest 并生成不可变快照 |
+| `market_observation_dashboard.py` | 从受控 observation 和 manifest 渲染本地单文件 HTML，不重新计算研究结论 |
+| `deepvan_visible_text.py`、`deepvan_capture.py` | 整理复制或 OCR 的可见文本并记录来源与采集时间 |
+| `deepvan_daily_pipeline.py` | 串联可见内容、结构化信号和 Obsidian 同步 |
+| `eastmoney_source_probe.py` | Eastmoney Legacy 诊断；不进入 V2 默认、fallback 或 validated 市场数据链 |
+| `portfolio_snapshot.py` | 维护本地持仓快照；快照不会自动成为策略资产 |
 
-## 运行样例
+## 市场数据探针
+
+BaoStock 日线示例：
 
 ```powershell
-python -m agent.deepvan_daily_pipeline `
-  --visible-text data/inbox/deepvan_visible_text.sample.txt `
-  --captured-at 2026-07-03T09:30:00+08:00
+python -m agent.market_data_probe `
+  --provider baostock `
+  --dataset daily_bar `
+  --instrument 000333.SZ `
+  --start-date 2026-07-01 `
+  --end-date 2026-08-05
 ```
 
-也可以通过 `--capture-json` 读取已经生成的 capture。两种输入互斥。
-
-首次密封三层观察：
+Choice 许可接口的诊断日线仅接沪深 A 股股票（`qfq`）和白名单指数 `000300.SH`（`none`），只在显式指定时调用，不会替换 BaoStock 默认主源：
 
 ```powershell
-python -m agent.market_observation_pipeline `
-  --input data/inbox/market_observation/2026-08-05-close.draft.json `
-  --first-baseline
+python -m agent.market_data_probe `
+  --provider choice `
+  --dataset daily_bar `
+  --instrument 000333.SZ `
+  --adjustment qfq `
+  --start-date 2026-08-03 `
+  --end-date 2026-08-07
 ```
 
-后续运行把 `--first-baseline` 替换为成对的 `--previous` 与 `--previous-manifest`。流水线拒绝自动选择 `latest`、拒绝覆盖内容不同的历史产物；标准 CLI 的实际 `sealed_at` 会与 manifest 绑定，上一期必须在当前决策时点前已经密封。`latest.alias.json` 记录当前稳定入口的 observation、manifest 和快照哈希；只有严格更新且直接承接当前 alias 的观察才能替换 `latest.html`。HTML 完全自包含，不加载 CDN、远程字体或追踪脚本；缺失值保持为“—”。
+质量成长历史批次使用另一个固定入口。它把 CSS 按日期和最多50只股票分批，每100项压缩checkpoint，中断后可从已验证artifact恢复；不开放调用者自选板块、字段或回测窗口：
 
-`market_observation_dashboard.py` 是低层重渲染器，必须同时传入标准 manifest；日常生成应使用 `market_observation_pipeline.py`。标准生成只能证明文件完整性与契约通过，不能把人工或公开整理数据升级为已认证官方来源。
+```powershell
+python -m agent.choice_quality_growth_batch collect `
+  --cutoff-date 2026-08-18 `
+  --as-of 2026-08-19T15:30:00+08:00 `
+  --output-root data/market_data/archives/strategy_workspace/quality_growth_v1/choice_batch
 
-东方财富公开接口连接诊断：
+python -m agent.choice_quality_growth_batch verify `
+  --manifest <manifest.json>
+```
+
+即使采集完整，当前仍因 Choice 日历未与交易所真值对账、缺PIT行业与首披财务而返回非零阻塞码。`source_authenticated=false`和 `raw_semantics=canonicalized_sdk_projection`表示可重放不等于官方来源认证。
+
+Choice SDK 未注册、未激活/无权限、网络不可达和查询失败分别输出 `dependency_missing`、`not_configured`、`network_blocked` 或 `failed`。账号、验证码和 `userInfo` 不得进入命令、日志或仓库。
+
+Factor Lab 的证据探针只有固定 source 和指数白名单，不接受任意代码或 Provider：
+
+```powershell
+python -m agent.factor_evidence_probe `
+  --source csi `
+  --mode online `
+  --start-date 2023-03-13 `
+  --end-date 2026-08-12 `
+  --output-root data/factor_evidence
+```
+
+`choice` 一次请求旧系列、当前对账系列和共同基准，共 23 个唯一 `.CSI` 代码；`csi` 固定当前 11 行业加 `000985.CSI`；`sse` 固定交易日历。`offline` 必须额外给出 `--evidence-cutoff-at`，只复核此前受控捕获，绝不加载 Provider。探针成功仍固定 `not_admitted_probe_only` 和 `formal_truth_eligible=false`。
+
+首次实现或清理缓存前先归档已有 Choice 证据：
+
+```powershell
+python -m agent.choice_evidence_archive `
+  --source-root .tmp/choice_diag_cache `
+  --output-root data/market_data/archives/choice_diag_cache_20260811
+```
+
+归档会在打开文件前排除 activation、`userInfo`、credential、token、secret、`.env` 和密钥材料；保存普通证据的逐字节 SHA-256、manifest 和 checkpoint，源文件保持不变。
+
+Choice 的分类、指定日期板块成分和 EDB 发布日期只进入独立候选层：
+
+```powershell
+python -m agent.choice_candidate_probe --mode online `
+  --storage-root .tmp/choice_candidates `
+  sw2021 --instrument 000333.SZ
+
+python -m agent.choice_candidate_probe --mode online `
+  --storage-root .tmp/choice_candidates `
+  sector --sector-code 009006039 --membership-date 2024-06-28
+
+python -m agent.choice_candidate_probe --mode online `
+  --storage-root .tmp/choice_candidates `
+  edb --edb-id EMM00087117
+```
+
+三个接口各自判断权限和失败；一个 `passed` 不代表整个账号成功。`SW2021=None`、空分类或形状漂移必须为 `failed`；EDB 行可以缺 `PUBLISHDATE`，但会保留 `first_release_proven=false`，不能冒充首次发布真值。离线时把 `--mode online` 改为 `--mode offline`，请求参数必须完全相同。
+
+Choice 终端导出的两列当前成分工作簿只能进入独立诊断 receipt。导入器锁定单工作表、固定标题/脚注、连续800行、显式 `.SH/.SZ`、无公式/隐藏内容/外链，并拒绝覆盖；命令中的 `received-date` 仅表示本地接收日，不是指数成分生效日：
+
+```powershell
+python -m agent.current_universe_import import `
+  --source <中证800成份.xlsx> `
+  --received-date 2026-08-19 `
+  --output-dir data/market_data/archives/strategy_workspace/quality_growth_v1/current_membership/<membership-v2-run>
+
+python -m agent.current_universe_import verify `
+  --output-dir data/market_data/archives/strategy_workspace/quality_growth_v1/current_membership/<membership-v2-run>
+```
+
+receipt 固定 `source_authenticated=false`、`membership_basis=current_not_pit`，并明示缺行业、历史成分、PIT、全收益基准和财务能力；文件脚注与 SHA-256 不能证明官方来源。
+
+16列当前快照必须另行绑定已验证的成分artifact导入。导入器锁定2026-08-18市场字段的复权口径、800只完整覆盖、11个中证2021一级行业、无公式/外链及证券代码和名称一致性；它不会把“最新”ST或无有效日期的行业字段升级为历史PIT数据：
+
+```powershell
+python -m agent.current_industry_import import `
+  --source <中证800成份.xlsx> `
+  --membership-dir data/market_data/archives/strategy_workspace/quality_growth_v1/current_membership/<membership-v2-run> `
+  --received-date 2026-08-19 `
+  --output-dir data/market_data/archives/strategy_workspace/quality_growth_v1/current_industry/<industry-v2-run>
+
+python -m agent.current_industry_import verify `
+  --membership-dir data/market_data/archives/strategy_workspace/quality_growth_v1/current_membership/<membership-v2-run> `
+  --output-dir data/market_data/archives/strategy_workspace/quality_growth_v1/current_industry/<industry-v2-run>
+
+python -m agent.current_industry_import freeze-sample `
+  --membership-dir data/market_data/archives/strategy_workspace/quality_growth_v1/current_membership/<membership-v2-run> `
+  --industry-dir data/market_data/archives/strategy_workspace/quality_growth_v1/current_industry/<industry-v2-run> `
+  --output-dir data/market_data/archives/strategy_workspace/quality_growth_v1/diagnostic/<sample-v2-run>
+
+python -m agent.current_industry_import verify-sample `
+  --membership-dir data/market_data/archives/strategy_workspace/quality_growth_v1/current_membership/<membership-v2-run> `
+  --industry-dir data/market_data/archives/strategy_workspace/quality_growth_v1/current_industry/<industry-v2-run> `
+  --sample-dir data/market_data/archives/strategy_workspace/quality_growth_v1/diagnostic/<sample-v2-run>
+```
+
+正式降级入口会先重放两个artifact，再按证券代码哈希和当前行业等覆盖轮转冻结恰好60只；该样本不代表中证800行业权重。旧的调用者自备universe JSON不再允许。V2 `verify-sample` 会从 membership 与 industry 两个源归档重建 `sample.json`并逐字节比较；行业receipt固定 `membership_basis=current_not_pit`、`source_authenticated=false`、`industry_effective_date=null`，安全状态固定 Paper、trade、real-money均为 `false`，LIVE为 `not_supported`。当前稳定归档位于 `data/market_data/archives/strategy_workspace/quality_growth_v1/`；原 `data/tmp/` 目录只保留为历史工作副本，不再冒充受控归档。
+
+探针结果为 `passed`、`dependency_missing`、`network_blocked`、`not_configured` 或 `failed`。只有当次 `evidence_mode=real_provider` 且状态为 `passed`，才能描述为该次真实读取成功；Mock 结果不能替代网络证据。完整安装、数据集和离线回放说明见 [市场数据 V2](../docs/MARKET_DATA.md)。
+
+Eastmoney 旧探针只用于复核历史诊断路径：
 
 ```powershell
 python -m agent.eastmoney_source_probe `
@@ -45,11 +155,58 @@ python -m agent.eastmoney_source_probe `
   --expected-last-date 2026-08-05
 ```
 
-该命令对已知接口域名的直接连接使用 IPv4，仍保留原域名、TLS SNI 与证书校验；若系统配置 HTTP 代理，则由代理决定目标地址族。行业榜只有在 `data.total` 稳定、板块代码无重复、页数完整且全部为本次在线响应时才通过；行情仅检查非空、原始/复权覆盖一致，以及调用者明确给出的最后交易日，不自称核完窗口内每个交易日。默认结果写入 `.tmp/eastmoney_source_probe.json`，不等于官方真值准入，也不会把旧观察里的历史失败状态改成成功。
+其成功不改变 `eastmoney_legacy=diagnostic_only`，也不覆盖历史密封观察中的失败状态。
+
+## 三层市场观察
+
+以仓库中现有密封观察为基准生成刷新：
+
+```powershell
+python -m agent.market_observation_pipeline `
+  --input data/inbox/market_observation/2026-08-06-preopen.draft.json `
+  --previous data/signals/cn-market-2026-08-05-close.sealed.json `
+  --previous-manifest data/actions/cn-market-2026-08-05-close.manifest.json `
+  --signals-dir .tmp/market-observation-doc-example/signals `
+  --manifest-dir .tmp/market-observation-doc-example/actions `
+  --dashboard-dir .tmp/market-observation-doc-example/reports
+```
+
+后续观察必须显式传入上一期密封 observation 及其 manifest，不能自动把 `latest` 当真源。标准流水线拒绝未来证据、同名异载荷、非空 `trade_action`、不匹配 manifest 和旧观察回退 latest；历史密封文件不因市场数据 V2 被重写。
+
+若观察需要绑定 Registry 已验证批次，可重复传入 `--market-data-batch`，并用同一个显式根校验 receipt：
+
+```powershell
+python -m agent.market_observation_pipeline `
+  --input data/inbox/market_observation/2026-08-06-preopen.draft.json `
+  --previous data/signals/cn-market-2026-08-05-close.sealed.json `
+  --previous-manifest data/actions/cn-market-2026-08-05-close.manifest.json `
+  --signals-dir .tmp/market-observation-doc-example/signals `
+  --manifest-dir .tmp/market-observation-doc-example/actions `
+  --dashboard-dir .tmp/market-observation-doc-example/reports `
+  --market-data-batch data/market_data/validated/<provider>/<dataset>/<cache-key>/<batch-id>.json `
+  --market-data-storage-root data/market_data
+```
+
+路径中的占位符须替换为探针实际生成的路径；自签文件和 `test_injected` receipt 不会被正式读取。
+
+新流水线生成 manifest v0.3；Dashboard 对历史 manifest v0.2 只读兼容。v0.3 在可识别 Git 工作树中生成，记录 commit/dirty 状态，dirty 时绑定 `git_diff_sha256`，状态未知或变化中时失败关闭。现有 observation v0.1 Schema 中的 Eastmoney quality 字段仅用于历史输入兼容，新 v0.3 展示与来源准入不读取这些字段作为 Provider 证明，而是只使用已校验批次元数据。历史密封 observation 和 manifest 不重写。
+
+Dashboard 完全自包含，不加载 CDN 或追踪脚本。文件哈希只证明内容一致，来源准入仍以结构化批次和本地政策为准。
+
+## 可见内容流水线
+
+```powershell
+python -m agent.deepvan_daily_pipeline `
+  --visible-text data/inbox/deepvan_visible_text.sample.txt `
+  --captured-at 2026-07-03T09:30:00+08:00
+```
+
+输入必须是用户有权读取且当时真实可见的内容。流水线不会绕过登录、付费、验证码、权限或访问控制。
 
 ## 边界
 
-- 不绕过登录、付费、权限、验证码或访问控制。
-- 不把采集时间伪装成内容发布时间；字段不确定时保留不确定性。
-- 不把作者观点直接当作行情真值、财务真值或可交易信号。
-- 生成文件进入 `data/` 或 `obsidian-vault/`，业务规则留在代码和版本化配置中。
+- 不把采集时间伪装成发布时间，字段不确定时保留不确定性。
+- 不把作者观点、Provider 名称或一次成功调用当作行情真值、财务真值或交易信号。
+- 外部失败必须保留 `dependency_missing`、`network_blocked`、`not_configured` 或 `failed`，不能补造数据。
+- 生成物写入受控数据目录，业务规则留在代码和版本化配置中。
+- 本层不产生订单；LIVE 永久不支持。
