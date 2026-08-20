@@ -14,12 +14,52 @@ from pathlib import Path
 from typing import Any
 from urllib.parse import urlparse
 
+from research.market_data.storage import (
+    MarketDataStorage,
+    MarketDataStorageError,
+    read_validated_batch,
+)
+from research.market_data.registry import (
+    DEFAULT_STORAGE_ROOT as DEFAULT_MARKET_DATA_STORAGE_ROOT,
+)
+
 
 DEFAULT_OUTPUT = Path("data") / "reports" / "market_observation" / "latest.html"
 SUPPORTED_SCHEMA_VERSIONS = {"market-observation-v0.1"}
 SUPPORTED_STATUSES = {"diagnostic_only_not_admitted"}
-SUPPORTED_MANIFEST_VERSIONS = {"market-observation-manifest-v0.2"}
+SUPPORTED_MANIFEST_VERSIONS = {
+    "market-observation-manifest-v0.2",
+    "market-observation-manifest-v0.3",
+}
 SUPPORTED_PIPELINE_PRODUCERS = {"market-observation-pipeline-v0.1"}
+_MANIFEST_V02_FIELDS = frozenset(
+    {
+        "manifest_version",
+        "observation_id",
+        "status",
+        "as_of",
+        "generated_at",
+        "sealed_at",
+        "producer",
+        "standard_cli_generated",
+        "repository_commit",
+        "working_tree_dirty_at_generation",
+        "schema",
+        "inputs",
+        "outputs",
+        "source_status",
+        "comparison",
+        "admission",
+        "aliases",
+    }
+)
+_MANIFEST_V03_FIELDS = _MANIFEST_V02_FIELDS | frozenset(
+    {
+        "git_diff_sha256",
+        "market_data_storage_root",
+        "market_data_batches",
+    }
+)
 
 STATUS_LABELS = {
     "diagnostic_only_not_admitted": "诊断观察 · 未准入",
@@ -62,6 +102,7 @@ QUALITY_LABELS = {
     "partial_success": "部分成功",
     "missing": "缺失",
     "not_admitted": "未准入",
+    "failed_after_2_attempts_not_used": "当前连接失败 · 已隔离未使用",
     "failed_after_3_attempts_not_used": "当前连接失败 · 已隔离未使用",
     "partial_snapshot_then_pagination_failure_not_used": "分页不完整 · 已隔离未使用",
 }
@@ -70,8 +111,8 @@ QUALITY_NAMES = {
     "official_industry_source": "中证行业行情",
     "official_macro_sources": "官方宏观数据",
     "tencent_market_history": "股票与宽基行情",
-    "eastmoney_market_history": "东方财富历史行情（补充源）",
-    "eastmoney_industry_board": "东方财富行业榜（补充源）",
+    "eastmoney_market_history": "Legacy 历史行情诊断（补充源）",
+    "eastmoney_industry_board": "Legacy 行业榜诊断（补充源）",
     "point_in_time_constituent_breadth": "时点成分股广度",
     "official_trade_calendar_adapter": "正式交易日历适配器",
     "formal_factor_eligibility": "正式因子准入",
@@ -391,11 +432,214 @@ def load_observation(path: Path) -> tuple[dict[str, Any], str]:
     return data, hashlib.sha256(raw).hexdigest()
 
 
+def _resolve_manifest_path(value: Any, label: str) -> Path:
+    if not isinstance(value, str) or not value.strip():
+        raise ObservationValidationError(f"{label} path is missing")
+    path = Path(value)
+    if not path.is_absolute():
+        path = Path.cwd() / path
+    return path.resolve()
+
+
+def _validate_manifest_envelope(manifest: dict[str, Any]) -> str:
+    version = manifest.get("manifest_version")
+    if version not in SUPPORTED_MANIFEST_VERSIONS:
+        raise ObservationValidationError("manifest_version is unsupported")
+    expected_fields = (
+        _MANIFEST_V03_FIELDS
+        if version == "market-observation-manifest-v0.3"
+        else _MANIFEST_V02_FIELDS
+    )
+    if set(manifest) != expected_fields:
+        missing = sorted(expected_fields - set(manifest))
+        unknown = sorted(set(manifest) - expected_fields)
+        raise ObservationValidationError(
+            f"manifest fields differ from {version}; missing={missing}, unknown={unknown}"
+        )
+    for field in (
+        "observation_id",
+        "status",
+        "as_of",
+        "generated_at",
+        "sealed_at",
+        "producer",
+    ):
+        if not isinstance(manifest.get(field), str) or not manifest[field].strip():
+            raise ObservationValidationError(f"manifest {field} must be a non-empty string")
+    dirty = manifest.get("working_tree_dirty_at_generation")
+    if version == "market-observation-manifest-v0.3" and type(dirty) is not bool:
+        raise ObservationValidationError(
+            "v0.3 working_tree_dirty_at_generation must be a boolean"
+        )
+    if version == "market-observation-manifest-v0.2" and dirty is not None and type(dirty) is not bool:
+        raise ObservationValidationError(
+            "working_tree_dirty_at_generation must be boolean or null"
+        )
+    commit = manifest.get("repository_commit")
+    if version == "market-observation-manifest-v0.3" and not isinstance(commit, str):
+        raise ObservationValidationError(
+            "v0.3 repository_commit must be a Git object ID"
+        )
+    if commit is not None and (
+        not isinstance(commit, str)
+        or re.fullmatch(r"(?:[0-9a-f]{40}|[0-9a-f]{64})", commit) is None
+    ):
+        raise ObservationValidationError(
+            "repository_commit must be a lowercase Git object ID or null"
+        )
+    for field in ("schema", "source_status", "comparison", "admission"):
+        if not isinstance(manifest.get(field), dict):
+            raise ObservationValidationError(f"manifest {field} must be an object")
+    for field in ("inputs", "outputs"):
+        if not isinstance(manifest.get(field), list):
+            raise ObservationValidationError(f"manifest {field} must be an array")
+    if not isinstance(manifest.get("aliases"), list):
+        raise ObservationValidationError("manifest aliases must be an array")
+    if version == "market-observation-manifest-v0.3":
+        if not isinstance(manifest.get("market_data_batches"), list):
+            raise ObservationValidationError("manifest market_data_batches must be an array")
+    return str(version)
+
+
+def _validate_market_data_batches(
+    manifest: dict[str, Any],
+    inputs: list[dict[str, Any]],
+    *,
+    decision_time: datetime,
+    storage_root: Path,
+) -> list[dict[str, Any]]:
+    version = manifest.get("manifest_version")
+    batch_inputs = [item for item in inputs if item.get("role") == "market_data_batch"]
+    receipt_inputs = [
+        item for item in inputs if item.get("role") == "market_data_registry_receipt"
+    ]
+    if version == "market-observation-manifest-v0.2":
+        if (
+            batch_inputs
+            or receipt_inputs
+            or "market_data_batches" in manifest
+            or "git_diff_sha256" in manifest
+            or "market_data_storage_root" in manifest
+        ):
+            raise ObservationValidationError(
+                "historical v0.2 manifest cannot carry unverified v0.3 evidence"
+            )
+        return []
+
+    dirty = manifest.get("working_tree_dirty_at_generation")
+    git_diff_hash = manifest.get("git_diff_sha256")
+    if dirty is True:
+        if not isinstance(git_diff_hash, str) or re.fullmatch(r"[0-9a-f]{64}", git_diff_hash) is None:
+            raise ObservationValidationError(
+                "dirty v0.3 manifest must record git_diff_sha256"
+            )
+    elif git_diff_hash is not None:
+        raise ObservationValidationError(
+            "clean or unknown v0.3 manifest must not claim git_diff_sha256"
+        )
+    recorded_root = _resolve_manifest_path(
+        manifest.get("market_data_storage_root"), "market-data storage root"
+    )
+    if recorded_root != storage_root.resolve():
+        raise ObservationValidationError(
+            "manifest market-data storage root differs from the controlled root"
+        )
+
+    metadata_rows = [_dict(item) for item in _list(manifest.get("market_data_batches"))]
+    if len(batch_inputs) != len(metadata_rows) or len(receipt_inputs) != len(metadata_rows):
+        raise ObservationValidationError(
+            "manifest market-data batch/receipt inputs and metadata counts differ"
+        )
+    input_by_batch: dict[str, dict[str, Any]] = {}
+    for item in batch_inputs:
+        batch_id = item.get("batch_id")
+        if not isinstance(batch_id, str) or not batch_id or batch_id in input_by_batch:
+            raise ObservationValidationError("manifest market-data batch_id is missing or duplicated")
+        input_by_batch[batch_id] = item
+    receipt_by_batch: dict[str, dict[str, Any]] = {}
+    for item in receipt_inputs:
+        batch_id = item.get("batch_id")
+        if not isinstance(batch_id, str) or not batch_id or batch_id in receipt_by_batch:
+            raise ObservationValidationError(
+                "manifest market-data receipt batch_id is missing or duplicated"
+            )
+        receipt_by_batch[batch_id] = item
+
+    verified: list[dict[str, Any]] = []
+    seen_paths: set[Path] = set()
+    for metadata in metadata_rows:
+        batch_id = metadata.get("batch_id")
+        input_entry = input_by_batch.get(str(batch_id))
+        receipt_entry = receipt_by_batch.get(str(batch_id))
+        if input_entry is None or receipt_entry is None:
+            raise ObservationValidationError(
+                "manifest market-data metadata lacks matching batch and receipt inputs"
+            )
+        path = _resolve_manifest_path(input_entry.get("path"), "market-data batch")
+        if path in seen_paths:
+            raise ObservationValidationError("manifest market-data path is duplicated")
+        seen_paths.add(path)
+        if _resolve_manifest_path(metadata.get("batch_file_path"), "market-data metadata") != path:
+            raise ObservationValidationError("market-data metadata path does not match its input")
+        try:
+            raw = path.read_bytes()
+            batch = read_validated_batch(path, storage_root=storage_root)
+        except (MarketDataStorageError, OSError, ValueError) as exc:
+            raise ObservationValidationError(
+                f"manifest market-data evidence failed verification: {path}: {exc}"
+            ) from exc
+        file_hash = hashlib.sha256(raw).hexdigest()
+        if input_entry.get("sha256") != file_hash:
+            raise ObservationValidationError("market-data input SHA-256 does not match its file")
+        expected = batch.to_dict(include_records=False)
+        expected["batch_file_path"] = path.as_posix()
+        expected["batch_file_sha256"] = file_hash
+        receipt_path = MarketDataStorage.validated_receipt_path(path).resolve()
+        try:
+            receipt_raw = receipt_path.read_bytes()
+        except OSError as exc:
+            raise ObservationValidationError(
+                f"market-data registry receipt cannot be read: {receipt_path}: {exc}"
+            ) from exc
+        receipt_hash = hashlib.sha256(receipt_raw).hexdigest()
+        if (
+            _resolve_manifest_path(receipt_entry.get("path"), "market-data registry receipt")
+            != receipt_path
+            or receipt_entry.get("sha256") != receipt_hash
+        ):
+            raise ObservationValidationError(
+                "market-data registry receipt input does not match its file"
+            )
+        expected["registry_receipt_path"] = receipt_path.as_posix()
+        expected["registry_receipt_sha256"] = receipt_hash
+        if metadata != expected:
+            raise ObservationValidationError("market-data manifest metadata does not match its batch")
+        if (
+            batch.requested_at > decision_time
+            or batch.fetched_at > decision_time
+            or batch.available_at_max is None
+            or batch.available_at_max > decision_time
+        ):
+            raise ObservationValidationError(
+                "market-data manifest includes evidence unavailable at decision_time"
+            )
+        verified.append(metadata)
+    expected_order = sorted(
+        verified,
+        key=lambda item: (item.get("provider_id"), item.get("dataset_type"), item.get("batch_id")),
+    )
+    if verified != expected_order:
+        raise ObservationValidationError("market-data manifest metadata is not deterministically ordered")
+    return verified
+
+
 def validate_manifest(
     manifest_path: Path,
     observation: dict[str, Any],
     source_hash: str,
     input_path: Path,
+    *,
+    market_data_storage_root: Path = DEFAULT_MARKET_DATA_STORAGE_ROOT,
 ) -> str:
     """Validate the diagnostic manifest and return its content hash."""
 
@@ -409,8 +653,7 @@ def validate_manifest(
         raise ObservationValidationError("observation pipeline producer is unsupported")
     if comparison.get("status") not in {"first_baseline", "compared"}:
         raise ObservationValidationError("sealed observation is missing a valid comparison record")
-    if manifest.get("manifest_version") not in SUPPORTED_MANIFEST_VERSIONS:
-        raise ObservationValidationError("manifest_version is unsupported")
+    _validate_manifest_envelope(manifest)
     if manifest.get("observation_id") != observation.get("observation_id"):
         raise ObservationValidationError("manifest observation_id does not match the observation")
     if manifest.get("status") != observation.get("status"):
@@ -462,6 +705,14 @@ def validate_manifest(
         or schema_inputs[0].get("sha256") != pipeline.get("schema_sha256")
     ):
         raise ObservationValidationError("manifest must bind exactly one matching Schema input")
+    _validate_market_data_batches(
+        manifest,
+        inputs,
+        decision_time=_parse_iso_datetime(
+            observation.get("decision_time"), "decision_time"
+        ),
+        storage_root=market_data_storage_root,
+    )
     previous_observation_inputs = [item for item in inputs if item.get("role") == "previous_observation"]
     previous_manifest_inputs = [item for item in inputs if item.get("role") == "previous_manifest"]
     if comparison.get("status") == "first_baseline":
@@ -664,11 +915,16 @@ def _render_comparison(comparison: dict[str, Any]) -> str:
     """.strip()
 
 
-def _render_quality(quality: dict[str, Any]) -> str:
-    if not quality:
+def _render_quality(
+    quality: dict[str, Any],
+    *,
+    excluded_keys: frozenset[str] = frozenset(),
+) -> str:
+    visible = [(key, value) for key, value in quality.items() if key not in excluded_keys]
+    if not visible:
         return '<tr><td colspan="2">暂无数据质量记录</td></tr>'
     rows: list[str] = []
-    for key, value in quality.items():
+    for key, value in visible:
         raw = str(value).lower() if value is not None else "missing"
         if isinstance(value, bool):
             raw = "success" if value else "not_admitted"
@@ -677,6 +933,33 @@ def _render_quality(quality: dict[str, Any]) -> str:
             f'<tr><td>{_escape(QUALITY_NAMES.get(key, key))}</td><td><span class="quality {tone}">{_escape(QUALITY_LABELS.get(raw, raw))}</span></td></tr>'
         )
     return "\n".join(rows)
+
+
+def _render_market_data_batches(batches: list[dict[str, Any]]) -> str:
+    if not batches:
+        return '<p class="muted">本清单未绑定结构化市场数据批次；历史观察继续按原有质量字段展示。</p>'
+    rows: list[str] = []
+    for batch in batches:
+        admission = str(batch.get("admission_status") or "unknown")
+        tone = "good" if admission == "admitted_for_research" else "warn"
+        rows.append(
+            "<tr>"
+            f"<td>{_escape(batch.get('provider_id'))}</td>"
+            f"<td>{_escape(batch.get('upstream_source'))}</td>"
+            f"<td>{_escape(batch.get('dataset_type'))}</td>"
+            f"<td>{_escape(batch.get('record_count'))}</td>"
+            f"<td>{_escape(batch.get('available_at_max'))}</td>"
+            f'<td><span class="quality {tone}">{_escape(admission)}</span><br><small>{_escape(batch.get("point_in_time_status"))}</small></td>'
+            "</tr>"
+        )
+    return (
+        '<div class="table-wrap"><table class="quality-table"><thead><tr>'
+        "<th>Provider</th><th>真实上游</th><th>数据集</th><th>记录数</th>"
+        "<th>最大可用时间</th><th>本地准入 / 时点</th>"
+        "</tr></thead><tbody>"
+        + "\n".join(rows)
+        + "</tbody></table></div>"
+    )
 
 
 def _render_source_links(data: dict[str, Any]) -> str:
@@ -717,6 +1000,8 @@ def render_dashboard(
     *,
     manifest_verified: bool = False,
     manifest_hash: str | None = None,
+    market_data_batches: list[dict[str, Any]] | None = None,
+    manifest_version: str | None = None,
 ) -> str:
     validate_observation(data)
     overall = _dict(data.get("overall"))
@@ -742,6 +1027,12 @@ def render_dashboard(
     integrity_label = "文件完整性已核验 · 来源仍未准入" if manifest_verified else "文件完整性未核验 · 来源仍未准入"
     integrity_class = "good" if manifest_verified else "warn"
     comparison_notice = _comparison_notice(comparison)
+    batch_evidence = _render_market_data_batches(market_data_batches or [])
+    legacy_quality_keys = (
+        frozenset({"eastmoney_market_history", "eastmoney_industry_board"})
+        if manifest_version == "market-observation-manifest-v0.3"
+        else frozenset()
+    )
 
     return f"""<!doctype html>
 <html lang="zh-CN">
@@ -900,10 +1191,10 @@ def render_dashboard(
     <div class="hero-inner">
       <div class="topline">
         <span class="status">{_escape(STATUS_LABELS.get(status, status))}</span>
-        <div><span class="as-of">决策时点 {_escape(data.get('decision_time'))}</span><span class="freshness" id="freshness-status" aria-live="polite">正在检查数据时效…</span></div>
+        <div><span class="as-of">行情截至 {_escape(data.get('market_as_of'))} · 决策时点 {_escape(data.get('decision_time'))}</span><span class="freshness" id="freshness-status" aria-live="polite">正在检查数据时效…</span></div>
       </div>
       <h1>三层市场观察</h1>
-      <p class="hero-copy">从宏观判断能承担多少风险，从行业判断资金和盈利可能流向哪里，再用个股检验行业结论。每个判断都保留反证，不用一个总分掩盖冲突。</p>
+      <p class="hero-copy"><strong>{_escape(data.get('purpose'))}</strong><br>从宏观判断能承担多少风险，从行业判断资金和盈利可能流向哪里，再用个股检验行业结论。每个判断都保留反证，不用一个总分掩盖冲突。</p>
       <div class="hero-grid">
         <div class="hero-stat"><small>宏观环境</small><strong>{_label(overall.get('macro_environment'), MACRO_LABELS)}</strong></div>
         <div class="hero-stat"><small>市场状态</small><strong>{_label(overall.get('market_state'), MACRO_LABELS)}</strong></div>
@@ -1007,9 +1298,10 @@ def render_dashboard(
 
     <section aria-labelledby="quality-title">
       <div class="split">
-        <article class="panel"><h2 id="quality-title">数据质量</h2><p><span class="quality {integrity_class}">{integrity_label}</span></p><table class="quality-table"><tbody>{_render_quality(quality)}</tbody></table></article>
+        <article class="panel"><h2 id="quality-title">数据质量</h2><p><span class="quality {integrity_class}">{integrity_label}</span></p><table class="quality-table"><tbody>{_render_quality(quality, excluded_keys=legacy_quality_keys)}</tbody></table></article>
         <article class="panel"><h2>来源入口</h2><details><summary>展开官方与公开数据链接</summary><ul class="source-list">{_render_source_links(data)}</ul></details></article>
       </div>
+      <article class="panel" style="margin-top:16px"><h2>结构化市场数据证据</h2><p>Provider 是项目适配器，真实上游与本地准入分别展示；哈希不证明官方性。</p>{batch_evidence}</article>
       <div class="split" style="margin-top:16px">
         <article class="panel"><h2>尚未取得</h2><ul class="conflict-list">{_render_list(_list(macro.get('unknowns')))}</ul></article>
         <article class="panel"><h2>口径与局限</h2><ul class="conflict-list">{_render_list(_list(industry.get('limitations')) + _list(stock.get('limitations')))}</ul></article>
@@ -1030,22 +1322,24 @@ def render_dashboard(
       const tableBody = document.getElementById('sector-body');
       const horizonCopy = document.getElementById('horizon-copy');
       const freshnessStatus = document.getElementById('freshness-status');
+      const marketTime = new Date({json.dumps(str(data.get('market_as_of')))});
       const decisionTime = new Date({json.dumps(str(data.get('decision_time')))});
       const buttons = Array.from(document.querySelectorAll('[data-horizon-button]'));
       function updateFreshness() {{
-        const ageHours = (Date.now() - decisionTime.getTime()) / 3600000;
+        const marketAgeHours = (Date.now() - marketTime.getTime()) / 3600000;
+        const decisionAgeHours = (Date.now() - decisionTime.getTime()) / 3600000;
         freshnessStatus.classList.remove('stale');
-        if (!Number.isFinite(ageHours)) {{
+        if (!Number.isFinite(marketAgeHours) || !Number.isFinite(decisionAgeHours)) {{
           freshnessStatus.textContent = '无法判断数据时效';
           freshnessStatus.classList.add('stale');
-        }} else if (ageHours < -0.25) {{
-          freshnessStatus.textContent = '决策时点晚于本机时间，请检查系统时间';
+        }} else if (marketAgeHours < -0.25 || decisionAgeHours < -0.25) {{
+          freshnessStatus.textContent = '行情或决策时点晚于本机时间，请检查系统时间';
           freshnessStatus.classList.add('stale');
-        }} else if (ageHours > 36) {{
-          freshnessStatus.textContent = `距决策时点 ${{Math.floor(ageHours)}} 小时；请确认是否休市，否则重新生成`;
+        }} else if (marketAgeHours > 36) {{
+          freshnessStatus.textContent = `行情距今 ${{Math.floor(marketAgeHours)}} 小时；请确认是否休市，否则重新采集`;
           freshnessStatus.classList.add('stale');
         }} else {{
-          freshnessStatus.textContent = `距决策时点 ${{Math.max(0, Math.floor(ageHours))}} 小时`;
+          freshnessStatus.textContent = `行情距今 ${{Math.max(0, Math.floor(marketAgeHours))}} 小时 · 决策更新 ${{Math.max(0, Math.floor(decisionAgeHours))}} 小时前`;
         }}
       }}
       function applyHorizon(horizon) {{
@@ -1078,16 +1372,34 @@ def write_dashboard(
     manifest_path: Path | None = None,
     *,
     allow_replace: bool = True,
+    market_data_storage_root: Path = DEFAULT_MARKET_DATA_STORAGE_ROOT,
 ) -> Path:
     data, source_hash = load_observation(input_path)
     manifest_hash = None
+    manifest_version = None
+    market_data_batches: list[dict[str, Any]] = []
     if manifest_path is not None:
-        manifest_hash = validate_manifest(manifest_path, data, source_hash, input_path)
+        manifest_hash = validate_manifest(
+            manifest_path,
+            data,
+            source_hash,
+            input_path,
+            market_data_storage_root=market_data_storage_root,
+        )
+        manifest = parse_json_object(
+            manifest_path.read_bytes(), f"observation manifest: {manifest_path}"
+        )
+        manifest_version = str(manifest.get("manifest_version") or "")
+        market_data_batches = [
+            _dict(item) for item in _list(manifest.get("market_data_batches"))
+        ]
     content = render_dashboard(
         data,
         source_hash,
         manifest_verified=manifest_path is not None,
         manifest_hash=manifest_hash,
+        market_data_batches=market_data_batches,
+        manifest_version=manifest_version,
     )
     output_path.parent.mkdir(parents=True, exist_ok=True)
     encoded = content.encode("utf-8")
@@ -1108,9 +1420,20 @@ def main() -> int:
     parser.add_argument("--input", type=Path, required=True, help="Explicit observation JSON path.")
     parser.add_argument("--manifest", type=Path, required=True, help="Standard CLI manifest used to verify path, role, ID, status, Schema, and SHA-256.")
     parser.add_argument("--output", type=Path, default=DEFAULT_OUTPUT, help="Standalone HTML output path.")
+    parser.add_argument(
+        "--market-data-storage-root",
+        type=Path,
+        default=DEFAULT_MARKET_DATA_STORAGE_ROOT,
+        help="Controlled raw/quarantine/validated market-data root.",
+    )
     args = parser.parse_args()
 
-    output_path = write_dashboard(args.input, args.output, args.manifest)
+    output_path = write_dashboard(
+        args.input,
+        args.output,
+        args.manifest,
+        market_data_storage_root=args.market_data_storage_root,
+    )
     print(f"Wrote {output_path}")
     return 0
 

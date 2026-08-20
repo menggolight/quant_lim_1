@@ -265,6 +265,7 @@ def standard_manifest(input_path: Path, payload: dict, source_hash: str) -> dict
             "paper_strategy_admitted": False,
             "live_trading_allowed": False,
         },
+        "aliases": [],
     }
 
 
@@ -289,8 +290,13 @@ class MarketObservationDashboardTest(unittest.TestCase):
 
             self.assertEqual(first.read_bytes(), second.read_bytes())
             content = first.read_text(encoding="utf-8")
-            self.assertIn("东方财富历史行情（补充源）", content)
+            self.assertIn("Legacy 历史行情诊断（补充源）", content)
             self.assertIn("当前连接失败 · 已隔离未使用", content)
+            self.assertIn("行情截至 2026-08-05T15:00:00+08:00 · 决策时点 2026-08-05T15:10:00+08:00", content)
+            self.assertIn("const marketTime = new Date", content)
+            self.assertIn("行情距今", content)
+            self.assertIn("决策更新", content)
+            self.assertIn("建立三层市场观察基线，不形成订单或实盘信号", content)
             self.assertIn("文件完整性已核验 · 来源仍未准入", content)
             self.assertIn("首次基线 · 暂无前次变化", content)
             self.assertIn("首次可比基线", content)

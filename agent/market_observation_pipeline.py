@@ -7,11 +7,10 @@ import argparse
 import hashlib
 import json
 import re
-import subprocess
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Sequence
 
 from agent.market_observation_dashboard import (
     ObservationValidationError,
@@ -21,10 +20,19 @@ from agent.market_observation_dashboard import (
     validate_observation,
     write_dashboard,
 )
+from research.market_data.storage import (
+    MarketDataStorage,
+    MarketDataStorageError,
+    read_validated_batch,
+)
+from research.market_data.registry import (
+    DEFAULT_STORAGE_ROOT as DEFAULT_MARKET_DATA_STORAGE_ROOT,
+)
+from research.reproducibility import git_worktree_state as _git_state
 
 
 PIPELINE_VERSION = "market-observation-pipeline-v0.1"
-MANIFEST_VERSION = "market-observation-manifest-v0.2"
+MANIFEST_VERSION = "market-observation-manifest-v0.3"
 LATEST_ALIAS_VERSION = "market-observation-latest-alias-v0.1"
 DEFAULT_SCHEMA = Path("schemas") / "market_observation.v0.1.json"
 DEFAULT_SIGNALS_DIR = Path("data") / "signals"
@@ -397,25 +405,67 @@ def _load_schema_contract(schema_path: Path, schema_version: str) -> tuple[dict[
     return schema, raw, _sha256_bytes(raw)
 
 
-def _git_state(workspace: Path) -> tuple[str | None, bool | None]:
-    try:
-        commit = subprocess.run(
-            ["git", "rev-parse", "HEAD"],
-            cwd=workspace,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout.strip()
-        status = subprocess.run(
-            ["git", "status", "--porcelain"],
-            cwd=workspace,
-            check=True,
-            capture_output=True,
-            text=True,
-        ).stdout
-    except (OSError, subprocess.CalledProcessError):
-        return None, None
-    return commit or None, bool(status.strip())
+def _market_data_batch_evidence(
+    paths: Sequence[Path],
+    *,
+    decision_time: datetime,
+    storage_root: Path,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    """Verify storage-managed batches and return deterministic manifest evidence."""
+
+    evidence: list[dict[str, Any]] = []
+    inputs: list[dict[str, Any]] = []
+    seen_paths: set[Path] = set()
+    for path in sorted((Path(item).resolve() for item in paths), key=lambda item: item.as_posix()):
+        if path in seen_paths:
+            raise ObservationValidationError(f"duplicate market-data batch path: {path}")
+        seen_paths.add(path)
+        try:
+            batch = read_validated_batch(path, storage_root=storage_root)
+        except (MarketDataStorageError, OSError, ValueError) as exc:
+            raise ObservationValidationError(
+                f"market-data batch is not verified validated evidence: {path}: {exc}"
+            ) from exc
+        if batch.completeness_status != "complete" or batch.record_count < 1:
+            raise ObservationValidationError("market-data batch must be complete and non-empty")
+        if batch.synthetic:
+            raise ObservationValidationError("synthetic market-data batch is forbidden")
+        if batch.requested_at > decision_time or batch.fetched_at > decision_time:
+            raise ObservationValidationError(
+                "market-data batch was requested or fetched after decision_time"
+            )
+        if batch.available_at_max is None or batch.available_at_max > decision_time:
+            raise ObservationValidationError(
+                "market-data batch has evidence unavailable at decision_time"
+            )
+        file_hash = _sha256_bytes(path.read_bytes())
+        receipt_path = MarketDataStorage.validated_receipt_path(path)
+        receipt_hash = _sha256_bytes(receipt_path.read_bytes())
+        metadata = batch.to_dict(include_records=False)
+        metadata["batch_file_path"] = path.as_posix()
+        metadata["batch_file_sha256"] = file_hash
+        metadata["registry_receipt_path"] = receipt_path.as_posix()
+        metadata["registry_receipt_sha256"] = receipt_hash
+        evidence.append(metadata)
+        inputs.append(
+            {
+                "role": "market_data_batch",
+                "path": path.as_posix(),
+                "sha256": file_hash,
+                "batch_id": batch.batch_id,
+            }
+        )
+        inputs.append(
+            {
+                "role": "market_data_registry_receipt",
+                "path": receipt_path.as_posix(),
+                "sha256": receipt_hash,
+                "batch_id": batch.batch_id,
+            }
+        )
+    evidence.sort(key=lambda item: (item["provider_id"], item["dataset_type"], item["batch_id"]))
+    inputs.sort(key=lambda item: (item["batch_id"], item["role"], item["path"]))
+    return evidence, inputs
 
 
 def _reuse_existing_sealed_at(
@@ -427,6 +477,7 @@ def _reuse_existing_sealed_at(
     schema_path: Path,
     schema_hash: str,
     comparison: dict[str, Any],
+    market_data_storage_root: Path,
 ) -> str | None:
     observation_exists = observation_path.exists()
     manifest_exists = manifest_path.exists()
@@ -438,7 +489,13 @@ def _reuse_existing_sealed_at(
     existing, existing_raw = _read_json(observation_path, "existing sealed observation")
     validate_observation(existing)
     validate_against_schema(existing, schema)
-    validate_manifest(manifest_path, existing, _sha256_bytes(existing_raw), observation_path)
+    validate_manifest(
+        manifest_path,
+        existing,
+        _sha256_bytes(existing_raw),
+        observation_path,
+        market_data_storage_root=market_data_storage_root,
+    )
     pipeline = existing.get("pipeline")
     if not isinstance(pipeline, dict):
         raise ObservationValidationError("existing controlled observation is missing pipeline metadata")
@@ -489,6 +546,7 @@ def _validate_latest_update(
     snapshot_raw: bytes,
     previous_path: Path | None,
     previous_manifest_path: Path | None,
+    market_data_storage_root: Path,
 ) -> None:
     if not latest_alias_path.exists():
         if latest_dashboard_path.exists():
@@ -525,6 +583,7 @@ def _validate_latest_update(
         previous_observation,
         previous_observation_hash,
         previous_observation_path,
+        market_data_storage_root=market_data_storage_root,
     )
     previous_pipeline = previous_observation.get("pipeline")
     if not isinstance(previous_pipeline, dict):
@@ -616,6 +675,8 @@ def run_pipeline(
     signals_dir: Path,
     manifest_dir: Path,
     dashboard_dir: Path,
+    market_data_batch_paths: Sequence[Path] = (),
+    market_data_storage_root: Path = DEFAULT_MARKET_DATA_STORAGE_ROOT,
     workspace: Path = Path("."),
 ) -> PipelineOutputs:
     has_previous = previous_path is not None or previous_manifest_path is not None
@@ -649,7 +710,13 @@ def run_pipeline(
         validate_against_schema(previous, schema)
         previous_hash = _sha256_bytes(previous_raw)
         assert previous_manifest_path is not None
-        validate_manifest(previous_manifest_path, previous, previous_hash, previous_path)
+        validate_manifest(
+            previous_manifest_path,
+            previous,
+            previous_hash,
+            previous_path,
+            market_data_storage_root=market_data_storage_root,
+        )
         previous_manifest, previous_manifest_raw = _read_json(previous_manifest_path, "previous observation manifest")
         previous_sealed_at_value = previous_manifest.get("sealed_at")
         if not isinstance(previous_sealed_at_value, str):
@@ -666,6 +733,7 @@ def run_pipeline(
         schema_path=schema_path,
         schema_hash=schema_hash,
         comparison=sealed["comparison"],
+        market_data_storage_root=market_data_storage_root,
     )
     if sealed_at is None:
         sealing_time = _now()
@@ -673,7 +741,8 @@ def run_pipeline(
             raise ObservationValidationError("standard CLI sealing clock must include a timezone offset")
         sealed_at = sealing_time.isoformat()
     sealed_time = _parse_time(sealed_at, "pipeline.sealed_at")
-    if sealed_time < _parse_time(str(sealed["decision_time"]), "decision_time"):
+    decision_time = _parse_time(str(sealed["decision_time"]), "decision_time")
+    if sealed_time < decision_time:
         raise ObservationValidationError("standard CLI cannot seal an observation before decision_time")
     if sealed_time < _parse_time(str(sealed["generated_at"]), "generated_at"):
         raise ObservationValidationError("standard CLI cannot seal an observation before generated_at")
@@ -692,7 +761,20 @@ def run_pipeline(
     # preserves first-seen order, so rendering the pre-serialization dict here
     # would differ from a later render of the sealed file.
     sealed_for_render = parse_json_object(sealed_raw, "canonical sealed observation")
-    commit, dirty = _git_state(workspace)
+    market_data_batches, market_data_inputs = _market_data_batch_evidence(
+        market_data_batch_paths,
+        decision_time=decision_time,
+        storage_root=market_data_storage_root,
+    )
+    commit, dirty, git_diff_hash = _git_state(workspace)
+    if dirty is None:
+        raise ObservationValidationError(
+            "Git working-tree state is unavailable; standard CLI sealing is refused"
+        )
+    if dirty is True and git_diff_hash is None:
+        raise ObservationValidationError(
+            "dirty working tree cannot be sealed without git_diff_sha256"
+        )
     inputs: list[dict[str, Any]] = [
         {
             "role": "draft_observation",
@@ -705,6 +787,7 @@ def run_pipeline(
             "sha256": schema_hash,
         },
     ]
+    inputs.extend(market_data_inputs)
     if previous_path is not None and previous_raw is not None:
         inputs.append(
             {
@@ -732,6 +815,8 @@ def run_pipeline(
         "standard_cli_generated": True,
         "repository_commit": commit,
         "working_tree_dirty_at_generation": dirty,
+        "git_diff_sha256": git_diff_hash,
+        "market_data_storage_root": market_data_storage_root.resolve().as_posix(),
         "schema": {
             "path": schema_path.as_posix(),
             "sha256": schema_hash,
@@ -754,6 +839,7 @@ def run_pipeline(
             }
         ],
         "source_status": sealed.get("data_quality", {}),
+        "market_data_batches": market_data_batches,
         "comparison": {
             "status": sealed["comparison"]["status"],
             "previous_observation_id": sealed["comparison"]["previous_observation_id"],
@@ -774,6 +860,8 @@ def run_pipeline(
         _sha256_bytes(sealed_raw),
         manifest_verified=True,
         manifest_hash=manifest_hash,
+        market_data_batches=market_data_batches,
+        manifest_version=MANIFEST_VERSION,
     ).encode("utf-8")
     observation_hash = _sha256_bytes(sealed_raw)
     snapshot_hash = _sha256_bytes(snapshot_raw)
@@ -800,13 +888,20 @@ def run_pipeline(
         snapshot_raw=snapshot_raw,
         previous_path=previous_path,
         previous_manifest_path=previous_manifest_path,
+        market_data_storage_root=market_data_storage_root,
     )
     _assert_no_conflict(observation_path, sealed_raw)
     _assert_no_conflict(manifest_path, manifest_raw)
     _assert_no_conflict(snapshot_dashboard_path, snapshot_raw)
     _atomic_write(observation_path, sealed_raw, allow_replace=False)
     _atomic_write(manifest_path, manifest_raw, allow_replace=False)
-    write_dashboard(observation_path, snapshot_dashboard_path, manifest_path, allow_replace=False)
+    write_dashboard(
+        observation_path,
+        snapshot_dashboard_path,
+        manifest_path,
+        allow_replace=False,
+        market_data_storage_root=market_data_storage_root,
+    )
     _atomic_write(latest_dashboard_path, snapshot_raw, allow_replace=True)
     _atomic_write(latest_alias_path, latest_alias_raw, allow_replace=True)
     return PipelineOutputs(
@@ -829,6 +924,19 @@ def main() -> int:
     parser.add_argument("--signals-dir", type=Path, default=DEFAULT_SIGNALS_DIR)
     parser.add_argument("--manifest-dir", type=Path, default=DEFAULT_MANIFEST_DIR)
     parser.add_argument("--dashboard-dir", type=Path, default=DEFAULT_DASHBOARD_DIR)
+    parser.add_argument(
+        "--market-data-batch",
+        action="append",
+        type=Path,
+        default=[],
+        help="Validated market-data batch JSON; repeat for multiple batches.",
+    )
+    parser.add_argument(
+        "--market-data-storage-root",
+        type=Path,
+        default=DEFAULT_MARKET_DATA_STORAGE_ROOT,
+        help="Controlled raw/quarantine/validated market-data root.",
+    )
     parser.add_argument("--workspace", type=Path, default=Path("."))
     args = parser.parse_args()
 
@@ -841,6 +949,8 @@ def main() -> int:
         signals_dir=args.signals_dir,
         manifest_dir=args.manifest_dir,
         dashboard_dir=args.dashboard_dir,
+        market_data_batch_paths=args.market_data_batch,
+        market_data_storage_root=args.market_data_storage_root,
         workspace=args.workspace,
     )
     print(f"Observation: {outputs.observation_path}")

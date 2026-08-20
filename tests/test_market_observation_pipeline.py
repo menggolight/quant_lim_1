@@ -5,14 +5,21 @@ import tempfile
 import unittest
 from datetime import datetime, timedelta
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from agent.market_observation_dashboard import ObservationValidationError, validate_manifest
 from agent.market_observation_pipeline import (
     MANIFEST_VERSION,
     PIPELINE_VERSION,
+    _git_state,
     run_pipeline,
 )
+from research.market_data.contracts import MarketDataRequest
+from research.market_data.providers.baostock import BaoStockProvider
+from research.market_data.registry import MarketDataRegistry
+from research.market_data.storage import MarketDataStorage
+from research.reproducibility import git_worktree_state
 
 try:
     from test_market_observation_dashboard import (
@@ -66,6 +73,83 @@ def run_in(root: Path, payload: dict, *, sealed_at: datetime | None = None, **ov
     return run_at(sealed_at or default_sealed_at(payload), **arguments)
 
 
+def write_validated_market_batch(root: Path) -> Path:
+    requested_at = datetime.fromisoformat("2026-08-05T09:00:00+08:00")
+    fetched_at = datetime.fromisoformat("2026-08-05T10:00:00+08:00")
+    request = MarketDataRequest(
+        dataset_type="daily_bar",
+        requested_at=requested_at,
+        retrieval_mode="historical_backfill",
+        instrument_id="000333.SZ",
+        start_date="2026-08-04",
+        end_date="2026-08-04",
+        adjustment="none",
+    )
+
+    class Result:
+        error_code = "0"
+        error_msg = ""
+
+        def __init__(self, fields, rows):
+            self.fields = fields
+            self.rows = rows
+            self.index = -1
+
+        def next(self):
+            self.index += 1
+            return self.index < len(self.rows)
+
+        def get_row_data(self):
+            return self.rows[self.index]
+
+    class SDK:
+        def login(self):
+            return Result([], [])
+
+        def logout(self):
+            return Result([], [])
+
+        def query_history_k_data_plus(self, *_args, **_kwargs):
+            return Result(
+                list(BaoStockProvider._DAILY_FIELDS),
+                [[
+                    "2026-08-04", "sz.000333", "50", "52", "49.5", "51",
+                    "49.8", "100000", "5100000", "3", "1",
+                ]],
+            )
+
+        def query_trade_dates(self, **_kwargs):
+            return Result(
+                ["calendar_date", "is_trading_day"],
+                [["2026-08-04", "1"]],
+            )
+
+    provider = BaoStockProvider(sdk_loader=lambda: SDK(), clock=lambda: fetched_at)
+    with patch(
+        "research.market_data.providers.BaoStockProvider",
+        return_value=provider,
+    ):
+        registry = MarketDataRegistry.configured(storage_root=root / "market-data")
+    storage = registry.storage
+    assert storage is not None
+    batch = registry.fetch(request, provider_id="baostock")
+    key = storage.cache_key(
+        batch.provider_id,
+        batch.dataset_type,
+        batch.request_fingerprint,
+        batch.adapter_version,
+        batch.schema_version,
+    )
+    return (
+        storage.root
+        / "validated"
+        / batch.provider_id
+        / batch.dataset_type
+        / key
+        / f"{batch.batch_id}.json"
+    )
+
+
 class MarketObservationPipelineTest(unittest.TestCase):
     def test_first_baseline_seals_observation_manifest_and_dashboards(self):
         with tempfile.TemporaryDirectory() as temp_dir:
@@ -94,6 +178,11 @@ class MarketObservationPipelineTest(unittest.TestCase):
             self.assertEqual(manifest["outputs"][0]["sha256"], sealed_hash)
             self.assertEqual(manifest["schema"]["schema_version"], sealed["schema_version"])
             self.assertFalse(any(manifest["admission"].values()))
+            self.assertEqual(manifest["market_data_batches"], [])
+            if manifest["working_tree_dirty_at_generation"] is True:
+                self.assertRegex(manifest["git_diff_sha256"], r"^[0-9a-f]{64}$")
+            else:
+                self.assertIsNone(manifest["git_diff_sha256"])
             self.assertTrue(outputs.snapshot_dashboard_path.exists())
             self.assertTrue(outputs.latest_dashboard_path.exists())
             self.assertTrue(outputs.latest_alias_path.exists())
@@ -152,6 +241,145 @@ class MarketObservationPipelineTest(unittest.TestCase):
                 repeated.snapshot_dashboard_path.read_bytes(),
                 repeated.latest_dashboard_path.read_bytes(),
             )
+
+    def test_v03_manifest_binds_validated_batch_raw_hash_and_dashboard_source(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            batch_path = write_validated_market_batch(root)
+            outputs = run_in(
+                root,
+                draft_observation_fixture(),
+                market_data_batch_paths=(batch_path,),
+                market_data_storage_root=root / "market-data",
+            )
+            sealed = json.loads(outputs.observation_path.read_text(encoding="utf-8"))
+            manifest = json.loads(outputs.manifest_path.read_text(encoding="utf-8"))
+            sealed_hash = hashlib.sha256(outputs.observation_path.read_bytes()).hexdigest()
+
+            self.assertEqual(len(manifest["market_data_batches"]), 1)
+            evidence = manifest["market_data_batches"][0]
+            self.assertEqual(evidence["provider_id"], "baostock")
+            self.assertEqual(
+                evidence["upstream_source"],
+                "baostock.query_history_k_data_plus",
+            )
+            self.assertEqual(evidence["admission_status"], "validated_research_only")
+            self.assertEqual(evidence["batch_file_sha256"], hashlib.sha256(batch_path.read_bytes()).hexdigest())
+            self.assertEqual(
+                [item["role"] for item in manifest["inputs"]].count("market_data_batch"),
+                1,
+            )
+            content = outputs.latest_dashboard_path.read_text(encoding="utf-8")
+            self.assertIn("结构化市场数据证据", content)
+            self.assertIn("baostock.query_history_k_data_plus", content)
+            self.assertNotIn("Legacy 历史行情诊断（补充源）", content)
+            self.assertNotIn("Legacy 行业榜诊断（补充源）", content)
+            with self.assertRaisesRegex(ObservationValidationError, "controlled root"):
+                validate_manifest(
+                    outputs.manifest_path,
+                    sealed,
+                    sealed_hash,
+                    outputs.observation_path,
+                )
+            validate_manifest(
+                outputs.manifest_path,
+                sealed,
+                sealed_hash,
+                outputs.observation_path,
+                market_data_storage_root=root / "market-data",
+            )
+
+            storage_root = batch_path.parents[4]
+            raw_path = (
+                storage_root
+                / "raw"
+                / evidence["provider_id"]
+                / evidence["dataset_type"]
+                / batch_path.parent.name
+                / f"{evidence['batch_id']}.raw"
+            )
+            raw_path.write_bytes(b"tampered\n")
+            with self.assertRaisesRegex(ObservationValidationError, "raw evidence hash"):
+                validate_manifest(
+                    outputs.manifest_path,
+                    sealed,
+                    sealed_hash,
+                    outputs.observation_path,
+                    market_data_storage_root=root / "market-data",
+                )
+
+    def test_git_state_hashes_dirty_content_or_reports_clean_state(self):
+        commit, dirty, diff_hash = _git_state(REPOSITORY_ROOT)
+        self.assertRegex(commit or "", r"^[0-9a-f]{40}$")
+        self.assertIsInstance(dirty, bool)
+        if dirty:
+            self.assertRegex(diff_hash or "", r"^[0-9a-f]{64}$")
+        else:
+            self.assertIsNone(diff_hash)
+
+    def test_git_state_refuses_head_change_during_clean_snapshot(self):
+        responses = [
+            SimpleNamespace(stdout="a" * 40 + "\n"),
+            SimpleNamespace(stdout=b""),
+            SimpleNamespace(stdout="b" * 40 + "\n"),
+            SimpleNamespace(stdout=b""),
+        ]
+        with patch("research.reproducibility.subprocess.run", side_effect=responses):
+            self.assertEqual(git_worktree_state(REPOSITORY_ROOT), (None, None, None))
+
+    def test_git_state_refuses_head_change_during_dirty_snapshot(self):
+        status = b" M tracked.py\0"
+        diff = b"binary diff"
+        responses = [
+            SimpleNamespace(stdout="a" * 40 + "\n"),
+            SimpleNamespace(stdout=status),
+            SimpleNamespace(stdout=diff),
+            SimpleNamespace(stdout=b""),
+            SimpleNamespace(stdout=status),
+            SimpleNamespace(stdout=diff),
+            SimpleNamespace(stdout=b""),
+            SimpleNamespace(stdout="b" * 40 + "\n"),
+        ]
+        with patch("research.reproducibility.subprocess.run", side_effect=responses):
+            self.assertEqual(git_worktree_state(REPOSITORY_ROOT), (None, None, None))
+
+    def test_v03_manifest_rejects_type_confusion_and_missing_evidence_fields(self):
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            outputs = run_in(root, draft_observation_fixture())
+            sealed = json.loads(outputs.observation_path.read_text(encoding="utf-8"))
+            sealed_hash = hashlib.sha256(outputs.observation_path.read_bytes()).hexdigest()
+            original = json.loads(outputs.manifest_path.read_text(encoding="utf-8"))
+
+            mutations = []
+            wrong_type = copy.deepcopy(original)
+            wrong_type["working_tree_dirty_at_generation"] = "true"
+            mutations.append(wrong_type)
+            missing_batches = copy.deepcopy(original)
+            missing_batches.pop("market_data_batches")
+            mutations.append(missing_batches)
+            missing_diff_field = copy.deepcopy(original)
+            missing_diff_field.pop("git_diff_sha256")
+            mutations.append(missing_diff_field)
+
+            for index, manifest in enumerate(mutations):
+                path = root / f"invalid-manifest-{index}.json"
+                path.write_text(json.dumps(manifest), encoding="utf-8")
+                with self.subTest(index=index), self.assertRaises(ObservationValidationError):
+                    validate_manifest(
+                        path,
+                        sealed,
+                        sealed_hash,
+                        outputs.observation_path,
+                    )
+
+    def test_pipeline_refuses_when_git_state_cannot_be_verified(self):
+        with tempfile.TemporaryDirectory() as temp_dir, patch(
+            "agent.market_observation_pipeline._git_state",
+            return_value=(None, None, None),
+        ):
+            with self.assertRaisesRegex(ObservationValidationError, "Git working-tree"):
+                run_in(Path(temp_dir), draft_observation_fixture())
 
     def test_previous_observation_and_manifest_drive_comparison(self):
         with tempfile.TemporaryDirectory() as temp_dir:
