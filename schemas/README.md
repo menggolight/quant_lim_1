@@ -9,16 +9,20 @@
 - `trade_calendar.v1.json`：Provider 交易日历记录；工作日近似不能冒充正式日历。
 - `security_master.v1.json`：沪深市场证券基础信息记录；北交所未接入，当前快照不能自证历史 point-in-time 股票池。
 
-JSON Schema 负责结构，`research/market_data/validation.py` 负责请求证券一致性、日期唯一和升序、窗口范围、OHLC、非负成交量/成交额、缺字段和非法数字。`admission.py` 再按数据集重新计算本地准入。
+JSON Schema 负责结构，`research/market_data/validation.py` 在无网络依赖下执行本仓库所需的 Draft 2020-12 约束，包括内部/同目录外部 `$ref`、组合/条件分支、对象与数组上限、唯一性和 RFC3339 日期时间；同时负责请求证券一致性、日期唯一和升序、窗口范围、OHLC、非负成交量/成交额、缺字段和非法数字。`admission.py` 再按数据集重新计算本地准入。
 
 ## 其他契约
 
-- `strategy_adaptive_exposure_policy.v1.json`：`a-share-small-account-adaptive-exposure-v2` 的冻结P0政策形状；锁定0%—100%离散仓位、Top3/单只40%、显式现金意图、风险退出重试和“月净收益10%仅报告”，固定Paper/交易/真实资金为不准入且LIVE永久不支持。Schema通过不证明策略有效或任何准入。
+- `strategy_adaptive_exposure_policy.v2.json`：`a-share-small-account-adaptive-exposure-v2` 的冻结政策形状；锁定0%—100%离散仓位、Top3/单只40%、显式现金意图、P0.1执行语义、风险退出重试和“月净收益10%仅报告”，固定Paper/交易/真实资金为不准入且LIVE永久不支持。V1只保留历史兼容；Schema通过不证明策略有效或任何准入。
 - `portfolio_intent.v1.json`：V2研究决策到计划层的显式组合意图，绑定时点和四类输入哈希；普通空目标失败，只有 `NO_ALPHA_CASH`、`RISK_OFF` 与 `ACCOUNT_DRAWDOWN_EXIT` 可以用空权重表达0%目标。权重求和、哈希和时序仍须由领域校验重算。
-- `portfolio_execution_plan.v1.json`：意图、账户快照和逐日执行尝试的计划/对账信封；区分普通与风险下降换手，记录目标、可实现和实际仓位，并把物理受阻退出与致命拒绝分开。同一尝试须幂等，跨 session 尝试还必须携带可重算的内部受控 session payload，计划仅持久化其 canonical hash、前一受控 session 和证据哈希；相邻性只证明该内部 payload 的链路，不证明官方交易所日历。`execution_quote_bundle_sha256` 绑定 Planner 实际消费的规范化行情映射，与 Intent 中作为上游研究输入凭据的 `market_data_sha256` 含义不同。
-
-Execution Plan 当前没有把独立 `FeeSchedule` 哈希绑定进 Gate approval；最终 Paper Broker 会在成交前重算费用并拒绝不一致计划，但正式 Paper 准入前仍需补齐费率配置绑定和异常状态恢复。
-- `strategy_paper_ledger_record.v2.json`：自适应仓位V2独立日频Paper账本的 `header` / `daily_session` 契约；绑定政策与交易日历哈希，从前态、真实成交和收盘估值重算现金、持仓、成本、NAV、回撤与仓位。它是对账证据，不是Paper准入或收益证据。
+- `portfolio_execution_plan.v2.json`：意图、账户快照和逐日执行尝试的计划/对账信封；除报价与受控日历外，新增 `execution_rule_bundle_sha256`，绑定完整 `FeeSchedule`、所有相关 `InstrumentRule` 与整手政策。Planner、Gate、Approval 和 Paper Broker 都必须重算；所有现金、减仓、数据失败和暂停意图在Schema层也只能含SELL类订单。V1仅用于历史兼容。相邻性与哈希仍只证明传入内容一致，不证明官方来源。
+- `controlled_pit_decision_snapshot.v1.json`、`frozen_alpha_model.v1.json`、`alpha_ranking.v2.json`：分别约束 D 日 PIT 输入、train-only 冻结线性模型和全股票池排名。排除行必须保留并使用 `null` 分数，不能以0填补缺失；未来数据可令整个批次 `DATA_FAIL_CLOSED`。
+- `exposure_input_snapshot.v1.json`、`exposure_hysteresis_policy.v1.json`、`exposure_state_memory.v1.json`、`exposure_decision.v2.json`：约束恰好六类Exposure输入、预注册迟滞规则、跨日状态记忆和0/30%/60%/100%决策。引擎没有生产默认阈值。
+- `portfolio_constructor_policy.v1.json`、`portfolio_construction_result.v2.json`：约束entry/hold/no-trade/成本/偏离阈值和目标/可实现/当前分离的组合结果；最多3只、单只40%，允许候选不足、整手不可负担和零订单留现金，非Alpha意图在Schema层不得含BUY。
+- `official_calendar_receipt.v1.json`、`official_calendar_registry.v1.json`：约束结构化日历payload、自哈希和exact-receipt受控allowlist。bool、来源字符串或哈希本身不能证明官方来源。
+- `next_session_signal.v1.json`、`next_session_consumption.v1.json`：约束D日冻结到紧邻D+1的一次性人工信号和单次盘前消费；Alpha/Risk通道与嵌套intent/construction在Schema层分离，风险通道不得承载Alpha BUY；绑定数据、模型、政策、意图、日历registry、账户预期状态、报价与execution-rule bundle，不授予自动提交权限。
+- `frozen_daily_data.v2.json`、`daily_strategy_decision.v2.json`、`daily_pipeline_failure_receipt.v1.json`、`manual_fill_bundle.v1.json`：约束Daily Pipeline的数据envelope、标准日报、失败receipt和人工成交证据。Frozen V2 只接收四类市场 Exposure 指标，账户回撤和 Alpha 分布由流水线派生，并为池外旧持仓提供 exit-only 受控收盘引用；日报支持带 failure receipt 的零订单 `BLOCKED` 分支，`DATA_FAIL_CLOSED`/`MANUAL_PAUSE`在Schema层禁BUY，并分离目标/可实现/当前仓位；计划阶段 `realized_*` 固定为null，实际仓位只在D+1收盘账本形成。通知outbox只是本地待投递证据。`frozen_daily_data.v1.json` 保留为未启用的旧 envelope，不被当前流水线消费。
+- `strategy_paper_ledger_record.v2.json`：自适应仓位V2独立日频Paper账本的 `header` / `daily_session` 契约；绑定政策与交易日历哈希、canonical FeeSchedule/InstrumentRule 成本 bundle、signal→consumption→manual fill 执行证据和 receipt-bound typed close marks，从前态、真实成交和收盘估值逐项重算现金、佣金、印花税、过户费、滑点、NAV、回撤与仓位。它是对账证据，不是Paper准入或收益证据。
 - `strategy_quality_growth_policy.v1.json`：A股小资金质量成长V1的策略政策形状；运行时还会精确校验因子、成本、风险和准入常量，Schema通过不能自行解锁研究。
 - `strategy_experiment.v2.json`：append-only正式实验预注册，绑定动态PIT成分、Choice全收益基准、D+1开盘到D+21开盘的20区间标签与锚点、六因子/五控制、带截距的固定Ridge、100万元Top Decile研究本金、基础/压力成本、美的外部持仓、11项历史门及数据/代码/配置哈希。统计契约还冻结 Andrews 自动HAC滞后、最少2个可用时段、Holm `alpha=0.05`、验证/锁定测试/审计Rank IC、锁定测试+审计因子显著性以及金融2因子/非金融6因子子模型。
 - `choice_quality_growth_gate.v1.json`：完整Choice单源能力receipt，绑定覆盖区间、行数、完整枚举的 `subject_ids`、字段、内容哈希、中证800全收益 open/close 和 `single_quarter`/`consolidated`/`CNY` 财务口径；聚合数量不能代替主体明细，能力契约通过也不等于实时连通、正式真值、正式回测或Paper准入。
@@ -49,5 +53,5 @@ Execution Plan 当前没有把独立 `FeeSchedule` 哈希绑定进 Gate approval
 - Provider 响应必须先规范化，再接受 Schema 和领域校验；不能把 SDK 对象直接交给研究消费者。
 - `market_data_batch` 中的 dataset 与 Schema 版本必须一致，正式链固定要求 `synthetic=false`。
 - 新版本必须提供迁移、双读窗口或明确拒绝旧版本，并补充正常、负向、边界和旧版本测试。
-- 新增的自适应仓位契约与 V1 并存；P0运行时和日频账本不能被解释为已替换V1、已打通受控信号或已获得Paper执行准入。
+- 新增的自适应仓位契约与 V1 并存；五模块、Daily Pipeline 和日频账本不能被解释为已替换V1、已接入外部受控PIT/官方registry/正式模型阈值，或已获得Paper执行准入。
 - 文件 SHA-256 只证明内容一致性，不能证明来自券商、交易所、监管机构或其他官方来源。

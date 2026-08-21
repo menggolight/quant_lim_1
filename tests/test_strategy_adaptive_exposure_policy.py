@@ -66,7 +66,7 @@ class AdaptiveExposurePolicyTests(unittest.TestCase):
 
     def test_status_identity_and_any_unlisted_content_drift_fail_closed(self) -> None:
         mutations = (
-            (("schema_version",), "strategy-adaptive-exposure-policy.v2"),
+            (("schema_version",), "strategy-adaptive-exposure-policy.v1"),
             (("strategy_id",), "other-strategy"),
             (("contract_status",), "implemented"),
             (("research_status",), "admitted"),
@@ -115,6 +115,41 @@ class AdaptiveExposurePolicyTests(unittest.TestCase):
         for path, value in mutations:
             with self.subTest(path=path):
                 self.assert_drift_rejected(path, value)
+
+    def test_execution_contract_uses_rule_bound_v2_plan_schema(self) -> None:
+        execution = self.payload["execution_contract"]
+        self.assertEqual(
+            execution["schema_version"],
+            "portfolio-execution-plan.v2",
+        )
+        self.assert_drift_rejected(
+            ("execution_contract", "schema_version"),
+            "portfolio-execution-plan.v1",
+        )
+
+        schema_root = Path(__file__).resolve().parents[1] / "schemas"
+        policy_v1 = json.loads(
+            (schema_root / "strategy_adaptive_exposure_policy.v1.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        policy_v2 = json.loads(
+            (schema_root / "strategy_adaptive_exposure_policy.v2.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(
+            policy_v1["properties"]["execution_contract"]["const"][
+                "schema_version"
+            ],
+            "portfolio-execution-plan.v1",
+        )
+        self.assertEqual(
+            policy_v2["properties"]["execution_contract"]["const"][
+                "schema_version"
+            ],
+            "portfolio-execution-plan.v2",
+        )
 
     def test_monthly_ten_percent_is_reporting_only_never_a_gate_or_objective(self) -> None:
         challenge = self.payload["challenge"]

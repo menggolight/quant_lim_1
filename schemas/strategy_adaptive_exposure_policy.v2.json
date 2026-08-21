@@ -1,0 +1,223 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/strategy_adaptive_exposure_policy.v2.json",
+  "title": "A-share small-account adaptive exposure policy v2",
+  "description": "Strategy-policy contract for adaptive-exposure V2. Validation cannot establish data admission, statistical validity, Paper eligibility, or execution authority.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "strategy_id",
+    "contract_status",
+    "research_status",
+    "execution_status",
+    "description",
+    "v1_compatibility",
+    "challenge",
+    "architecture",
+    "portfolio",
+    "intent_contract",
+    "execution_contract",
+    "paper_ledger_contract",
+    "risk",
+    "costs",
+    "experiment_policy",
+    "reporting_metrics",
+    "safety"
+  ],
+  "properties": {
+    "schema_version": {"const": "strategy-adaptive-exposure-policy.v2"},
+    "strategy_id": {"const": "a-share-small-account-adaptive-exposure-v2"},
+    "contract_status": {"const": "p0_runtime_implemented_not_admitted"},
+    "research_status": {"const": "blocked_missing_pit_data"},
+    "execution_status": {"const": "research_only"},
+    "description": {"type": "string", "minLength": 1},
+    "v1_compatibility": {
+      "const": {
+        "strategy_id": "a-share-small-account-quality-growth-v1",
+        "policy": "preserve_unchanged_read_only_compatibility",
+        "historical_results_transferable": false
+      }
+    },
+    "challenge": {
+      "const": {
+        "metric": "monthly_net_return",
+        "target": "0.10",
+        "role": "reporting_only",
+        "is_guarantee": false,
+        "is_model_loss": false,
+        "is_admission_gate": false,
+        "is_parameter_optimization_target": false
+      }
+    },
+    "architecture": {
+      "const": {
+        "layers": [
+          "alpha_engine",
+          "exposure_engine",
+          "portfolio_constructor",
+          "execution_and_risk"
+        ],
+        "alpha_exposure_models_separate": true,
+        "alpha_refresh_sessions": 20,
+        "risk_evaluation_frequency": "each_controlled_session_close"
+      }
+    },
+    "portfolio": {
+      "const": {
+        "initial_cash": "10000",
+        "target_gross_exposure_min": "0.00",
+        "target_gross_exposure_max": "1.00",
+        "exposure_states": {
+          "RISK_OFF": "0.00",
+          "DEFENSIVE": "0.30",
+          "NEUTRAL": "0.60",
+          "RISK_ON": "1.00"
+        },
+        "max_positions": 3,
+        "max_position_weight": "0.40",
+        "maximum_total_weight": "1.00",
+        "minimum_cash_weight": "0.00",
+        "dynamic_execution_reserve": true,
+        "target_weight_sum_policy": "less_than_or_equal_to_target_gross_exposure",
+        "insufficient_candidates_policy": "preserve_cash_never_fill_with_lower_quality",
+        "lot_and_cost_residual_policy": "preserve_real_cash",
+        "leverage_allowed": false,
+        "short_selling_allowed": false
+      }
+    },
+    "intent_contract": {
+      "const": {
+        "schema_version": "portfolio-intent.v1",
+        "allowed_types": [
+          "ALPHA_REBALANCE",
+          "NO_ALPHA_CASH",
+          "DEFENSIVE_REDUCTION",
+          "RISK_OFF",
+          "ACCOUNT_DRAWDOWN_EXIT",
+          "DATA_FAIL_CLOSED",
+          "MANUAL_PAUSE"
+        ],
+        "empty_target_types": [
+          "NO_ALPHA_CASH",
+          "RISK_OFF",
+          "ACCOUNT_DRAWDOWN_EXIT"
+        ],
+        "untyped_empty_targets": "reject"
+      }
+    },
+    "execution_contract": {
+      "const": {
+        "schema_version": "portfolio-execution-plan.v2",
+        "order_risk_classes": [
+          "RISK_INCREASING",
+          "RISK_NEUTRAL",
+          "RISK_REDUCING",
+          "FORCED_EXIT"
+        ],
+        "ordinary_turnover_limit_applies_to": [
+          "RISK_INCREASING",
+          "RISK_NEUTRAL"
+        ],
+        "ordinary_turnover_limit_exempt": [
+          "RISK_REDUCING",
+          "FORCED_EXIT"
+        ],
+        "exit_constraints": [
+          "t_plus_one",
+          "suspension",
+          "limit_down_locked",
+          "sellable_quantity",
+          "quote_freshness",
+          "account_and_position_reconciliation",
+          "order_idempotency"
+        ],
+        "partial_exit_policy": "execute_safe_sell_orders_and_record_blocked_exits",
+        "retry_policy": "retry_residual_exit_each_controlled_session",
+        "same_attempt_replay_policy": "idempotent_no_duplicate_order",
+        "retry_identity_policy": "same_intent_new_attempt_per_execution_session"
+      }
+    },
+    "paper_ledger_contract": {
+      "const": {
+        "schema_version": "strategy-paper-ledger-record.v2",
+        "record_types": [
+          "header",
+          "daily_session"
+        ],
+        "frequency": "each_controlled_session",
+        "append_policy": "same_session_close_append_only_no_backfill",
+        "state_derivation": "previous_state_plus_evidence_bound_fills_and_close_marks",
+        "drawdown_latch": "sticky_for_ledger_lifetime_no_reentry",
+        "reset_or_new_ledger_orchestration": "not_implemented",
+        "live_supported": false
+      }
+    },
+    "risk": {
+      "const": {
+        "account_drawdown_trigger": "0.12",
+        "trigger_meaning": "risk_trigger_not_maximum_loss_guarantee",
+        "trigger_observation": "controlled_session_close",
+        "trigger_intent_type": "ACCOUNT_DRAWDOWN_EXIT",
+        "first_exit_attempt": "next_controlled_session_open",
+        "residual_exit_retry": "each_following_controlled_session",
+        "ordinary_state_change_requires_hysteresis": true,
+        "hard_risk_exit_bypasses_hysteresis": true,
+        "hysteresis_parameters_status": "blocked_pending_preregistration"
+      }
+    },
+    "costs": {
+      "const": {
+        "commission_rate": "0.00018",
+        "minimum_commission": "5",
+        "sell_tax_rate": "0.0005",
+        "transfer_fee_rate_both_sides": "0.00001",
+        "base_slippage_bps_one_way": "10",
+        "stress_slippage_bps_one_way": "20",
+        "stress_commission_multiplier": "2",
+        "all_reported_returns_are_net_of_costs": true
+      }
+    },
+    "experiment_policy": {
+      "const": {
+        "train": ["2018-01-01", "2022-12-31"],
+        "validation": ["2023-01-01", "2023-12-31"],
+        "locked_test": ["2024-01-01", "2025-12-31"],
+        "locked_test_run_policy": "single_controlled_run_then_consumed",
+        "pre_freeze_2026_status": "retrospective_consumed",
+        "forward_start_rule": "next_controlled_trading_session_after_spec_freeze",
+        "core_parameter_change_policy": "new_strategy_version_required"
+      }
+    },
+    "reporting_metrics": {
+      "const": [
+        "monthly_net_return",
+        "monthly_10pct_hit_rate",
+        "median_monthly_return",
+        "geometric_mean_monthly_return",
+        "positive_month_rate",
+        "worst_month_return",
+        "monthly_cvar_95",
+        "rolling_12m_return",
+        "max_drawdown",
+        "calmar_ratio",
+        "net_active_return",
+        "average_gross_exposure",
+        "exposure_adjusted_return",
+        "cash_month_count",
+        "turnover",
+        "total_cost",
+        "cost_to_gross_profit"
+      ]
+    },
+    "safety": {
+      "const": {
+        "paper_eligibility": false,
+        "trade_eligibility": false,
+        "real_money_list_allowed": false,
+        "automatic_order_submission": false,
+        "live": "not_supported"
+      }
+    }
+  }
+}

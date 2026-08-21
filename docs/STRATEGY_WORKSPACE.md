@@ -2,13 +2,15 @@
 
 `research.strategy_workspace` 的默认主线是 `a-share-small-account-quality-growth-v1`。它面向真实资金决策设计，但只生成研究、Paper 账本和人工复核候选；仓库永久不支持 LIVE 下单。
 
-## 非默认的自适应仓位 V2 P0
+## 非默认的自适应仓位 V2
 
-`a-share-small-account-adaptive-exposure-v2` 是与本页 V1 主线并存的独立 P0 切片，规格见[自适应仓位 V2](ADAPTIVE_EXPOSURE_V2.md)。它已实现显式 `PortfolioIntent`、0%—100%目标仓位、风险退出的普通换手豁免、按内部受控日历下一session开始清仓与逐日重试、跨重启幂等，以及绑定政策/日历哈希的独立日频 Paper 账本。
+`a-share-small-account-adaptive-exposure-v2` 是与本页 V1 主线并存的独立策略版本，规格见[自适应仓位 V2](ADAPTIVE_EXPOSURE_V2.md)，模块索引见[策略工作区代码说明](../research/strategy_workspace/README.md)。P0.1 的七项执行问题已经修复并冻结：暂停/数据失败禁止 BUY、Gate 独立覆盖全部退出持仓、四类减仓支持首次 D+1、日亏损不阻断纯减仓、Paper 账户 fingerprint CAS、canonical 费用/证券规则 bundle，以及整批预检先于 `SUBMITTING`。
 
-这不改变本页 V1 的默认入口、Top2/20%最低现金、Experiment v2 或既有账本哈希；V2 也尚未实现 Alpha/仓位模型、受控实验 V3、正式 PIT 回测或信号适配。当前日历与报价哈希只证明传入payload内部一致，不证明官方来源或日历无遗漏；普通Alpha还仅允许同session执行，Gate approval也未直接绑定独立费率表。其 `contract_status=p0_runtime_implemented_not_admitted` 只描述P0内部契约实现，所有 Paper、交易、真实资金和 LIVE 状态仍关闭。
+V2 现已实现 Alpha Engine、Exposure Engine、Portfolio Constructor、Next-session Adapter 和 12 阶段 Daily Pipeline 的代码契约；每天可冻结包含 BUY/SELL/HOLD/CASH、目标/可实现/当前/实际仓位、整手、成本、取消条件、原因与哈希的 JSON/Markdown 决策，且允许零订单。预期数据/验证失败也写 `daily-strategy-decision.v2` 的 `BLOCKED` 分支。D 日 Alpha 只能通过结构化日历 receipt 指向的紧邻 D+1 使用一次，消费按 signal 全局CAS，盘前只返回人工指令；Exposure状态续接上一官方日不可变产物，账户回撤由已验证账本派生，池外旧持仓保持exit-only覆盖。通知当前仅写本地 outbox，不会外发。
 
-## 当前真实状态（2026-08-19）
+这不改变 V1 的默认入口、Top2/20%最低现金、Experiment v2 或既有账本哈希。V2 的外部受控 PIT updater、生产官方日历/证券规则/行情 registry、Experiment V3、正式 train-only 模型及预注册阈值尚未接入；2024—2025 Locked Test 未运行、未解释。当前哈希只证明内容一致，不证明官方来源。其工程实现不能提升准入，`paper_eligibility=false`、`trade_eligibility=false`、`real_money_list_allowed=false`、`live_supported=false`。
+
+## 当前真实状态（2026-08-21）
 
 | 层级 | 状态 | 结论 |
 |---|---|---|
@@ -17,7 +19,8 @@
 | 正式 PIT 数据 | `blocked_missing_pit_data` | 尚未取得完整中证800历史成分、全收益基准、PIT行业/市值/交易状态及首披财务受控批次 |
 | 历史统计 | 未运行 | 没有正式质量成长回测结果，不得声称有效或盈利 |
 | 降级诊断 | 60只六因子截面已运行 | 当前中证800成分与16列Choice快照已经独立验证并绑定；Choice真实采集完整覆盖60只股票与中证800价格指数的121个共同交易日，并生成2026-08-18单截面。样本采用当前行业等覆盖轮转，不代表中证800行业权重；没有排名、回测或买入名单，状态仍为 `diagnostic_current_universe_not_pit` |
-| Paper / 真实资金 | 不准入 | append-only 账本可验证费用、成交、持仓与哈希链，但每个决策点的 signal/model/source 哈希仍由调用者提供，且缺日频 NAV/回撤盯市证据；因此固定 `blocked_missing_controlled_paper_signal_adapter` 与 `blocked_missing_daily_paper_risk_marks`，`paper_eligibility=false`、`real_money_list_allowed=false` |
+| Adaptive Exposure V2 日频信号 | 代码契约已实现、外部输入未接入 | 五模块与12阶段编排可生成不可变日报、本地通知outbox、D+1人工复核、人工成交bundle和日频账本；正式PIT、官方registry、冻结模型/阈值与Experiment V3仍缺，Locked Test未运行 |
+| Paper / 真实资金 | 不准入 | V1 append-only账本与V2日频账本均只提供内部对账证据；没有完成外部来源准入、正式Experiment V3与足够前向观察，`paper_eligibility=false`、`trade_eligibility=false`、`real_money_list_allowed=false` |
 | LIVE | `live_not_supported` | 配置、白名单、Token 或枚举均不能解锁 |
 
 真实探针保存在 `data/tmp/strategy-workspace/quality-growth-v1/capability/`，当前受控状态为 `data/tmp/strategy-workspace/quality-growth-v1/current_status.v6.json`。日线返回6条、日历返回8条；Choice终端板块主表的精确记录为 `009006039;中证800成份;...`，按该代码查询2024-06-28返回800只。用户提供的当前成分工作簿也已由 `agent.current_universe_import` 验证为800个唯一代码（沪市469、深市331），原始文件 SHA-256 为 `a1dfd62c437777778e43c3c248282faeed671ee95a43c297c29bf71ee3bd7a8c`。当前集合与2024-06-28集合重合648只、各自独有152只，直接反证了当前成分回填历史。

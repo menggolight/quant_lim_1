@@ -1,0 +1,38 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/exposure_input_snapshot.v1.json",
+  "title": "Exposure input snapshot v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "decision_at", "metrics", "input_snapshot_sha256"],
+  "properties": {
+    "schema_version": {"const": "exposure-input-snapshot.v1"},
+    "decision_at": {"type": "string", "format": "date-time"},
+    "metrics": {
+      "type": "array", "minItems": 6, "maxItems": 6,
+      "items": {"$ref": "#/$defs/metric"}
+    },
+    "input_snapshot_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "metric": {
+      "type": "object", "additionalProperties": false,
+      "required": ["category", "status", "value", "observation_session", "available_at", "source_snapshot_sha256", "failure_codes"],
+      "properties": {
+        "category": {
+          "enum": [
+            "CSI800_TOTAL_RETURN_TREND", "MARKET_BREADTH", "REALIZED_VOLATILITY",
+            "MARKET_DRAWDOWN", "ALPHA_PREDICTION_DISTRIBUTION", "ACCOUNT_DRAWDOWN"
+          ]
+        },
+        "status": {"enum": ["OK", "DATA_FAILED"]},
+        "value": {"type": ["number", "null"]},
+        "observation_session": {"type": ["string", "null"], "format": "date"},
+        "available_at": {"type": ["string", "null"], "format": "date-time"},
+        "source_snapshot_sha256": {"anyOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "failure_codes": {"type": "array", "uniqueItems": true, "items": {"type": "string", "minLength": 1}}
+      }
+    }
+  }
+}

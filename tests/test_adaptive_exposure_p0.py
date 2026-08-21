@@ -13,6 +13,7 @@ from decimal import Decimal
 from pathlib import Path
 
 from research.strategy_workspace.contracts import canonical_sha256
+from research.market_data.validation import SchemaValidationError, validate_json_schema
 from trading.costs import FeeSchedule
 from trading.integrity import (
     account_fingerprint,
@@ -20,6 +21,7 @@ from trading.integrity import (
     adaptive_v2_rebalance_plan_id,
     canonical_controlled_calendar_sha256,
     execution_quote_bundle_sha256,
+    execution_rule_bundle_sha256,
 )
 from trading.models import (
     LIVE_NOT_SUPPORTED_CODE,
@@ -189,6 +191,8 @@ def approve(
     daily_turnover_ratio_before_plan: Decimal = ZERO,
     trusted_quotes: dict[str, MarketQuote] | None = None,
     controlled_calendar_sessions: tuple[date, ...] | None = None,
+    trusted_fee_schedule: FeeSchedule | None = None,
+    trusted_instruments: dict[str, InstrumentRule] | None = None,
 ):
     if trusted_quotes is None:
         order_prices = {
@@ -206,6 +210,17 @@ def approve(
             )
             for instrument_id in required_ids
         }
+    if trusted_instruments is None:
+        required_rule_ids = set(account.positions)
+        required_rule_ids.update(order.instrument_id for order in plan.orders)
+        if plan.bound_portfolio_intent is not None:
+            required_rule_ids.update(plan.bound_portfolio_intent.target_weights)
+        trusted_instruments = {
+            instrument_id: rule(instrument_id)
+            for instrument_id in required_rule_ids
+        }
+    if trusted_fee_schedule is None:
+        trusted_fee_schedule = fees()
     return ExecutionGate(configured_limits).evaluate(
         mode=ExecutionMode.PAPER,
         plan=plan,
@@ -222,10 +237,318 @@ def approve(
             else ""
         ),
         controlled_calendar_sessions=controlled_calendar_sessions,
+        trusted_fee_schedule=trusted_fee_schedule,
+        trusted_instruments=trusted_instruments,
     )
 
 
 class AdaptiveExposureP0Test(unittest.TestCase):
+    def test_data_fail_and_manual_pause_cannot_buy_in_planner_or_gate(self) -> None:
+        configured_limits = limits()
+        account = AccountSnapshot(STRATEGY_ID, D("10000"), {})
+        alpha = intent(
+            PortfolioIntentType.ALPHA_REBALANCE,
+            {"AAA": D("0.21")},
+            D("0.21"),
+            intent_id="pause-no-buy",
+        )
+        alpha_plan = build_rebalance_plan_from_intent(
+            account,
+            alpha,
+            {"AAA": rule("AAA")},
+            {"AAA": quote("AAA")},
+            fees(),
+            configured_limits,
+            NOW,
+            attempt_id="pause-no-buy-attempt",
+        )
+        self.assertEqual([order.side for order in alpha_plan.orders], [Side.BUY])
+
+        for intent_type in (
+            PortfolioIntentType.DATA_FAIL_CLOSED,
+            PortfolioIntentType.MANUAL_PAUSE,
+        ):
+            with self.subTest(intent_type=intent_type):
+                paused = intent(
+                    intent_type,
+                    {"AAA": D("0.21")},
+                    D("0.21"),
+                    intent_id="pause-no-buy",
+                )
+                with self.assertRaisesRegex(ValueError, "cannot add a new position"):
+                    build_rebalance_plan_from_intent(
+                        account,
+                        paused,
+                        {"AAA": rule("AAA")},
+                        {"AAA": quote("AAA")},
+                        fees(),
+                        configured_limits,
+                        NOW,
+                        attempt_id="pause-no-buy-attempt",
+                    )
+
+                forged = replace(
+                    alpha_plan,
+                    intent_sha256=paused.intent_sha256,
+                    portfolio_intent_type=intent_type,
+                    bound_portfolio_intent=paused,
+                )
+                forged = replace(
+                    forged,
+                    plan_id=adaptive_v2_rebalance_plan_id(
+                        forged.strategy_id,
+                        forged.intent_id,
+                        forged.intent_sha256,
+                        forged.attempt_id,
+                        forged.parent_attempt_id,
+                        forged.parent_plan_sha256,
+                        forged.account_fingerprint,
+                        (order.client_order_id for order in forged.orders),
+                        forged.controlled_session_evidence_sha256,
+                        execution_quote_bundle_sha256=(
+                            forged.execution_quote_bundle_sha256
+                        ),
+                        execution_rule_bundle_sha256=(
+                            forged.execution_rule_bundle_sha256
+                        ),
+                    ),
+                )
+                gate = approve(
+                    account,
+                    forged,
+                    configured_limits,
+                    decision_time=NOW,
+                )
+                self.assertFalse(gate.allowed)
+                self.assertIn("no_buy_intent_contains_buy", gate.block_codes)
+
+    def test_gate_independently_rejects_an_exit_plan_omitting_a_position(self) -> None:
+        configured_limits = limits()
+        account = AccountSnapshot(
+            STRATEGY_ID,
+            D("2000"),
+            {
+                "AAA": Position("AAA", 400, 400),
+                "BBB": Position("BBB", 400, 400),
+            },
+        )
+        instruments = {item: rule(item) for item in account.positions}
+        execution_quotes = {item: quote(item) for item in account.positions}
+        zero_fees = FeeSchedule(ZERO, ZERO, ZERO)
+        risk_off = intent(
+            PortfolioIntentType.RISK_OFF,
+            {},
+            ZERO,
+            intent_id="exit-coverage",
+        )
+        full = build_rebalance_plan_from_intent(
+            account,
+            risk_off,
+            instruments,
+            execution_quotes,
+            zero_fees,
+            configured_limits,
+            NOW,
+            attempt_id="exit-coverage-attempt",
+        )
+        kept_orders = tuple(
+            order for order in full.orders if order.instrument_id == "AAA"
+        )
+        omitted = replace(
+            full,
+            orders=kept_orders,
+            projected_cash=D("6000.00"),
+            turnover_ratio=D("0.400000"),
+            feasible_gross_exposure=D("0.400000"),
+        )
+        omitted = replace(
+            omitted,
+            plan_id=adaptive_v2_rebalance_plan_id(
+                omitted.strategy_id,
+                omitted.intent_id,
+                omitted.intent_sha256,
+                omitted.attempt_id,
+                omitted.parent_attempt_id,
+                omitted.parent_plan_sha256,
+                omitted.account_fingerprint,
+                (order.client_order_id for order in omitted.orders),
+                omitted.controlled_session_evidence_sha256,
+                execution_quote_bundle_sha256=(
+                    omitted.execution_quote_bundle_sha256
+                ),
+                execution_rule_bundle_sha256=(
+                    omitted.execution_rule_bundle_sha256
+                ),
+            ),
+        )
+        gate = approve(
+            account,
+            omitted,
+            configured_limits,
+            decision_time=NOW,
+            trusted_quotes=execution_quotes,
+            trusted_fee_schedule=zero_fees,
+            trusted_instruments=instruments,
+        )
+        self.assertFalse(gate.allowed)
+        self.assertIn("exit_plan_coverage_incomplete", gate.block_codes)
+
+    def test_all_reduction_intents_allow_first_d_plus_one_but_later_need_lineage(self) -> None:
+        configured_limits = limits()
+        next_session = NOW + timedelta(days=1)
+        account = AccountSnapshot(
+            STRATEGY_ID,
+            D("6000"),
+            {"AAA": Position("AAA", 400, 400)},
+            snapshot_id="first-d-plus-one",
+            as_of=next_session,
+        )
+        cases = (
+            (PortfolioIntentType.NO_ALPHA_CASH, {}, ZERO),
+            (
+                PortfolioIntentType.DEFENSIVE_REDUCTION,
+                {"AAA": D("0.20")},
+                D("0.20"),
+            ),
+            (PortfolioIntentType.RISK_OFF, {}, ZERO),
+            (PortfolioIntentType.ACCOUNT_DRAWDOWN_EXIT, {}, ZERO),
+        )
+        for intent_type, targets, gross in cases:
+            with self.subTest(intent_type=intent_type):
+                frozen = intent(
+                    intent_type,
+                    targets,
+                    gross,
+                    intent_id=f"first-d1-{intent_type.value.lower()}",
+                )
+                plan = build_rebalance_plan_from_intent(
+                    account,
+                    frozen,
+                    {"AAA": rule("AAA")},
+                    {"AAA": quote("AAA", as_of=next_session)},
+                    fees(),
+                    configured_limits,
+                    next_session,
+                    attempt_id=f"first-d1-attempt-{intent_type.value.lower()}",
+                    previous_controlled_session=NOW.date(),
+                    controlled_calendar_sha256=CALENDAR_SHA256,
+                    controlled_calendar_sessions=CONTROLLED_CALENDAR_SESSIONS,
+                )
+                self.assertIsNone(plan.parent_attempt_id)
+                gate = approve(
+                    account,
+                    plan,
+                    configured_limits,
+                    decision_time=next_session,
+                    controlled_calendar_sessions=CONTROLLED_CALENDAR_SESSIONS,
+                )
+                self.assertTrue(gate.allowed, gate.block_codes)
+
+        third_session = NOW + timedelta(days=2)
+        three_sessions = (
+            NOW.date(),
+            next_session.date(),
+            third_session.date(),
+        )
+        later_account = replace(
+            account,
+            snapshot_id="later-without-lineage",
+            as_of=third_session,
+        )
+        with self.assertRaisesRegex(ValueError, "First cross-session execution"):
+            build_rebalance_plan_from_intent(
+                later_account,
+                intent(
+                    PortfolioIntentType.RISK_OFF,
+                    {},
+                    ZERO,
+                    intent_id="later-needs-lineage",
+                ),
+                {"AAA": rule("AAA")},
+                {"AAA": quote("AAA", as_of=third_session)},
+                fees(),
+                configured_limits,
+                third_session,
+                attempt_id="later-without-lineage-attempt",
+                previous_controlled_session=next_session.date(),
+                controlled_calendar_sha256=(
+                    canonical_controlled_calendar_sha256(three_sessions)
+                ),
+                controlled_calendar_sessions=three_sessions,
+            )
+
+    def test_daily_loss_blocks_risk_increase_but_not_pure_reductions(self) -> None:
+        configured_limits = limits()
+        account = AccountSnapshot(
+            STRATEGY_ID,
+            D("6000"),
+            {"AAA": Position("AAA", 400, 400)},
+        )
+        cases = (
+            (PortfolioIntentType.NO_ALPHA_CASH, {}, ZERO),
+            (
+                PortfolioIntentType.DEFENSIVE_REDUCTION,
+                {"AAA": D("0.20")},
+                D("0.20"),
+            ),
+            (PortfolioIntentType.RISK_OFF, {}, ZERO),
+            (PortfolioIntentType.ACCOUNT_DRAWDOWN_EXIT, {}, ZERO),
+        )
+        for intent_type, targets, gross in cases:
+            with self.subTest(intent_type=intent_type):
+                frozen = intent(
+                    intent_type,
+                    targets,
+                    gross,
+                    intent_id=f"loss-{intent_type.value.lower()}",
+                )
+                plan = build_rebalance_plan_from_intent(
+                    account,
+                    frozen,
+                    {"AAA": rule("AAA")},
+                    {"AAA": quote("AAA")},
+                    fees(),
+                    configured_limits,
+                    NOW,
+                    attempt_id=f"loss-attempt-{intent_type.value.lower()}",
+                )
+                self.assertTrue(all(order.side is Side.SELL for order in plan.orders))
+                gate = approve(
+                    account,
+                    plan,
+                    configured_limits,
+                    decision_time=NOW,
+                    daily_pnl_ratio=D("-0.03"),
+                )
+                self.assertTrue(gate.allowed, gate.block_codes)
+
+        buy_account = AccountSnapshot(STRATEGY_ID, D("10000"), {})
+        buy_intent = intent(
+            PortfolioIntentType.ALPHA_REBALANCE,
+            {"AAA": D("0.21")},
+            D("0.21"),
+            intent_id="loss-risk-increase",
+        )
+        buy_plan = build_rebalance_plan_from_intent(
+            buy_account,
+            buy_intent,
+            {"AAA": rule("AAA")},
+            {"AAA": quote("AAA")},
+            fees(),
+            configured_limits,
+            NOW,
+            attempt_id="loss-risk-increase-attempt",
+        )
+        buy_gate = approve(
+            buy_account,
+            buy_plan,
+            configured_limits,
+            decision_time=NOW,
+            daily_pnl_ratio=D("-0.03"),
+        )
+        self.assertFalse(buy_gate.allowed)
+        self.assertIn("daily_loss_limit_reached", buy_gate.block_codes)
+
     def test_ordinary_empty_targets_fail_closed(self) -> None:
         with self.assertRaises(SignalRejected) as caught:
             targets_from_signal(signal({}), NOW, ExecutionMode.PAPER)
@@ -390,7 +713,7 @@ class AdaptiveExposureP0Test(unittest.TestCase):
         ordinary_plan = build_rebalance_plan_from_intent(
             account,
             ordinary_intent,
-            {key: instruments[key] for key in ("AAA", "BBB", "CCC")},
+            instruments,
             {key: quotes[key] for key in ("AAA", "BBB", "CCC")},
             fee_schedule,
             configured_limits,
@@ -398,7 +721,12 @@ class AdaptiveExposureP0Test(unittest.TestCase):
             attempt_id="ordinary-attempt",
         )
         ordinary_gate = approve(
-            account, ordinary_plan, configured_limits, decision_time=NOW
+            account,
+            ordinary_plan,
+            configured_limits,
+            decision_time=NOW,
+            trusted_fee_schedule=fee_schedule,
+            trusted_instruments=instruments,
         )
         self.assertTrue(ordinary_gate.allowed, ordinary_gate.block_codes)
         self.assertEqual(ordinary_plan.ordinary_turnover_ratio, D("0.100000"))
@@ -420,7 +748,7 @@ class AdaptiveExposureP0Test(unittest.TestCase):
                 exit_plan = build_rebalance_plan_from_intent(
                     first.account,
                     exit_intent,
-                    {key: instruments[key] for key in first.account.positions},
+                    instruments,
                     {
                         key: quote(key, as_of=exit_time)
                         for key in first.account.positions
@@ -446,6 +774,8 @@ class AdaptiveExposureP0Test(unittest.TestCase):
                     decision_time=exit_time,
                     daily_pnl_ratio=D("-0.12"),
                     daily_turnover_ratio_before_plan=ordinary_plan.turnover_ratio,
+                    trusted_fee_schedule=fee_schedule,
+                    trusted_instruments=instruments,
                 )
                 self.assertTrue(exit_gate.allowed, exit_gate.block_codes)
 
@@ -477,7 +807,12 @@ class AdaptiveExposureP0Test(unittest.TestCase):
             "turnover_limit_exceeded", {item.code for item in rotation_plan.rejections}
         )
         rotation_gate = approve(
-            account, rotation_plan, configured_limits, decision_time=NOW
+            account,
+            rotation_plan,
+            configured_limits,
+            decision_time=NOW,
+            trusted_fee_schedule=fee_schedule,
+            trusted_instruments=instruments,
         )
         self.assertFalse(rotation_gate.allowed)
         self.assertIn("turnover_limit_exceeded", rotation_gate.block_codes)
@@ -549,6 +884,55 @@ class AdaptiveExposureP0Test(unittest.TestCase):
         self.assertIn(
             "exit_attempt_has_no_executable_orders", fully_blocked_gate.block_codes
         )
+
+    def test_full_exit_partial_sellability_covers_order_and_residual(self) -> None:
+        account = AccountSnapshot(
+            STRATEGY_ID,
+            D("6000"),
+            {"AAA": Position("AAA", 400, 200)},
+        )
+        configured_limits = limits()
+        execution_quotes = {"AAA": quote("AAA")}
+        plan = build_rebalance_plan_from_intent(
+            account,
+            intent(
+                PortfolioIntentType.RISK_OFF,
+                {},
+                ZERO,
+                intent_id="partial-sellability-risk-off",
+            ),
+            {"AAA": rule("AAA")},
+            execution_quotes,
+            fees(),
+            configured_limits,
+            NOW,
+            attempt_id="partial-sellability-attempt",
+        )
+
+        self.assertEqual([(item.instrument_id, item.quantity) for item in plan.orders], [("AAA", 200)])
+        self.assertEqual(
+            [(item.instrument_id, item.code) for item in plan.blocked_exit_reasons],
+            [("AAA", "sell_blocked_t_plus_one")],
+        )
+        approved = approve(
+            account,
+            plan,
+            configured_limits,
+            decision_time=NOW,
+            trusted_quotes=execution_quotes,
+        )
+        self.assertTrue(approved.allowed, approved.block_codes)
+
+        incomplete = replace(plan, blocked_exit_reasons=())
+        rejected = approve(
+            account,
+            incomplete,
+            configured_limits,
+            decision_time=NOW,
+            trusted_quotes=execution_quotes,
+        )
+        self.assertFalse(rejected.allowed)
+        self.assertIn("exit_plan_coverage_incomplete", rejected.block_codes)
 
     def test_risk_reduction_allows_residual_overweight_and_position_count(self) -> None:
         positions = {
@@ -651,7 +1035,7 @@ class AdaptiveExposureP0Test(unittest.TestCase):
                 retry_plan = build_rebalance_plan_from_intent(
                     reconciled,
                     cash_intent,
-                    {"BBB": instruments["BBB"]},
+                    instruments,
                     {"BBB": quote("BBB", as_of=next_day)},
                     fees(),
                     configured_limits,
@@ -674,6 +1058,7 @@ class AdaptiveExposureP0Test(unittest.TestCase):
                     configured_limits,
                     decision_time=next_day,
                     controlled_calendar_sessions=CONTROLLED_CALENDAR_SESSIONS,
+                    trusted_instruments=instruments,
                 )
                 self.assertTrue(retry_gate.allowed, retry_gate.block_codes)
                 restarted_store.reconcile_paper_account(
@@ -740,20 +1125,31 @@ class AdaptiveExposureP0Test(unittest.TestCase):
             snapshot_id="reconciled-exit-account",
             as_of=next_day,
         )
-        with self.assertRaisesRegex(ValueError, "parent attempt"):
-            build_rebalance_plan_from_intent(
-                reconciled,
-                risk_off,
-                {"AAA": rule("AAA")},
-                {"AAA": quote("AAA", as_of=next_day)},
-                fees(),
-                configured_limits,
-                next_day,
-                attempt_id="risk-off-day-2-no-parent",
-                previous_controlled_session=NOW.date(),
-                controlled_calendar_sha256=CALENDAR_SHA256,
-                controlled_calendar_sessions=CONTROLLED_CALENDAR_SESSIONS,
-            )
+        first_d_plus_one = build_rebalance_plan_from_intent(
+            reconciled,
+            risk_off,
+            {"AAA": rule("AAA")},
+            {"AAA": quote("AAA", as_of=next_day)},
+            fees(),
+            configured_limits,
+            next_day,
+            attempt_id="risk-off-day-2-no-parent",
+            previous_controlled_session=NOW.date(),
+            controlled_calendar_sha256=CALENDAR_SHA256,
+            controlled_calendar_sessions=CONTROLLED_CALENDAR_SESSIONS,
+        )
+        self.assertIsNone(first_d_plus_one.parent_attempt_id)
+        first_d_plus_one_gate = approve(
+            reconciled,
+            first_d_plus_one,
+            configured_limits,
+            decision_time=next_day,
+            controlled_calendar_sessions=CONTROLLED_CALENDAR_SESSIONS,
+        )
+        self.assertTrue(
+            first_d_plus_one_gate.allowed,
+            first_d_plus_one_gate.block_codes,
+        )
         with self.assertRaisesRegex(ValueError, "reconciled account snapshot"):
             build_rebalance_plan_from_intent(
                 exit_account,
@@ -1184,6 +1580,264 @@ class AdaptiveExposureP0Test(unittest.TestCase):
                         filled.account,
                     )
 
+    def test_paper_fill_account_update_uses_atomic_fingerprint_cas(self) -> None:
+        initial = AccountSnapshot(
+            STRATEGY_ID,
+            D("6000"),
+            {"AAA": Position("AAA", 400, 400)},
+            snapshot_id="fill-cas-initial",
+            as_of=NOW,
+        )
+        frozen = intent(
+            PortfolioIntentType.RISK_OFF,
+            {},
+            ZERO,
+            intent_id="fill-cas-intent",
+        )
+        plan = build_rebalance_plan_from_intent(
+            initial,
+            frozen,
+            {"AAA": rule("AAA")},
+            {"AAA": quote("AAA")},
+            fees(),
+            limits(),
+            NOW,
+            attempt_id="fill-cas-attempt",
+        )
+        order = plan.orders[0]
+        original_fingerprint = account_fingerprint(initial)
+        next_day = NOW + timedelta(days=1)
+        refreshed = replace(
+            initial,
+            snapshot_id="fill-cas-concurrent-refresh",
+            as_of=next_day,
+        )
+        stale_fill_account = AccountSnapshot(
+            STRATEGY_ID,
+            D("9995.00"),
+            {},
+            snapshot_id="fill-cas-stale-fill",
+            as_of=next_day,
+        )
+
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "fill-cas.sqlite"
+            with OrderStore(path) as first:
+                first.ensure_paper_account(initial, NOW)
+                first.register_plan(plan, NOW)
+                first.transition(
+                    order.client_order_id,
+                    OrderStatus.RISK_APPROVED,
+                    NOW,
+                )
+                with OrderStore(path) as second:
+                    second.reconcile_paper_account(
+                        refreshed,
+                        next_day,
+                        expected_fingerprint=original_fingerprint,
+                    )
+                    with self.assertRaises(ConcurrentPaperAccountUpdate):
+                        first.commit_paper_fill(
+                            order.client_order_id,
+                            next_day,
+                            {"probe": "stale"},
+                            stale_fill_account,
+                            False,
+                            expected_fingerprint=original_fingerprint,
+                        )
+                    self.assertEqual(
+                        second.load_paper_account(STRATEGY_ID),
+                        refreshed,
+                    )
+                    self.assertIs(
+                        second.status(order.client_order_id),
+                        OrderStatus.RISK_APPROVED,
+                    )
+                    self.assertNotIn(
+                        OrderStatus.SUBMITTING,
+                        {event.status for event in second.events(order.client_order_id)},
+                    )
+
+    def test_rule_bundle_binds_fees_all_instruments_and_whole_lot_policy(self) -> None:
+        instrument_rules = {"BBB": rule("BBB"), "AAA": rule("AAA")}
+        canonical = execution_rule_bundle_sha256(fees(), instrument_rules)
+        self.assertEqual(
+            canonical,
+            execution_rule_bundle_sha256(
+                fees(),
+                {"AAA": rule("AAA"), "BBB": rule("BBB")},
+            ),
+        )
+        self.assertNotEqual(
+            canonical,
+            execution_rule_bundle_sha256(
+                FeeSchedule(D("0.0003"), D("6"), ZERO),
+                instrument_rules,
+            ),
+        )
+        changed_rules = dict(instrument_rules)
+        changed_rules["AAA"] = replace(rule("AAA"), lot_size=300)
+        self.assertNotEqual(
+            canonical,
+            execution_rule_bundle_sha256(fees(), changed_rules),
+        )
+
+        account = AccountSnapshot(STRATEGY_ID, D("10000"), {})
+        frozen = intent(
+            PortfolioIntentType.ALPHA_REBALANCE,
+            {"AAA": D("0.21")},
+            D("0.21"),
+            intent_id="rule-bundle-intent",
+        )
+        one_rule = {"AAA": rule("AAA")}
+        plan = build_rebalance_plan_from_intent(
+            account,
+            frozen,
+            one_rule,
+            {"AAA": quote("AAA")},
+            fees(),
+            limits(),
+            NOW,
+            attempt_id="rule-bundle-attempt",
+        )
+        self.assertEqual(
+            plan.execution_rule_bundle_sha256,
+            execution_rule_bundle_sha256(fees(), one_rule),
+        )
+        record = execution_plan_record(plan)
+        self.assertEqual(record["schema_version"], "portfolio-execution-plan.v2")
+        self.assertEqual(
+            record["execution_rule_bundle_sha256"],
+            plan.execution_rule_bundle_sha256,
+        )
+        schema_root = Path(__file__).resolve().parents[1] / "schemas"
+        schema_v1 = json.loads(
+            (schema_root / "portfolio_execution_plan.v1.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        schema_v2 = json.loads(
+            (schema_root / "portfolio_execution_plan.v2.json").read_text(
+                encoding="utf-8"
+            )
+        )
+        self.assertEqual(
+            schema_v1["properties"]["schema_version"]["const"],
+            "portfolio-execution-plan.v1",
+        )
+        self.assertNotIn(
+            "execution_rule_bundle_sha256",
+            schema_v1["properties"],
+        )
+        self.assertEqual(
+            schema_v2["properties"]["schema_version"]["const"],
+            "portfolio-execution-plan.v2",
+        )
+        self.assertIn(
+            "execution_rule_bundle_sha256",
+            schema_v2["required"],
+        )
+        validate_json_schema(
+            record,
+            schema_root / "portfolio_execution_plan.v2.json",
+        )
+        for no_buy_intent in (
+            "DEFENSIVE_REDUCTION",
+            "DATA_FAIL_CLOSED",
+            "MANUAL_PAUSE",
+        ):
+            attacked_record = dict(record)
+            attacked_record["intent_type"] = no_buy_intent
+            with self.assertRaises(SchemaValidationError):
+                validate_json_schema(
+                    attacked_record,
+                    schema_root / "portfolio_execution_plan.v2.json",
+                )
+        gate = approve(
+            account,
+            plan,
+            limits(),
+            decision_time=NOW,
+            trusted_instruments={"AAA": changed_rules["AAA"]},
+        )
+        self.assertFalse(gate.allowed)
+        self.assertIn("execution_rule_bundle_sha256_mismatch", gate.block_codes)
+        self.assertIn("order_quantity_not_whole_lot", gate.block_codes)
+
+        with OrderStore(":memory:") as store:
+            broker = PaperBroker(
+                account,
+                {"AAA": changed_rules["AAA"]},
+                fees(),
+                store,
+            )
+            valid_gate = approve(
+                account,
+                plan,
+                limits(),
+                decision_time=NOW,
+            )
+            with self.assertRaisesRegex(ValueError, "rule bundle"):
+                broker.execute(plan, valid_gate.approval, NOW)
+            with self.assertRaises(KeyError):
+                store.status(plan.orders[0].client_order_id)
+
+    def test_full_batch_preflight_finishes_before_any_submitting_event(self) -> None:
+        configured_limits = limits(max_daily_turnover_ratio=D("0.90"))
+        account = AccountSnapshot(STRATEGY_ID, D("10000"), {})
+        instrument_rules = {item: rule(item) for item in ("AAA", "BBB")}
+        execution_quotes = {item: quote(item) for item in instrument_rules}
+        frozen = intent(
+            PortfolioIntentType.ALPHA_REBALANCE,
+            {"AAA": D("0.21"), "BBB": D("0.21")},
+            D("0.42"),
+            intent_id="batch-preflight-intent",
+        )
+        plan = build_rebalance_plan_from_intent(
+            account,
+            frozen,
+            instrument_rules,
+            execution_quotes,
+            fees(),
+            configured_limits,
+            NOW,
+            attempt_id="batch-preflight-attempt",
+        )
+        gate = approve(
+            account,
+            plan,
+            configured_limits,
+            decision_time=NOW,
+            trusted_quotes=execution_quotes,
+            trusted_instruments=instrument_rules,
+        )
+        self.assertTrue(gate.allowed, gate.block_codes)
+        first_order, second_order = plan.orders
+
+        with OrderStore(":memory:") as store:
+            broker = PaperBroker(
+                account,
+                instrument_rules,
+                fees(),
+                store,
+            )
+            store.register_plan(plan, NOW)
+            store.transition(
+                second_order.client_order_id,
+                OrderStatus.BLOCKED,
+                NOW,
+            )
+            with self.assertRaisesRegex(ValueError, "terminal but not filled"):
+                broker.execute(plan, gate.approval, NOW)
+            self.assertIs(
+                store.status(first_order.client_order_id),
+                OrderStatus.PLANNED,
+            )
+            self.assertNotIn(
+                OrderStatus.SUBMITTING,
+                {event.status for event in store.events(first_order.client_order_id)},
+            )
+
     def test_legacy_orders_table_migration_is_idempotent(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             path = Path(directory) / "legacy-orders.sqlite"
@@ -1444,6 +2098,9 @@ class AdaptiveExposureP0Test(unittest.TestCase):
                 execution_quote_bundle_sha256=(
                     rehashed_blocked_plan.execution_quote_bundle_sha256
                 ),
+                execution_rule_bundle_sha256=(
+                    rehashed_blocked_plan.execution_rule_bundle_sha256
+                ),
             ),
         )
         rehashed_blocked_gate = approve(
@@ -1521,6 +2178,9 @@ class AdaptiveExposureP0Test(unittest.TestCase):
                 (order.client_order_id for order in rehashed_plan.orders),
                 execution_quote_bundle_sha256=(
                     rehashed_plan.execution_quote_bundle_sha256
+                ),
+                execution_rule_bundle_sha256=(
+                    rehashed_plan.execution_rule_bundle_sha256
                 ),
             ),
         )

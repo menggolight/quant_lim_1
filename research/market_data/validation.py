@@ -3,12 +3,14 @@
 from __future__ import annotations
 
 import json
+import math
 import re
-from datetime import date
+from datetime import date, datetime
 from decimal import Decimal
 from functools import lru_cache
 from pathlib import Path
 from typing import Any, Iterable, Mapping
+from urllib.parse import unquote, urldefrag, urlsplit
 
 from .contracts import (
     MarketDataContractError,
@@ -93,6 +95,18 @@ def _load_schema(path: Path) -> dict[str, Any]:
     return payload
 
 
+def _is_json_number(value: Any) -> bool:
+    if isinstance(value, bool):
+        return False
+    if isinstance(value, int):
+        return True
+    if isinstance(value, float):
+        return math.isfinite(value)
+    if isinstance(value, Decimal):
+        return value.is_finite()
+    return False
+
+
 def _schema_type_matches(value: Any, expected: str) -> bool:
     if expected == "object":
         return isinstance(value, Mapping)
@@ -101,124 +115,428 @@ def _schema_type_matches(value: Any, expected: str) -> bool:
     if expected == "string":
         return isinstance(value, str)
     if expected == "integer":
-        return isinstance(value, int) and not isinstance(value, bool)
+        if not _is_json_number(value):
+            return False
+        if isinstance(value, int):
+            return True
+        if isinstance(value, float):
+            return value.is_integer()
+        return value == value.to_integral_value()
     if expected == "boolean":
         return isinstance(value, bool)
     if expected == "null":
         return value is None
     if expected == "number":
-        return isinstance(value, (int, float, Decimal)) and not isinstance(value, bool)
+        return _is_json_number(value)
     raise SchemaValidationError(f"unsupported JSON Schema type: {expected}")
 
 
-def _resolve_schema_ref(root: Mapping[str, Any], reference: str) -> Mapping[str, Any]:
-    if not reference.startswith("#/"):
+def _json_equal(left: Any, right: Any) -> bool:
+    """JSON equality without Python's surprising ``False == 0`` behavior."""
+
+    if isinstance(left, bool) or isinstance(right, bool):
+        return isinstance(left, bool) and isinstance(right, bool) and left == right
+    if _is_json_number(left) and _is_json_number(right):
+        return Decimal(str(left)) == Decimal(str(right))
+    if left is None or right is None:
+        return left is None and right is None
+    if isinstance(left, str) or isinstance(right, str):
+        return isinstance(left, str) and isinstance(right, str) and left == right
+    if isinstance(left, Mapping) or isinstance(right, Mapping):
+        if not isinstance(left, Mapping) or not isinstance(right, Mapping):
+            return False
+        if set(left) != set(right):
+            return False
+        return all(_json_equal(left[key], right[key]) for key in left)
+    if isinstance(left, (list, tuple)) or isinstance(right, (list, tuple)):
+        if not isinstance(left, (list, tuple)) or not isinstance(right, (list, tuple)):
+            return False
+        return len(left) == len(right) and all(
+            _json_equal(left_item, right_item)
+            for left_item, right_item in zip(left, right)
+        )
+    return type(left) is type(right) and left == right
+
+
+def _resolve_json_pointer(root: Any, fragment: str, reference: str) -> Any:
+    if not fragment:
+        return root
+    if not fragment.startswith("/"):
         raise SchemaValidationError(
-            f"external JSON Schema references are unsupported: {reference}"
+            f"unsupported JSON Schema fragment in reference: {reference}"
         )
     current: Any = root
-    for raw_part in reference[2:].split("/"):
+    for raw_part in fragment[1:].split("/"):
         part = raw_part.replace("~1", "/").replace("~0", "~")
         if not isinstance(current, Mapping) or part not in current:
             raise SchemaValidationError(f"unresolvable JSON Schema reference: {reference}")
         current = current[part]
-    if not isinstance(current, Mapping):
-        raise SchemaValidationError(f"JSON Schema reference is not an object: {reference}")
     return current
+
+
+def _resolve_schema_ref(
+    root: Mapping[str, Any],
+    reference: str,
+    document_path: Path,
+) -> tuple[Any, Mapping[str, Any], Path]:
+    resource, fragment = urldefrag(reference)
+    target_root = root
+    target_path = document_path
+    if resource:
+        parsed = urlsplit(resource)
+        if parsed.scheme or parsed.netloc or parsed.query:
+            raise SchemaValidationError(
+                f"remote JSON Schema references are unsupported: {reference}"
+            )
+        target_path = (document_path.parent / unquote(parsed.path)).resolve()
+        try:
+            target_path.relative_to(document_path.parent.resolve())
+        except ValueError as exc:
+            raise SchemaValidationError(
+                f"JSON Schema reference leaves its schema directory: {reference}"
+            ) from exc
+        target_root = _load_schema(target_path)
+    target = _resolve_json_pointer(target_root, fragment, reference)
+    if not isinstance(target, (Mapping, bool)):
+        raise SchemaValidationError(
+            f"JSON Schema reference is not a schema: {reference}"
+        )
+    return target, target_root, target_path
+
+
+def _schema_matches(
+    value: Any,
+    schema: Any,
+    root: Mapping[str, Any],
+    path: str,
+    document_path: Path,
+) -> tuple[bool, set[str]]:
+    try:
+        evaluated = _validate_schema_node(value, schema, root, path, document_path)
+    except SchemaValidationError:
+        return False, set()
+    return True, evaluated
+
+
+def _validate_format(value: str, format_name: str, path: str) -> None:
+    if format_name == "date":
+        if re.fullmatch(r"[0-9]{4}-[0-9]{2}-[0-9]{2}", value) is None:
+            raise SchemaValidationError(f"{path}: string is not an RFC 3339 date")
+        try:
+            date.fromisoformat(value)
+        except ValueError as exc:
+            raise SchemaValidationError(
+                f"{path}: string is not an RFC 3339 date"
+            ) from exc
+        return
+    if format_name == "date-time":
+        if re.fullmatch(
+            r"[0-9]{4}-[0-9]{2}-[0-9]{2}[Tt][0-9]{2}:[0-9]{2}:[0-9]{2}"
+            r"(?:\.[0-9]+)?(?:[Zz]|[+-][0-9]{2}:[0-9]{2})",
+            value,
+        ) is None:
+            raise SchemaValidationError(f"{path}: string is not an RFC 3339 date-time")
+        try:
+            parsed = datetime.fromisoformat(value.replace("z", "+00:00").replace("Z", "+00:00"))
+        except ValueError as exc:
+            raise SchemaValidationError(
+                f"{path}: string is not an RFC 3339 date-time"
+            ) from exc
+        if parsed.utcoffset() is None:
+            raise SchemaValidationError(f"{path}: date-time must include a UTC offset")
+
+
+def _numeric(value: Any) -> Decimal:
+    return Decimal(str(value))
 
 
 def _validate_schema_node(
     value: Any,
-    schema: Mapping[str, Any],
+    schema: Any,
     root: Mapping[str, Any],
     path: str,
-) -> None:
+    document_path: Path,
+) -> set[str]:
+    if schema is True:
+        return set()
+    if schema is False:
+        raise SchemaValidationError(f"{path}: value is rejected by false schema")
+    if not isinstance(schema, Mapping):
+        raise SchemaValidationError(f"{path}: JSON Schema node must be an object or boolean")
+
+    evaluated_properties: set[str] = set()
     reference = schema.get("$ref")
     if reference is not None:
         if not isinstance(reference, str):
             raise SchemaValidationError(f"{path}: $ref must be a string")
-        _validate_schema_node(value, _resolve_schema_ref(root, reference), root, path)
-        return
-    if "const" in schema and value != schema["const"]:
+        target, target_root, target_path = _resolve_schema_ref(
+            root, reference, document_path
+        )
+        evaluated_properties.update(
+            _validate_schema_node(value, target, target_root, path, target_path)
+        )
+
+    if "const" in schema and not _json_equal(value, schema["const"]):
         raise SchemaValidationError(f"{path}: value differs from const")
-    if "enum" in schema and value not in schema["enum"]:
-        raise SchemaValidationError(f"{path}: value is outside enum")
+    if "enum" in schema:
+        choices = schema["enum"]
+        if not isinstance(choices, list):
+            raise SchemaValidationError(f"{path}: enum must be an array")
+        if not any(_json_equal(value, choice) for choice in choices):
+            raise SchemaValidationError(f"{path}: value is outside enum")
 
     expected = schema.get("type")
     if expected is not None:
         choices = expected if isinstance(expected, list) else [expected]
+        if not choices or not all(isinstance(choice, str) for choice in choices):
+            raise SchemaValidationError(f"{path}: type must be a string or string array")
         if not any(
-            isinstance(choice, str) and _schema_type_matches(value, choice)
-            for choice in choices
+            _schema_type_matches(value, choice) for choice in choices
         ):
             raise SchemaValidationError(f"{path}: value has the wrong JSON type")
 
+    any_of = schema.get("anyOf")
+    if any_of is not None:
+        if not isinstance(any_of, list) or not any_of:
+            raise SchemaValidationError(f"{path}: anyOf must be a non-empty array")
+        matches = [
+            annotations
+            for candidate in any_of
+            for matched, annotations in [
+                _schema_matches(value, candidate, root, path, document_path)
+            ]
+            if matched
+        ]
+        if not matches:
+            raise SchemaValidationError(f"{path}: anyOf matched 0 branches")
+        for annotations in matches:
+            evaluated_properties.update(annotations)
+
     one_of = schema.get("oneOf")
-    if isinstance(one_of, list):
-        matches = 0
-        for candidate in one_of:
-            if not isinstance(candidate, Mapping):
-                continue
-            try:
-                _validate_schema_node(value, candidate, root, path)
-            except SchemaValidationError:
-                continue
-            matches += 1
-        if matches != 1:
-            raise SchemaValidationError(f"{path}: oneOf matched {matches} branches")
+    if one_of is not None:
+        if not isinstance(one_of, list) or not one_of:
+            raise SchemaValidationError(f"{path}: oneOf must be a non-empty array")
+        matches = [
+            annotations
+            for candidate in one_of
+            for matched, annotations in [
+                _schema_matches(value, candidate, root, path, document_path)
+            ]
+            if matched
+        ]
+        if len(matches) != 1:
+            raise SchemaValidationError(f"{path}: oneOf matched {len(matches)} branches")
+        evaluated_properties.update(matches[0])
+
+    all_of = schema.get("allOf")
+    if all_of is not None:
+        if not isinstance(all_of, list) or not all_of:
+            raise SchemaValidationError(f"{path}: allOf must be a non-empty array")
+        for candidate in all_of:
+            evaluated_properties.update(
+                _validate_schema_node(value, candidate, root, path, document_path)
+            )
+
+    condition = schema.get("if")
+    if condition is not None:
+        applies, _ = _schema_matches(value, condition, root, path, document_path)
+        selected = schema.get("then") if applies else schema.get("else")
+        if selected is not None:
+            evaluated_properties.update(
+                _validate_schema_node(value, selected, root, path, document_path)
+            )
+
+    if "not" in schema:
+        matched, _ = _schema_matches(
+            value, schema["not"], root, path, document_path
+        )
+        if matched:
+            raise SchemaValidationError(f"{path}: value matches forbidden not schema")
 
     if isinstance(value, Mapping):
         required = schema.get("required", [])
-        if isinstance(required, list):
-            missing = [field for field in required if field not in value]
-            if missing:
-                raise SchemaValidationError(f"{path}: missing required fields {missing}")
+        if not isinstance(required, list) or not all(
+            isinstance(field, str) for field in required
+        ):
+            raise SchemaValidationError(f"{path}: required must be a string array")
+        missing = [field for field in required if field not in value]
+        if missing:
+            raise SchemaValidationError(f"{path}: missing required fields {missing}")
+
+        if "minProperties" in schema and len(value) < int(schema["minProperties"]):
+            raise SchemaValidationError(f"{path}: object has fewer than minProperties")
+        if "maxProperties" in schema and len(value) > int(schema["maxProperties"]):
+            raise SchemaValidationError(f"{path}: object exceeds maxProperties")
+
+        property_names = schema.get("propertyNames")
+        if property_names is not None:
+            for field in value:
+                if not isinstance(field, str):
+                    raise SchemaValidationError(f"{path}: JSON object keys must be strings")
+                _validate_schema_node(
+                    field,
+                    property_names,
+                    root,
+                    f"{path}.<property:{field}>",
+                    document_path,
+                )
+
         properties = schema.get("properties", {})
-        if isinstance(properties, Mapping):
-            if schema.get("additionalProperties") is False:
-                unknown = sorted(str(field) for field in set(value) - set(properties))
-                if unknown:
-                    raise SchemaValidationError(f"{path}: unknown fields {unknown}")
-            for field, child in properties.items():
-                if field in value and isinstance(child, Mapping):
-                    _validate_schema_node(value[field], child, root, f"{path}.{field}")
+        if not isinstance(properties, Mapping):
+            raise SchemaValidationError(f"{path}: properties must be an object")
+        locally_evaluated: set[str] = set()
+        for field, child in properties.items():
+            if field in value:
+                _validate_schema_node(
+                    value[field], child, root, f"{path}.{field}", document_path
+                )
+                locally_evaluated.add(field)
+
+        pattern_properties = schema.get("patternProperties", {})
+        if not isinstance(pattern_properties, Mapping):
+            raise SchemaValidationError(f"{path}: patternProperties must be an object")
+        for pattern, child in pattern_properties.items():
+            if not isinstance(pattern, str):
+                raise SchemaValidationError(
+                    f"{path}: patternProperties keys must be strings"
+                )
+            try:
+                matching_fields = [field for field in value if re.search(pattern, field)]
+            except re.error as exc:
+                raise SchemaValidationError(
+                    f"{path}: invalid patternProperties expression"
+                ) from exc
+            for field in matching_fields:
+                _validate_schema_node(
+                    value[field], child, root, f"{path}.{field}", document_path
+                )
+                locally_evaluated.add(field)
+
+        unmatched = set(value) - locally_evaluated
+        if "additionalProperties" in schema:
+            additional = schema["additionalProperties"]
+            if additional is False and unmatched:
+                unknown = sorted(str(field) for field in unmatched)
+                raise SchemaValidationError(f"{path}: unknown fields {unknown}")
+            if additional is not False:
+                for field in unmatched:
+                    _validate_schema_node(
+                        value[field],
+                        additional,
+                        root,
+                        f"{path}.{field}",
+                        document_path,
+                    )
+                locally_evaluated.update(unmatched)
+        evaluated_properties.update(locally_evaluated)
+
+        dependent_required = schema.get("dependentRequired", {})
+        if not isinstance(dependent_required, Mapping):
+            raise SchemaValidationError(f"{path}: dependentRequired must be an object")
+        for trigger, dependencies in dependent_required.items():
+            if trigger not in value:
+                continue
+            if not isinstance(dependencies, list) or not all(
+                isinstance(field, str) for field in dependencies
+            ):
+                raise SchemaValidationError(
+                    f"{path}: dependentRequired values must be string arrays"
+                )
+            missing_dependencies = [
+                field for field in dependencies if field not in value
+            ]
+            if missing_dependencies:
+                raise SchemaValidationError(
+                    f"{path}: missing dependent fields {missing_dependencies}"
+                )
+
+        if "unevaluatedProperties" in schema:
+            unevaluated = set(value) - evaluated_properties
+            unevaluated_schema = schema["unevaluatedProperties"]
+            if unevaluated_schema is False and unevaluated:
+                unknown = sorted(str(field) for field in unevaluated)
+                raise SchemaValidationError(
+                    f"{path}: unevaluated fields {unknown}"
+                )
+            if unevaluated_schema is not False:
+                for field in unevaluated:
+                    _validate_schema_node(
+                        value[field],
+                        unevaluated_schema,
+                        root,
+                        f"{path}.{field}",
+                        document_path,
+                    )
+                evaluated_properties.update(unevaluated)
     elif isinstance(value, (list, tuple)):
-        items = schema.get("items")
-        if isinstance(items, Mapping):
+        if "minItems" in schema and len(value) < int(schema["minItems"]):
+            raise SchemaValidationError(f"{path}: array has fewer than minItems")
+        if "maxItems" in schema and len(value) > int(schema["maxItems"]):
+            raise SchemaValidationError(f"{path}: array exceeds maxItems")
+        if schema.get("uniqueItems") is True:
             for index, item in enumerate(value):
-                _validate_schema_node(item, items, root, f"{path}[{index}]")
+                if any(_json_equal(item, prior) for prior in value[:index]):
+                    raise SchemaValidationError(
+                        f"{path}: array items are not unique"
+                    )
+        items = schema.get("items")
+        if items is not None:
+            for index, item in enumerate(value):
+                _validate_schema_node(
+                    item, items, root, f"{path}[{index}]", document_path
+                )
     elif isinstance(value, str):
         if int(schema.get("minLength", 0)) > len(value):
             raise SchemaValidationError(f"{path}: string is shorter than minLength")
         if "maxLength" in schema and len(value) > int(schema["maxLength"]):
             raise SchemaValidationError(f"{path}: string exceeds maxLength")
         pattern = schema.get("pattern")
-        if isinstance(pattern, str) and re.search(pattern, value) is None:
-            raise SchemaValidationError(f"{path}: string does not match pattern")
-    elif isinstance(value, (int, float, Decimal)) and not isinstance(value, bool):
-        if "minimum" in schema and value < schema["minimum"]:
+        if pattern is not None:
+            if not isinstance(pattern, str):
+                raise SchemaValidationError(f"{path}: pattern must be a string")
+            try:
+                matches = re.search(pattern, value)
+            except re.error as exc:
+                raise SchemaValidationError(f"{path}: invalid regex pattern") from exc
+            if matches is None:
+                raise SchemaValidationError(f"{path}: string does not match pattern")
+        format_name = schema.get("format")
+        if format_name is not None:
+            if not isinstance(format_name, str):
+                raise SchemaValidationError(f"{path}: format must be a string")
+            _validate_format(value, format_name, path)
+    elif _is_json_number(value):
+        number = _numeric(value)
+        if "minimum" in schema and number < _numeric(schema["minimum"]):
             raise SchemaValidationError(f"{path}: number is below minimum")
+        if "maximum" in schema and number > _numeric(schema["maximum"]):
+            raise SchemaValidationError(f"{path}: number exceeds maximum")
+        if "exclusiveMinimum" in schema and number <= _numeric(
+            schema["exclusiveMinimum"]
+        ):
+            raise SchemaValidationError(
+                f"{path}: number is not above exclusiveMinimum"
+            )
+        if "exclusiveMaximum" in schema and number >= _numeric(
+            schema["exclusiveMaximum"]
+        ):
+            raise SchemaValidationError(
+                f"{path}: number is not below exclusiveMaximum"
+            )
+        if "multipleOf" in schema:
+            divisor = _numeric(schema["multipleOf"])
+            if divisor <= 0:
+                raise SchemaValidationError(f"{path}: multipleOf must be positive")
+            if number % divisor != 0:
+                raise SchemaValidationError(f"{path}: number is not a multipleOf")
 
-    all_of = schema.get("allOf")
-    if isinstance(all_of, list):
-        for candidate in all_of:
-            if not isinstance(candidate, Mapping):
-                continue
-            condition = candidate.get("if")
-            applies = True
-            if isinstance(condition, Mapping):
-                try:
-                    _validate_schema_node(value, condition, root, path)
-                except SchemaValidationError:
-                    applies = False
-            then = candidate.get("then")
-            if applies and isinstance(then, Mapping):
-                _validate_schema_node(value, then, root, path)
+    return evaluated_properties
 
 
 def validate_json_schema(value: Any, schema_path: Path) -> None:
-    schema = _load_schema(schema_path.resolve())
-    _validate_schema_node(value, schema, schema, "$")
+    resolved_path = schema_path.resolve()
+    schema = _load_schema(resolved_path)
+    _validate_schema_node(value, schema, schema, "$", resolved_path)
 
 
 def validate_normalized_record_schemas(

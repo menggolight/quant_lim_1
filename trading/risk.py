@@ -4,10 +4,10 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from datetime import date, datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, ROUND_FLOOR
 from typing import Mapping
 
-from trading.costs import money
+from trading.costs import FeeSchedule, money
 from trading.integrity import (
     account_fingerprint,
     adaptive_v2_client_order_id,
@@ -16,6 +16,7 @@ from trading.integrity import (
     controlled_session_evidence_sha256,
     controlled_sessions_are_adjacent,
     execution_quote_bundle_sha256,
+    execution_rule_bundle_sha256,
     is_lower_sha256,
     legacy_client_order_id,
     legacy_rebalance_plan_id,
@@ -25,9 +26,13 @@ from trading.models import (
     ADAPTIVE_EXPOSURE_V2_MAX_POSITIONS,
     ADAPTIVE_EXPOSURE_V2_MAX_POSITION_WEIGHT,
     ADAPTIVE_EXPOSURE_V2_STRATEGY_ID,
+    FULL_EXIT_INTENT_TYPES,
     LIVE_NOT_SUPPORTED_CODE,
+    NO_BUY_INTENT_TYPES,
+    RISK_REDUCTION_INTENT_TYPES,
     AccountSnapshot,
     ExecutionMode,
+    InstrumentRule,
     LiveNotSupportedError,
     MarketQuote,
     OrderRiskDirection,
@@ -126,6 +131,7 @@ class ExecutionApproval:
     turnover_limit: Decimal
     max_orders_per_day: int
     _issuer: object = field(repr=False, compare=False)
+    execution_rule_bundle_sha256: str = ""
 
     def __post_init__(self) -> None:
         if is_live_execution_mode(self.mode):
@@ -156,6 +162,8 @@ class ExecutionGate:
         trusted_quotes: Mapping[str, MarketQuote] | None = None,
         trusted_market_data_sha256: str = "",
         controlled_calendar_sessions: tuple[date, ...] | None = None,
+        trusted_fee_schedule: FeeSchedule | None = None,
+        trusted_instruments: Mapping[str, InstrumentRule] | None = None,
     ) -> GateResult:
         blocks: list[str] = []
         if is_live_execution_mode(mode):
@@ -189,6 +197,7 @@ class ExecutionGate:
         )
         intent = plan.bound_portfolio_intent if is_v2 else None
         trusted_quote_map: dict[str, MarketQuote] = {}
+        trusted_instrument_map: dict[str, InstrumentRule] = {}
         if is_v2:
             if intent is None:
                 blocks.append("bound_portfolio_intent_missing")
@@ -202,6 +211,8 @@ class ExecutionGate:
                 blocks.append("invalid_intent_sha256")
             if not is_lower_sha256(plan.execution_quote_bundle_sha256):
                 blocks.append("execution_quote_bundle_sha256_missing")
+            if not is_lower_sha256(plan.execution_rule_bundle_sha256):
+                blocks.append("execution_rule_bundle_sha256_missing")
             if intent is not None:
                 recomputed_intent_sha256 = intent.intent_sha256
                 if plan.intent_sha256 != recomputed_intent_sha256:
@@ -249,12 +260,7 @@ class ExecutionGate:
                 if plan.decision_time < intent.decision_at:
                     blocks.append("plan_precedes_intent")
                 if plan_session != intent_session:
-                    if intent.intent_type not in {
-                        PortfolioIntentType.NO_ALPHA_CASH,
-                        PortfolioIntentType.DEFENSIVE_REDUCTION,
-                        PortfolioIntentType.RISK_OFF,
-                        PortfolioIntentType.ACCOUNT_DRAWDOWN_EXIT,
-                    }:
+                    if intent.intent_type not in RISK_REDUCTION_INTENT_TYPES:
                         blocks.append("alpha_intent_cross_session")
                     if (
                         plan.previous_controlled_session is None
@@ -318,16 +324,17 @@ class ExecutionGate:
                     if plan.parent_attempt_id:
                         if not is_lower_sha256(plan.parent_plan_sha256):
                             blocks.append("cross_session_lineage_missing")
-                    elif (
-                        intent.intent_type
-                        is PortfolioIntentType.ACCOUNT_DRAWDOWN_EXIT
-                    ):
-                        if plan.previous_controlled_session != intent_session:
-                            blocks.append(
-                                "first_drawdown_previous_session_mismatch"
-                            )
+                    elif plan.previous_controlled_session == intent_session:
+                        pass
                     else:
                         blocks.append("cross_session_lineage_missing")
+                    if (
+                        not plan.parent_attempt_id
+                        and plan.previous_controlled_session != intent_session
+                    ):
+                        blocks.append(
+                            "first_cross_session_previous_session_mismatch"
+                        )
                     if (
                         not account.snapshot_id
                         or account.as_of is None
@@ -363,6 +370,7 @@ class ExecutionGate:
                 execution_quote_bundle_sha256=(
                     plan.execution_quote_bundle_sha256
                 ),
+                execution_rule_bundle_sha256=plan.execution_rule_bundle_sha256,
             )
             if plan.plan_id != expected_v2_plan_id:
                 blocks.append("plan_id_binding_mismatch")
@@ -400,24 +408,54 @@ class ExecutionGate:
                             "execution_quote_bundle_sha256_mismatch"
                         )
 
-                required_quote_ids = set(account.positions)
-                required_quote_ids.update(
-                    order.instrument_id for order in plan.orders
-                )
-                if intent is not None:
-                    required_quote_ids.update(intent.target_weights)
-                for instrument_id in sorted(required_quote_ids):
-                    quote = trusted_quote_map.get(instrument_id)
-                    if quote is None:
-                        blocks.append("trusted_quote_missing")
-                        continue
-                    quote_age = (
-                        plan.decision_time - quote.as_of
-                    ).total_seconds()
-                    if quote_age < 0:
-                        blocks.append("trusted_quote_from_future")
-                    elif quote_age > self.limits.maximum_quote_age_seconds:
-                        blocks.append("trusted_quote_stale")
+            if not isinstance(trusted_fee_schedule, FeeSchedule):
+                blocks.append("trusted_fee_schedule_missing")
+            if not isinstance(trusted_instruments, Mapping):
+                blocks.append("trusted_instrument_rules_missing")
+            elif isinstance(trusted_fee_schedule, FeeSchedule):
+                try:
+                    recomputed_execution_rule_bundle_sha256 = (
+                        execution_rule_bundle_sha256(
+                            trusted_fee_schedule,
+                            trusted_instruments,
+                        )
+                    )
+                except ValueError:
+                    blocks.append("trusted_execution_rule_bundle_invalid")
+                else:
+                    trusted_instrument_map = dict(trusted_instruments)
+                    if (
+                        recomputed_execution_rule_bundle_sha256
+                        != plan.execution_rule_bundle_sha256
+                    ):
+                        blocks.append("execution_rule_bundle_sha256_mismatch")
+
+            required_rule_ids = set(account.positions)
+            required_rule_ids.update(order.instrument_id for order in plan.orders)
+            if intent is not None:
+                required_rule_ids.update(intent.target_weights)
+            for instrument_id in sorted(required_rule_ids):
+                if instrument_id not in trusted_instrument_map:
+                    blocks.append("trusted_instrument_rule_missing")
+
+            required_quote_ids = set(account.positions)
+            required_quote_ids.update(
+                order.instrument_id for order in plan.orders
+            )
+            if intent is not None:
+                required_quote_ids.update(intent.target_weights)
+            for instrument_id in sorted(required_quote_ids):
+                quote = trusted_quote_map.get(instrument_id)
+                if quote is None:
+                    blocks.append("trusted_quote_missing")
+                    continue
+                quote_age = (
+                    plan.decision_time - quote.as_of
+                ).total_seconds()
+                if quote_age < 0:
+                    blocks.append("trusted_quote_from_future")
+                elif quote_age > self.limits.maximum_quote_age_seconds:
+                    blocks.append("trusted_quote_stale")
         else:
             if controlled_calendar_sessions is not None:
                 blocks.append("unexpected_controlled_calendar_payload")
@@ -480,12 +518,11 @@ class ExecutionGate:
                     is not OrderRiskDirection.RISK_INCREASING
                 ):
                     blocks.append("invalid_buy_risk_direction")
-                if order.side == Side.BUY and plan.portfolio_intent_type in {
-                    PortfolioIntentType.NO_ALPHA_CASH,
-                    PortfolioIntentType.RISK_OFF,
-                    PortfolioIntentType.ACCOUNT_DRAWDOWN_EXIT,
-                }:
-                    blocks.append("cash_intent_contains_buy")
+                if (
+                    order.side == Side.BUY
+                    and plan.portfolio_intent_type in NO_BUY_INTENT_TYPES
+                ):
+                    blocks.append("no_buy_intent_contains_buy")
                 if order.risk_direction is OrderRiskDirection.FORCED_EXIT and (
                     order.side is not Side.SELL
                     or plan.portfolio_intent_type
@@ -495,11 +532,8 @@ class ExecutionGate:
                 if order.risk_direction is OrderRiskDirection.RISK_REDUCING and (
                     order.side is not Side.SELL
                     or plan.portfolio_intent_type
-                    not in {
-                        PortfolioIntentType.NO_ALPHA_CASH,
-                        PortfolioIntentType.DEFENSIVE_REDUCTION,
-                        PortfolioIntentType.RISK_OFF,
-                    }
+                    not in RISK_REDUCTION_INTENT_TYPES
+                    - {PortfolioIntentType.ACCOUNT_DRAWDOWN_EXIT}
                 ):
                     blocks.append("invalid_risk_reducing_direction")
             else:
@@ -512,6 +546,25 @@ class ExecutionGate:
                 if order.client_order_id != expected_client_order_id:
                     blocks.append("client_order_id_binding_mismatch")
             trusted_quote = trusted_quote_map.get(order.instrument_id)
+            trusted_rule = trusted_instrument_map.get(order.instrument_id)
+            if is_v2 and trusted_rule is not None:
+                if order.quantity % trusted_rule.lot_size:
+                    blocks.append("order_quantity_not_whole_lot")
+                if order.limit_price % trusted_rule.tick_size:
+                    blocks.append("order_price_not_on_tick")
+                if (
+                    trusted_rule.instrument_type
+                    not in self.limits.allowed_instrument_types
+                ):
+                    blocks.append("instrument_type_not_allowed")
+                if isinstance(trusted_fee_schedule, FeeSchedule):
+                    expected_fee = trusted_fee_schedule.estimate(
+                        order.side,
+                        order.notional,
+                        trusted_rule,
+                    )
+                    if expected_fee != order.estimated_fee:
+                        blocks.append("order_estimated_fee_mismatch")
             if is_v2 and trusted_quote is not None:
                 if trusted_quote.suspended:
                     blocks.append("trusted_quote_suspended")
@@ -674,14 +727,7 @@ class ExecutionGate:
                                 "projected_position_exceeds_intent_target"
                             )
 
-                if intent.intent_type in {
-                    PortfolioIntentType.NO_ALPHA_CASH,
-                    PortfolioIntentType.DEFENSIVE_REDUCTION,
-                    PortfolioIntentType.RISK_OFF,
-                    PortfolioIntentType.ACCOUNT_DRAWDOWN_EXIT,
-                }:
-                    if any(order.side is Side.BUY for order in plan.orders):
-                        blocks.append("reduction_intent_contains_buy")
+                if intent.intent_type in NO_BUY_INTENT_TYPES:
                     if any(
                         projected_quantities.get(instrument_id, 0)
                         > position.quantity
@@ -690,7 +736,89 @@ class ExecutionGate:
                         quantity > 0 and instrument_id not in account.positions
                         for instrument_id, quantity in projected_quantities.items()
                     ):
-                        blocks.append("reduction_intent_increases_position")
+                        blocks.append("no_buy_intent_increases_position")
+
+                if intent.intent_type in FULL_EXIT_INTENT_TYPES:
+                    sell_orders = {
+                        order.instrument_id: order
+                        for order in plan.orders
+                        if order.side is Side.SELL
+                    }
+                    blocked_by_instrument: dict[str, object] = {}
+                    for item in plan.blocked_exit_reasons:
+                        if item.instrument_id in blocked_by_instrument:
+                            blocks.append("exit_plan_blocked_reason_duplicate")
+                        blocked_by_instrument[item.instrument_id] = item
+                    if any(
+                        instrument_id not in account.positions
+                        for instrument_id in blocked_by_instrument
+                    ):
+                        blocks.append("exit_plan_unexpected_blocked_position")
+                    for instrument_id, position in account.positions.items():
+                        quote = trusted_quote_map.get(instrument_id)
+                        rule = trusted_instrument_map.get(instrument_id)
+                        order = sell_orders.get(instrument_id)
+                        blocked_reason = blocked_by_instrument.get(instrument_id)
+                        if quote is None or rule is None:
+                            blocks.append("exit_plan_coverage_incomplete")
+                            continue
+                        expected_block_code: str | None = None
+                        expected_quantity = min(
+                            position.quantity,
+                            position.sellable_quantity,
+                        )
+                        if quote.suspended:
+                            expected_block_code = "sell_blocked_suspended"
+                            expected_quantity = 0
+                        elif expected_quantity <= 0:
+                            expected_block_code = (
+                                "sell_blocked_t_plus_one"
+                                if rule.t_plus_one
+                                else "insufficient_sellable_quantity"
+                            )
+                        elif expected_quantity != position.quantity:
+                            lots = (
+                                Decimal(expected_quantity) / rule.lot_size
+                            ).to_integral_value(rounding=ROUND_FLOOR)
+                            expected_quantity = int(lots) * rule.lot_size
+                            if expected_quantity <= 0:
+                                expected_block_code = (
+                                    "insufficient_sellable_quantity"
+                                )
+                        if (
+                            expected_block_code is None
+                            and quote.sell_blocked
+                        ):
+                            expected_block_code = "sell_blocked_limit_down"
+                            expected_quantity = 0
+                        if expected_quantity > 0:
+                            if order is None:
+                                blocks.append("exit_plan_coverage_incomplete")
+                            elif order.quantity != expected_quantity:
+                                blocks.append("exit_plan_sell_quantity_mismatch")
+                            residual_quantity = position.quantity - expected_quantity
+                            if residual_quantity > 0:
+                                expected_residual_code = (
+                                    "sell_blocked_t_plus_one"
+                                    if rule.t_plus_one
+                                    else "insufficient_sellable_quantity"
+                                )
+                                if blocked_reason is None:
+                                    blocks.append("exit_plan_coverage_incomplete")
+                                elif (
+                                    getattr(blocked_reason, "code", None)
+                                    != expected_residual_code
+                                ):
+                                    blocks.append("exit_plan_block_reason_mismatch")
+                            elif blocked_reason is not None:
+                                blocks.append("exit_plan_coverage_ambiguous")
+                        else:
+                            if order is not None:
+                                blocks.append("exit_plan_unexpected_sell_order")
+                            if blocked_reason is None:
+                                blocks.append("exit_plan_coverage_incomplete")
+                            elif getattr(blocked_reason, "code", None) != expected_block_code:
+                                blocks.append("exit_plan_block_reason_mismatch")
         expected_turnover_limit = (
             self.limits.bootstrap_turnover_ratio
             if plan.bootstrap
@@ -698,11 +826,18 @@ class ExecutionGate:
         )
         if plan.turnover_limit != expected_turnover_limit:
             blocks.append("turnover_limit_mismatch")
-        if (
-            daily_pnl_ratio <= -self.limits.maximum_daily_loss_ratio
-            and plan.portfolio_intent_type is not PortfolioIntentType.ACCOUNT_DRAWDOWN_EXIT
-        ):
-            blocks.append("daily_loss_limit_reached")
+        if daily_pnl_ratio <= -self.limits.maximum_daily_loss_ratio:
+            if is_v2:
+                if any(
+                    order.risk_direction is OrderRiskDirection.RISK_INCREASING
+                    for order in plan.orders
+                ):
+                    blocks.append("daily_loss_limit_reached")
+            elif (
+                plan.portfolio_intent_type
+                is not PortfolioIntentType.ACCOUNT_DRAWDOWN_EXIT
+            ):
+                blocks.append("daily_loss_limit_reached")
         if plan.ordinary_turnover_ratio > plan.turnover_limit:
             blocks.append("turnover_limit_exceeded")
         if daily_turnover_ratio_before_plan + plan.ordinary_turnover_ratio > plan.turnover_limit:
@@ -750,5 +885,6 @@ class ExecutionGate:
                 max_orders_per_day=self.limits.max_orders_per_day
                 or self.limits.max_orders_per_plan,
                 _issuer=_GATE_ISSUER,
+                execution_rule_bundle_sha256=plan.execution_rule_bundle_sha256,
             )
         return GateResult(allowed=not blocks, block_codes=tuple(blocks), approval=approval)

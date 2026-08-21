@@ -1,5 +1,5 @@
 {
-  "schema_version": "strategy-adaptive-exposure-policy.v1",
+  "schema_version": "strategy-adaptive-exposure-policy.v2",
   "strategy_id": "a-share-small-account-adaptive-exposure-v2",
   "contract_status": "p0_runtime_implemented_not_admitted",
   "research_status": "blocked_missing_pit_data",
@@ -70,7 +70,7 @@
     "untyped_empty_targets": "reject"
   },
   "execution_contract": {
-    "schema_version": "portfolio-execution-plan.v1",
+    "schema_version": "portfolio-execution-plan.v2",
     "order_risk_classes": [
       "RISK_INCREASING",
       "RISK_NEUTRAL",

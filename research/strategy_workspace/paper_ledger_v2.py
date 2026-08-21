@@ -20,14 +20,17 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, ROUND_HALF_UP
 from hashlib import sha256
 from pathlib import Path
+from types import MappingProxyType
 from typing import Any, Mapping, Sequence
 
-from trading.models import PortfolioIntent, PortfolioIntentType
+from trading.costs import FeeSchedule
+from trading.integrity import execution_rule_bundle_sha256
+from trading.models import InstrumentRule, PortfolioIntent, PortfolioIntentType
 
 from .adaptive_exposure import FROZEN_ADAPTIVE_EXPOSURE_POLICY_SHA256
 from .contracts import canonical_json_bytes, canonical_sha256
@@ -37,17 +40,16 @@ PAPER_LEDGER_V2_VERSION = "strategy-paper-ledger-record.v2"
 PAPER_LEDGER_V2_PRODUCER = "controlled-paper-ledger-v2"
 PAPER_LEDGER_V2_STATUS = "forward-paper-daily-append-only-not-live"
 ADAPTIVE_STRATEGY_ID = "a-share-small-account-adaptive-exposure-v2"
-ADAPTIVE_POLICY_SCHEMA_VERSION = "strategy-adaptive-exposure-policy.v1"
+ADAPTIVE_POLICY_SCHEMA_VERSION = "strategy-adaptive-exposure-policy.v2"
 PORTFOLIO_INTENT_SCHEMA_VERSION = "portfolio-intent.v1"
+EXECUTION_COST_BUNDLE_SCHEMA_VERSION = "paper-execution-cost-bundle.v1"
+CLOSE_MARK_BUNDLE_SCHEMA_VERSION = "controlled-close-mark-bundle.v1"
+PAPER_CLOSE_EXECUTION_EVIDENCE_SCHEMA_VERSION = "paper-close-execution-evidence.v1"
 
 CHINA_STANDARD_TIME = timezone(timedelta(hours=8))
 ZERO = Decimal("0")
 CENT = Decimal("0.01")
 PCT = Decimal("0.00000001")
-COMMISSION_RATE = Decimal("0.00018")
-MINIMUM_COMMISSION = Decimal("5")
-SELL_TAX_RATE = Decimal("0.0005")
-TRANSFER_FEE_RATE = Decimal("0.00001")
 DRAWDOWN_TRIGGER = Decimal("0.12")
 
 _SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
@@ -164,6 +166,162 @@ def _keys(value: Mapping[str, Any], expected: set[str], context: str) -> None:
         )
 
 
+def _non_negative_decimal(value: Any, field_name: str) -> Decimal:
+    result = _decimal(value, field_name)
+    if result < ZERO:
+        raise PaperLedgerV2Error(f"{field_name} must be non-negative")
+    return result
+
+
+@dataclass(frozen=True)
+class CanonicalExecutionCostBundleV1:
+    """Exact fees and instrument rules used to replay all Paper costs.
+
+    ``execution_rule_bundle_sha256`` is deliberately recomputed with the same
+    canonical function used by planner/Gate/D+1 preflight.  ``cost_bundle_sha256``
+    additionally binds this ledger-facing schema.  Neither digest authenticates
+    the external provenance of the rule metadata.
+    """
+
+    fee_schedule: FeeSchedule
+    instrument_rules: Mapping[str, InstrumentRule]
+    execution_rule_bundle_sha256: str = field(init=False)
+    cost_bundle_sha256: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.fee_schedule, FeeSchedule):
+            raise PaperLedgerV2Error("execution cost bundle requires FeeSchedule")
+        if not isinstance(self.instrument_rules, Mapping):
+            raise PaperLedgerV2Error("execution cost bundle rules must be a mapping")
+        try:
+            digest = execution_rule_bundle_sha256(
+                self.fee_schedule,
+                self.instrument_rules,
+            )
+        except (TypeError, ValueError) as exc:
+            raise PaperLedgerV2Error(
+                "execution cost bundle contains invalid canonical rules"
+            ) from exc
+        rules = dict(sorted(self.instrument_rules.items()))
+        object.__setattr__(self, "instrument_rules", MappingProxyType(rules))
+        object.__setattr__(self, "execution_rule_bundle_sha256", digest)
+        object.__setattr__(
+            self,
+            "cost_bundle_sha256",
+            canonical_sha256(self.to_content_dict()),
+        )
+
+    def to_content_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": EXECUTION_COST_BUNDLE_SCHEMA_VERSION,
+            "fee_schedule": {
+                "commission_rate": self.fee_schedule.commission_rate,
+                "minimum_commission": self.fee_schedule.minimum_commission,
+                "exchange_fee_rate": self.fee_schedule.exchange_fee_rate,
+            },
+            "whole_lot_policy": "floor_to_instrument_lot.v1",
+            "instrument_rules": [
+                {
+                    "instrument_id": instrument_id,
+                    "name": rule.name,
+                    "instrument_type": rule.instrument_type,
+                    "lot_size": rule.lot_size,
+                    "tick_size": rule.tick_size,
+                    "sell_stamp_duty_rate": rule.sell_stamp_duty_rate,
+                    "t_plus_one": rule.t_plus_one,
+                }
+                for instrument_id, rule in self.instrument_rules.items()
+            ],
+            "execution_rule_bundle_sha256": self.execution_rule_bundle_sha256,
+            "provenance_authenticated": False,
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **self.to_content_dict(),
+            "cost_bundle_sha256": self.cost_bundle_sha256,
+        }
+
+    def validate_attempt(self, attempt: "PaperExecutionAttemptV2") -> None:
+        if attempt.execution_cost_bundle_sha256 != self.cost_bundle_sha256:
+            raise PaperLedgerV2Error("attempt does not bind the execution cost bundle")
+        if (
+            attempt.commission_rate != self.fee_schedule.commission_rate
+            or attempt.minimum_commission != self.fee_schedule.minimum_commission
+            or attempt.transfer_fee_rate != self.fee_schedule.exchange_fee_rate
+        ):
+            raise PaperLedgerV2Error("attempt fee rates differ from execution cost bundle")
+        rule = self.instrument_rules.get(attempt.instrument_id)
+        if rule is None:
+            raise PaperLedgerV2Error("execution cost bundle misses an attempted instrument")
+        if attempt.sell_tax_rate != rule.sell_stamp_duty_rate:
+            raise PaperLedgerV2Error("attempt sell tax differs from InstrumentRule")
+        if attempt.side == "BUY" and attempt.requested_quantity % rule.lot_size:
+            raise PaperLedgerV2Error("Paper BUY request violates the bound whole-lot rule")
+
+
+@dataclass(frozen=True)
+class PaperCloseExecutionEvidenceV1:
+    """Typed linkage from the frozen signal through manual fill confirmation."""
+
+    signal_id: str
+    signal_sha256: str
+    consumption_sha256: str
+    fill_bundle_sha256: str
+    frozen_execution_rule_bundle_sha256: str
+    review_execution_rule_bundle_sha256: str
+    execution_cost_bundle_sha256: str
+    execution_intent_sha256: str
+    execution_evidence_bundle_sha256: str = field(init=False)
+
+    def __post_init__(self) -> None:
+        object.__setattr__(self, "signal_id", _text(self.signal_id, "signal_id"))
+        for field_name in (
+            "signal_sha256",
+            "consumption_sha256",
+            "fill_bundle_sha256",
+            "frozen_execution_rule_bundle_sha256",
+            "review_execution_rule_bundle_sha256",
+            "execution_cost_bundle_sha256",
+            "execution_intent_sha256",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _hash(getattr(self, field_name), field_name),
+            )
+        object.__setattr__(
+            self,
+            "execution_evidence_bundle_sha256",
+            canonical_sha256(self.to_content_dict()),
+        )
+
+    def to_content_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": PAPER_CLOSE_EXECUTION_EVIDENCE_SCHEMA_VERSION,
+            "signal_id": self.signal_id,
+            "signal_sha256": self.signal_sha256,
+            "consumption_sha256": self.consumption_sha256,
+            "fill_bundle_sha256": self.fill_bundle_sha256,
+            "frozen_execution_rule_bundle_sha256": (
+                self.frozen_execution_rule_bundle_sha256
+            ),
+            "review_execution_rule_bundle_sha256": (
+                self.review_execution_rule_bundle_sha256
+            ),
+            "execution_cost_bundle_sha256": self.execution_cost_bundle_sha256,
+            "execution_intent_sha256": self.execution_intent_sha256,
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **self.to_content_dict(),
+            "execution_evidence_bundle_sha256": (
+                self.execution_evidence_bundle_sha256
+            ),
+        }
+
+
 @dataclass(frozen=True)
 class PaperExecutionAttemptV2:
     """One opening-window attempt, including evidenced partial/non-fills."""
@@ -181,6 +339,11 @@ class PaperExecutionAttemptV2:
     reference_open: Decimal
     fill_price: Decimal | None
     evidence_sha256: str
+    execution_cost_bundle_sha256: str
+    commission_rate: Decimal
+    minimum_commission: Decimal
+    sell_tax_rate: Decimal
+    transfer_fee_rate: Decimal
     blocked_reason: str | None = None
     manual_confirmed: bool = True
     auto_submitted: bool = False
@@ -236,6 +399,25 @@ class PaperExecutionAttemptV2:
         object.__setattr__(self, "reference_open", reference)
         object.__setattr__(self, "fill_price", fill)
         object.__setattr__(self, "evidence_sha256", _hash(self.evidence_sha256, "evidence_sha256"))
+        object.__setattr__(
+            self,
+            "execution_cost_bundle_sha256",
+            _hash(
+                self.execution_cost_bundle_sha256,
+                "execution_cost_bundle_sha256",
+            ),
+        )
+        for field_name in (
+            "commission_rate",
+            "minimum_commission",
+            "sell_tax_rate",
+            "transfer_fee_rate",
+        ):
+            object.__setattr__(
+                self,
+                field_name,
+                _non_negative_decimal(getattr(self, field_name), field_name),
+            )
 
     @property
     def notional(self) -> Decimal:
@@ -248,21 +430,21 @@ class PaperExecutionAttemptV2:
         if not self.filled_quantity:
             return ZERO.quantize(CENT)
         return max(
-            MINIMUM_COMMISSION.quantize(CENT),
-            _money(self.notional * COMMISSION_RATE, "commission"),
+            self.minimum_commission.quantize(CENT),
+            _money(self.notional * self.commission_rate, "commission"),
         )
 
     @property
     def sell_tax(self) -> Decimal:
         if not self.filled_quantity or self.side != "SELL":
             return ZERO.quantize(CENT)
-        return _money(self.notional * SELL_TAX_RATE, "sell_tax")
+        return _money(self.notional * self.sell_tax_rate, "sell_tax")
 
     @property
     def transfer_fee(self) -> Decimal:
         if not self.filled_quantity:
             return ZERO.quantize(CENT)
-        return _money(self.notional * TRANSFER_FEE_RATE, "transfer_fee")
+        return _money(self.notional * self.transfer_fee_rate, "transfer_fee")
 
     @property
     def slippage_cost(self) -> Decimal:
@@ -330,13 +512,173 @@ class PaperPositionMarkV2:
 
 
 @dataclass(frozen=True)
+class ControlledCloseMarkBundleV1:
+    """Typed, self-hashed same-session close evidence.
+
+    The receipt digest is an evidence binding, not a claim that the source is
+    official.  Formal admission remains outside this accounting module.
+    """
+
+    session_date: date
+    observed_at: datetime
+    available_at: datetime
+    source: str
+    source_receipt_sha256: str
+    positions: tuple[PaperPositionMarkV2, ...]
+    mark_bundle_sha256: str = field(init=False)
+
+    @staticmethod
+    def price_source_sha256_for(
+        *,
+        session_date: date,
+        observed_at: datetime,
+        available_at: datetime,
+        source: str,
+        source_receipt_sha256: str,
+        instrument_id: str,
+        close_price: Decimal,
+    ) -> str:
+        return canonical_sha256(
+            {
+                "scope": "controlled-close-price-evidence.v1",
+                "session_date": session_date,
+                "observed_at": observed_at,
+                "available_at": available_at,
+                "source": source,
+                "source_receipt_sha256": source_receipt_sha256,
+                "instrument_id": instrument_id,
+                "close_price": close_price,
+            }
+        )
+
+    @classmethod
+    def from_close_prices(
+        cls,
+        *,
+        session_date: date,
+        observed_at: datetime,
+        available_at: datetime,
+        source: str,
+        source_receipt_sha256: str,
+        position_closes: Mapping[str, tuple[int, Decimal]],
+    ) -> "ControlledCloseMarkBundleV1":
+        marks = tuple(
+            PaperPositionMarkV2(
+                instrument_id=instrument_id,
+                quantity=quantity,
+                close_price=close_price,
+                price_source_sha256=cls.price_source_sha256_for(
+                    session_date=session_date,
+                    observed_at=observed_at,
+                    available_at=available_at,
+                    source=source,
+                    source_receipt_sha256=source_receipt_sha256,
+                    instrument_id=instrument_id,
+                    close_price=close_price,
+                ),
+            )
+            for instrument_id, (quantity, close_price) in sorted(
+                position_closes.items()
+            )
+        )
+        return cls(
+            session_date=session_date,
+            observed_at=observed_at,
+            available_at=available_at,
+            source=source,
+            source_receipt_sha256=source_receipt_sha256,
+            positions=marks,
+        )
+
+    def __post_init__(self) -> None:
+        if not isinstance(self.session_date, date) or isinstance(
+            self.session_date, datetime
+        ):
+            raise PaperLedgerV2Error("close mark session_date must be a date")
+        observed = _aware(self.observed_at, "close mark observed_at")
+        available = _aware(self.available_at, "close mark available_at")
+        local_observed = observed.astimezone(CHINA_STANDARD_TIME)
+        local_available = available.astimezone(CHINA_STANDARD_TIME)
+        if (
+            local_observed.date() != self.session_date
+            or local_observed.time().replace(tzinfo=None) < time(15, 0)
+        ):
+            raise PaperLedgerV2Error(
+                "close marks must be observed after the bound session close"
+            )
+        if available < observed or local_available.date() != self.session_date:
+            raise PaperLedgerV2Error(
+                "close marks must become available on/after observation in the same session"
+            )
+        source = _text(self.source, "close mark source")
+        receipt = _hash(
+            self.source_receipt_sha256,
+            "close mark source_receipt_sha256",
+        )
+        positions = tuple(self.positions)
+        if any(not isinstance(item, PaperPositionMarkV2) for item in positions):
+            raise PaperLedgerV2Error(
+                "close mark bundle positions must contain PaperPositionMarkV2"
+            )
+        if len({item.instrument_id for item in positions}) != len(positions):
+            raise PaperLedgerV2Error("close mark bundle positions must be unique")
+        for item in positions:
+            expected = self.price_source_sha256_for(
+                session_date=self.session_date,
+                observed_at=observed,
+                available_at=available,
+                source=source,
+                source_receipt_sha256=receipt,
+                instrument_id=item.instrument_id,
+                close_price=item.close_price,
+            )
+            if item.price_source_sha256 != expected:
+                raise PaperLedgerV2Error(
+                    "position price_source_sha256 does not bind the close receipt"
+                )
+        object.__setattr__(self, "observed_at", observed)
+        object.__setattr__(self, "available_at", available)
+        object.__setattr__(self, "source", source)
+        object.__setattr__(self, "source_receipt_sha256", receipt)
+        object.__setattr__(
+            self,
+            "positions",
+            tuple(sorted(positions, key=lambda item: item.instrument_id)),
+        )
+        object.__setattr__(
+            self,
+            "mark_bundle_sha256",
+            canonical_sha256(self.to_content_dict()),
+        )
+
+    def to_content_dict(self) -> dict[str, Any]:
+        return {
+            "schema_version": CLOSE_MARK_BUNDLE_SCHEMA_VERSION,
+            "session_date": self.session_date,
+            "observed_at": self.observed_at,
+            "available_at": self.available_at,
+            "source": self.source,
+            "source_receipt_sha256": self.source_receipt_sha256,
+            "positions": [item.to_dict() for item in self.positions],
+            "provenance_authenticated": False,
+        }
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            **self.to_content_dict(),
+            "mark_bundle_sha256": self.mark_bundle_sha256,
+        }
+
+
+@dataclass(frozen=True)
 class PaperDailySessionDraftV2:
     trading_date: date
     execution_intent: PortfolioIntent
     closing_intent: PortfolioIntent
     attempts: tuple[PaperExecutionAttemptV2, ...]
-    positions: tuple[PaperPositionMarkV2, ...]
-    mark_bundle_sha256: str
+    execution_cost_bundle: CanonicalExecutionCostBundleV1
+    close_mark_bundle: ControlledCloseMarkBundleV1
+    execution_evidence: PaperCloseExecutionEvidenceV1
 
     def __post_init__(self) -> None:
         if not isinstance(self.trading_date, date) or isinstance(self.trading_date, datetime):
@@ -345,7 +687,41 @@ class PaperDailySessionDraftV2:
             raise PaperLedgerV2Error("execution_intent must be a PortfolioIntent")
         if not isinstance(self.closing_intent, PortfolioIntent):
             raise PaperLedgerV2Error("closing_intent must be a PortfolioIntent")
-        attempts, positions = tuple(self.attempts), tuple(self.positions)
+        if not isinstance(
+            self.execution_cost_bundle,
+            CanonicalExecutionCostBundleV1,
+        ):
+            raise PaperLedgerV2Error(
+                "execution_cost_bundle must be CanonicalExecutionCostBundleV1"
+            )
+        if not isinstance(self.close_mark_bundle, ControlledCloseMarkBundleV1):
+            raise PaperLedgerV2Error(
+                "close_mark_bundle must be ControlledCloseMarkBundleV1"
+            )
+        if self.close_mark_bundle.session_date != self.trading_date:
+            raise PaperLedgerV2Error("close mark bundle date differs from trading_date")
+        if not isinstance(self.execution_evidence, PaperCloseExecutionEvidenceV1):
+            raise PaperLedgerV2Error(
+                "execution_evidence must be PaperCloseExecutionEvidenceV1"
+            )
+        if (
+            self.execution_evidence.execution_intent_sha256
+            != self.execution_intent.intent_sha256
+        ):
+            raise PaperLedgerV2Error(
+                "execution evidence does not bind execution_intent"
+            )
+        if (
+            self.execution_evidence.execution_cost_bundle_sha256
+            != self.execution_cost_bundle.cost_bundle_sha256
+            or self.execution_evidence.review_execution_rule_bundle_sha256
+            != self.execution_cost_bundle.execution_rule_bundle_sha256
+        ):
+            raise PaperLedgerV2Error(
+                "execution evidence does not bind the replayed cost/rule bundle"
+            )
+        attempts = tuple(self.attempts)
+        positions = self.close_mark_bundle.positions
         if any(not isinstance(item, PaperExecutionAttemptV2) for item in attempts):
             raise PaperLedgerV2Error("attempts must contain PaperExecutionAttemptV2 values")
         if any(not isinstance(item, PaperPositionMarkV2) for item in positions):
@@ -356,13 +732,28 @@ class PaperDailySessionDraftV2:
             raise PaperLedgerV2Error("only one attempt per instrument is allowed per session")
         if len({item.instrument_id for item in positions}) != len(positions):
             raise PaperLedgerV2Error("position marks must be unique")
+        for attempt in attempts:
+            self.execution_cost_bundle.validate_attempt(attempt)
+        if attempts and (
+            self.execution_evidence.frozen_execution_rule_bundle_sha256
+            != self.execution_evidence.review_execution_rule_bundle_sha256
+        ):
+            raise PaperLedgerV2Error(
+                "fills are forbidden after execution-rule bundle drift"
+            )
         object.__setattr__(self, "attempts", attempts)
-        object.__setattr__(self, "positions", positions)
-        object.__setattr__(
-            self,
-            "mark_bundle_sha256",
-            _hash(self.mark_bundle_sha256, "mark_bundle_sha256"),
-        )
+
+    @property
+    def positions(self) -> tuple[PaperPositionMarkV2, ...]:
+        return self.close_mark_bundle.positions
+
+    @property
+    def mark_bundle_sha256(self) -> str:
+        return self.close_mark_bundle.mark_bundle_sha256
+
+    @property
+    def execution_evidence_bundle_sha256(self) -> str:
+        return self.execution_evidence.execution_evidence_bundle_sha256
 
 
 @dataclass(frozen=True)
@@ -447,6 +838,17 @@ def _attempt_from_payload(value: Any) -> PaperExecutionAttemptV2:
             else _decimal(value["fill_price"], "fill_price")
         ),
         evidence_sha256=value["evidence_sha256"],
+        execution_cost_bundle_sha256=value[
+            "execution_cost_bundle_sha256"
+        ],
+        commission_rate=_decimal(value["commission_rate"], "commission_rate"),
+        minimum_commission=_decimal(
+            value["minimum_commission"], "minimum_commission"
+        ),
+        sell_tax_rate=_decimal(value["sell_tax_rate"], "sell_tax_rate"),
+        transfer_fee_rate=_decimal(
+            value["transfer_fee_rate"], "transfer_fee_rate"
+        ),
         blocked_reason=value["blocked_reason"],
         manual_confirmed=value["manual_confirmed"],
         auto_submitted=value["auto_submitted"],
@@ -477,6 +879,172 @@ def _position_from_payload(value: Any) -> PaperPositionMarkV2:
     return position
 
 
+def _cost_bundle_from_payload(value: Any) -> CanonicalExecutionCostBundleV1:
+    if not isinstance(value, dict):
+        raise PaperLedgerV2Error("persisted execution cost bundle must be an object")
+    _keys(
+        value,
+        {
+            "schema_version",
+            "fee_schedule",
+            "whole_lot_policy",
+            "instrument_rules",
+            "execution_rule_bundle_sha256",
+            "provenance_authenticated",
+            "cost_bundle_sha256",
+        },
+        "persisted execution cost bundle",
+    )
+    if (
+        value["schema_version"] != EXECUTION_COST_BUNDLE_SCHEMA_VERSION
+        or value["whole_lot_policy"] != "floor_to_instrument_lot.v1"
+        or value["provenance_authenticated"] is not False
+    ):
+        raise PaperLedgerV2Error("execution cost bundle contract is unsupported")
+    fees = value["fee_schedule"]
+    rows = value["instrument_rules"]
+    if not isinstance(fees, dict) or not isinstance(rows, list):
+        raise PaperLedgerV2Error("execution cost bundle payload is malformed")
+    _keys(
+        fees,
+        {"commission_rate", "minimum_commission", "exchange_fee_rate"},
+        "execution cost fee schedule",
+    )
+    rules: dict[str, InstrumentRule] = {}
+    for row in rows:
+        if not isinstance(row, dict):
+            raise PaperLedgerV2Error("execution cost InstrumentRule must be an object")
+        _keys(
+            row,
+            {
+                "instrument_id",
+                "name",
+                "instrument_type",
+                "lot_size",
+                "tick_size",
+                "sell_stamp_duty_rate",
+                "t_plus_one",
+            },
+            "execution cost InstrumentRule",
+        )
+        instrument_id = _instrument(row["instrument_id"])
+        if instrument_id in rules:
+            raise PaperLedgerV2Error("execution cost InstrumentRules must be unique")
+        try:
+            rules[instrument_id] = InstrumentRule(
+                instrument_id=instrument_id,
+                name=str(row["name"]),
+                instrument_type=str(row["instrument_type"]),
+                lot_size=row["lot_size"],
+                tick_size=_decimal(row["tick_size"], "InstrumentRule.tick_size"),
+                sell_stamp_duty_rate=_non_negative_decimal(
+                    row["sell_stamp_duty_rate"],
+                    "InstrumentRule.sell_stamp_duty_rate",
+                ),
+                t_plus_one=row["t_plus_one"],
+            )
+        except (TypeError, ValueError) as exc:
+            raise PaperLedgerV2Error("execution cost InstrumentRule is invalid") from exc
+    try:
+        bundle = CanonicalExecutionCostBundleV1(
+            fee_schedule=FeeSchedule(
+                commission_rate=_non_negative_decimal(
+                    fees["commission_rate"], "commission_rate"
+                ),
+                minimum_commission=_non_negative_decimal(
+                    fees["minimum_commission"], "minimum_commission"
+                ),
+                exchange_fee_rate=_non_negative_decimal(
+                    fees["exchange_fee_rate"], "exchange_fee_rate"
+                ),
+            ),
+            instrument_rules=rules,
+        )
+    except (TypeError, ValueError) as exc:
+        raise PaperLedgerV2Error("execution cost bundle is invalid") from exc
+    expected = json.loads(canonical_json_bytes(bundle.to_dict()))
+    if value != expected:
+        raise PaperLedgerV2Error("execution cost bundle SHA-256/content mismatch")
+    return bundle
+
+
+def _close_mark_bundle_from_payload(value: Any) -> ControlledCloseMarkBundleV1:
+    if not isinstance(value, dict):
+        raise PaperLedgerV2Error("persisted close mark bundle must be an object")
+    _keys(
+        value,
+        {
+            "schema_version",
+            "session_date",
+            "observed_at",
+            "available_at",
+            "source",
+            "source_receipt_sha256",
+            "positions",
+            "provenance_authenticated",
+            "mark_bundle_sha256",
+        },
+        "persisted close mark bundle",
+    )
+    if (
+        value["schema_version"] != CLOSE_MARK_BUNDLE_SCHEMA_VERSION
+        or value["provenance_authenticated"] is not False
+        or not isinstance(value["positions"], list)
+    ):
+        raise PaperLedgerV2Error("close mark bundle contract is unsupported")
+    bundle = ControlledCloseMarkBundleV1(
+        session_date=_parse_date(value["session_date"], "close session_date"),
+        observed_at=_parse_datetime(value["observed_at"], "close observed_at"),
+        available_at=_parse_datetime(value["available_at"], "close available_at"),
+        source=value["source"],
+        source_receipt_sha256=value["source_receipt_sha256"],
+        positions=tuple(
+            _position_from_payload(item) for item in value["positions"]
+        ),
+    )
+    expected = json.loads(canonical_json_bytes(bundle.to_dict()))
+    if value != expected:
+        raise PaperLedgerV2Error("close mark bundle SHA-256/content mismatch")
+    return bundle
+
+
+def _execution_evidence_from_payload(value: Any) -> PaperCloseExecutionEvidenceV1:
+    if not isinstance(value, dict):
+        raise PaperLedgerV2Error("persisted execution evidence must be an object")
+    expected_keys = {
+        "schema_version",
+        "signal_id",
+        "signal_sha256",
+        "consumption_sha256",
+        "fill_bundle_sha256",
+        "frozen_execution_rule_bundle_sha256",
+        "review_execution_rule_bundle_sha256",
+        "execution_cost_bundle_sha256",
+        "execution_intent_sha256",
+        "execution_evidence_bundle_sha256",
+    }
+    _keys(value, expected_keys, "persisted execution evidence")
+    if value["schema_version"] != PAPER_CLOSE_EXECUTION_EVIDENCE_SCHEMA_VERSION:
+        raise PaperLedgerV2Error("execution evidence contract is unsupported")
+    evidence = PaperCloseExecutionEvidenceV1(
+        signal_id=value["signal_id"],
+        signal_sha256=value["signal_sha256"],
+        consumption_sha256=value["consumption_sha256"],
+        fill_bundle_sha256=value["fill_bundle_sha256"],
+        frozen_execution_rule_bundle_sha256=value[
+            "frozen_execution_rule_bundle_sha256"
+        ],
+        review_execution_rule_bundle_sha256=value[
+            "review_execution_rule_bundle_sha256"
+        ],
+        execution_cost_bundle_sha256=value["execution_cost_bundle_sha256"],
+        execution_intent_sha256=value["execution_intent_sha256"],
+    )
+    if value != json.loads(canonical_json_bytes(evidence.to_dict())):
+        raise PaperLedgerV2Error("execution evidence SHA-256/content mismatch")
+    return evidence
+
+
 def _header_content(
     *,
     strategy_id: str,
@@ -495,15 +1063,22 @@ def _header_content(
         "policy_schema_version": policy_schema_version,
         "policy_sha256": policy_sha256,
         "portfolio_intent_schema_version": PORTFOLIO_INTENT_SCHEMA_VERSION,
+        "execution_cost_bundle_schema_version": (
+            EXECUTION_COST_BUNDLE_SCHEMA_VERSION
+        ),
+        "close_mark_bundle_schema_version": CLOSE_MARK_BUNDLE_SCHEMA_VERSION,
+        "execution_evidence_schema_version": (
+            PAPER_CLOSE_EXECUTION_EVIDENCE_SCHEMA_VERSION
+        ),
         "controlled_trading_dates": tuple(calendar),
         "controlled_calendar_sha256": canonical_sha256(tuple(calendar)),
         "initial_cash": initial_cash,
         "drawdown_trigger": DRAWDOWN_TRIGGER,
         "exposure_definition": {
-            "target_gross_exposure": "closing_intent_target",
-            "feasible_gross_exposure": "post_constraint_evidenced_close_mark",
+            "target_gross_exposure": "closing_intent_requested_target",
+            "feasible_gross_exposure": "closing_intent_feasible_weight_sum",
             "realized_gross_exposure": "actual_post_fill_close_mark",
-            "p0_feasible_equals_realized": True,
+            "fields_are_semantically_distinct": True,
         },
         "manual_execution_required": True,
         "auto_submit": False,
@@ -520,6 +1095,9 @@ def _header_from_record(record: Mapping[str, Any]) -> tuple[dict[str, Any], str]
     expected_keys = {
         "schema_version", "producer", "status", "created_at", "strategy_id",
         "policy_schema_version", "policy_sha256", "portfolio_intent_schema_version",
+        "execution_cost_bundle_schema_version",
+        "close_mark_bundle_schema_version",
+        "execution_evidence_schema_version",
         "controlled_trading_dates", "controlled_calendar_sha256", "initial_cash",
         "drawdown_trigger", "exposure_definition", "manual_execution_required",
         "auto_submit", "live_supported", "execution_authority",
@@ -532,6 +1110,12 @@ def _header_from_record(record: Mapping[str, Any]) -> tuple[dict[str, Any], str]
         or content["strategy_id"] != ADAPTIVE_STRATEGY_ID
         or content["policy_schema_version"] != ADAPTIVE_POLICY_SCHEMA_VERSION
         or content["portfolio_intent_schema_version"] != PORTFOLIO_INTENT_SCHEMA_VERSION
+        or content["execution_cost_bundle_schema_version"]
+        != EXECUTION_COST_BUNDLE_SCHEMA_VERSION
+        or content["close_mark_bundle_schema_version"]
+        != CLOSE_MARK_BUNDLE_SCHEMA_VERSION
+        or content["execution_evidence_schema_version"]
+        != PAPER_CLOSE_EXECUTION_EVIDENCE_SCHEMA_VERSION
     ):
         raise PaperLedgerV2Error("Paper ledger V2 header contract is unsupported")
     if (
@@ -559,10 +1143,10 @@ def _header_from_record(record: Mapping[str, Any]) -> tuple[dict[str, Any], str]
     if _decimal(content["drawdown_trigger"], "drawdown_trigger") != DRAWDOWN_TRIGGER:
         raise PaperLedgerV2Error("drawdown trigger must remain 12%")
     expected_exposure = {
-        "target_gross_exposure": "closing_intent_target",
-        "feasible_gross_exposure": "post_constraint_evidenced_close_mark",
+        "target_gross_exposure": "closing_intent_requested_target",
+        "feasible_gross_exposure": "closing_intent_feasible_weight_sum",
         "realized_gross_exposure": "actual_post_fill_close_mark",
-        "p0_feasible_equals_realized": True,
+        "fields_are_semantically_distinct": True,
     }
     if content["exposure_definition"] != expected_exposure:
         raise PaperLedgerV2Error("exposure definitions were altered")
@@ -599,6 +1183,8 @@ def _derive_daily_content(
     local_recorded = recorded_at.astimezone(CHINA_STANDARD_TIME)
     if local_recorded.date() != draft.trading_date or local_recorded.time().replace(tzinfo=None) < time(15, 0):
         raise PaperLedgerV2Error("daily_session must be appended after its same-session close without backfill")
+    if draft.close_mark_bundle.available_at > recorded_at:
+        raise PaperLedgerV2Error("close mark bundle was unavailable when the ledger was recorded")
     if previous is None:
         previous_recorded = _parse_datetime(header["created_at"], "header created_at")
     else:
@@ -780,7 +1366,11 @@ def _derive_daily_content(
             raise PaperLedgerV2Error("every residual forced-exit position needs a blocked_exit_reason")
 
     realized = (positions_value / nav).quantize(PCT)
-    feasible = realized
+    feasible = sum(closing_intent.target_weights.values(), ZERO).quantize(PCT)
+    if not ZERO <= feasible <= closing_intent.target_gross_exposure:
+        raise PaperLedgerV2Error(
+            "closing intent feasible weights exceed the requested target exposure"
+        )
     if not ZERO <= realized <= Decimal("1"):
         raise PaperLedgerV2Error("realized gross exposure must remain between zero and one")
     if quantities and realized == ZERO:
@@ -804,6 +1394,12 @@ def _derive_daily_content(
         "policy_sha256": header["policy_sha256"],
         "controlled_calendar_sha256": header["controlled_calendar_sha256"],
         "mark_bundle_sha256": draft.mark_bundle_sha256,
+        "execution_cost_bundle": draft.execution_cost_bundle.to_dict(),
+        "close_mark_bundle": draft.close_mark_bundle.to_dict(),
+        "execution_evidence": draft.execution_evidence.to_dict(),
+        "execution_evidence_bundle_sha256": (
+            draft.execution_evidence_bundle_sha256
+        ),
         "execution_intent": _intent_payload(execution_intent),
         "closing_intent": _intent_payload(closing_intent),
         "attempts": [item.to_dict() for item in attempts],
@@ -836,7 +1432,10 @@ def _derive_daily_content(
 def _daily_draft_from_content(content: Mapping[str, Any]) -> PaperDailySessionDraftV2:
     expected = {
         "trading_date", "calendar_index", "recorded_at", "policy_sha256",
-        "controlled_calendar_sha256", "mark_bundle_sha256", "execution_intent",
+        "controlled_calendar_sha256", "mark_bundle_sha256",
+        "execution_cost_bundle", "close_mark_bundle",
+        "execution_evidence",
+        "execution_evidence_bundle_sha256", "execution_intent",
         "closing_intent",
         "attempts", "positions", "cash", "strategy_positions_value", "strategy_nav",
         "peak_nav", "drawdown", "target_gross_exposure", "feasible_gross_exposure",
@@ -849,13 +1448,32 @@ def _daily_draft_from_content(content: Mapping[str, Any]) -> PaperDailySessionDr
         raise PaperLedgerV2Error("daily_session attempts and positions must be arrays")
     if not isinstance(content["blocked_exit_reasons"], list):
         raise PaperLedgerV2Error("blocked_exit_reasons must be an array")
+    cost_bundle = _cost_bundle_from_payload(content["execution_cost_bundle"])
+    close_bundle = _close_mark_bundle_from_payload(content["close_mark_bundle"])
+    execution_evidence = _execution_evidence_from_payload(
+        content["execution_evidence"]
+    )
+    if content["mark_bundle_sha256"] != close_bundle.mark_bundle_sha256:
+        raise PaperLedgerV2Error("daily mark bundle summary hash differs from payload")
+    if content["positions"] != json.loads(
+        canonical_json_bytes([item.to_dict() for item in close_bundle.positions])
+    ):
+        raise PaperLedgerV2Error("daily position summary differs from close mark bundle")
+    if (
+        content["execution_evidence_bundle_sha256"]
+        != execution_evidence.execution_evidence_bundle_sha256
+    ):
+        raise PaperLedgerV2Error(
+            "daily execution evidence summary hash differs from payload"
+        )
     return PaperDailySessionDraftV2(
         trading_date=_parse_date(content["trading_date"], "trading_date"),
         execution_intent=_intent_from_payload(content["execution_intent"]),
         closing_intent=_intent_from_payload(content["closing_intent"]),
         attempts=tuple(_attempt_from_payload(item) for item in content["attempts"]),
-        positions=tuple(_position_from_payload(item) for item in content["positions"]),
-        mark_bundle_sha256=content["mark_bundle_sha256"],
+        execution_cost_bundle=cost_bundle,
+        close_mark_bundle=close_bundle,
+        execution_evidence=execution_evidence,
     )
 
 
@@ -1068,9 +1686,15 @@ def append_paper_daily_session_v2(
 __all__ = [
     "ADAPTIVE_POLICY_SCHEMA_VERSION",
     "ADAPTIVE_STRATEGY_ID",
+    "CLOSE_MARK_BUNDLE_SCHEMA_VERSION",
+    "CanonicalExecutionCostBundleV1",
+    "ControlledCloseMarkBundleV1",
+    "EXECUTION_COST_BUNDLE_SCHEMA_VERSION",
     "PAPER_LEDGER_V2_PRODUCER",
     "PAPER_LEDGER_V2_STATUS",
     "PAPER_LEDGER_V2_VERSION",
+    "PAPER_CLOSE_EXECUTION_EVIDENCE_SCHEMA_VERSION",
+    "PaperCloseExecutionEvidenceV1",
     "PaperDailySessionDraftV2",
     "PaperExecutionAttemptV2",
     "PaperLedgerV2Error",

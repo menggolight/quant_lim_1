@@ -1,0 +1,328 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/daily_strategy_decision.v2.json",
+  "title": "Adaptive exposure daily strategy decision v2",
+  "description": "Immutable after-close decision for one next-session manual Paper review. Schema validity and hashes do not grant Paper, trade, real-money, or LIVE eligibility.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "strategy_id",
+    "strategy_date",
+    "execution_date",
+    "decision_status",
+    "data_status",
+    "market_regime",
+    "portfolio_intent_type",
+    "target_gross_exposure",
+    "feasible_gross_exposure",
+    "current_gross_exposure",
+    "realized_gross_exposure",
+    "target_stock_weights",
+    "feasible_stock_weights",
+    "current_stock_weights",
+    "realized_stock_weights",
+    "target_lot_quantities",
+    "feasible_lot_quantities",
+    "current_lot_quantities",
+    "realized_lot_quantities",
+    "buy_orders",
+    "sell_orders",
+    "hold_positions",
+    "cash_weight",
+    "maximum_execution_price_deviation",
+    "cancel_conditions",
+    "expected_cost",
+    "model_reasons",
+    "risk_reasons",
+    "no_trade_reasons",
+    "data_sha256",
+    "model_sha256",
+    "policy_sha256",
+    "intent_sha256",
+    "failed_stage",
+    "failure_codes",
+    "failure_receipt_sha256",
+    "decision_sha256",
+    "returns_net_of_full_costs",
+    "automatic_order_submission",
+    "paper_eligibility",
+    "trade_eligibility",
+    "real_money_list_allowed",
+    "live_supported"
+  ],
+  "properties": {
+    "schema_version": {"const": "daily-strategy-decision.v2"},
+    "strategy_id": {"const": "a-share-small-account-adaptive-exposure-v2"},
+    "strategy_date": {"$ref": "#/$defs/date"},
+    "execution_date": {
+      "oneOf": [{"$ref": "#/$defs/date"}, {"type": "null"}]
+    },
+    "decision_status": {
+      "enum": [
+        "READY_FOR_NEXT_SESSION_REVIEW",
+        "NO_TRADE",
+        "DATA_FAIL_CLOSED",
+        "MANUAL_PAUSE",
+        "BLOCKED"
+      ]
+    },
+    "data_status": {"type": "string", "minLength": 1},
+    "market_regime": {
+      "enum": ["RISK_OFF", "DEFENSIVE", "NEUTRAL", "RISK_ON"]
+    },
+    "portfolio_intent_type": {
+      "enum": [
+        "ALPHA_REBALANCE",
+        "NO_ALPHA_CASH",
+        "DEFENSIVE_REDUCTION",
+        "RISK_OFF",
+        "ACCOUNT_DRAWDOWN_EXIT",
+        "DATA_FAIL_CLOSED",
+        "MANUAL_PAUSE"
+      ]
+    },
+    "target_gross_exposure": {"$ref": "#/$defs/exposure"},
+    "feasible_gross_exposure": {"$ref": "#/$defs/exposure"},
+    "current_gross_exposure": {
+      "oneOf": [{"$ref": "#/$defs/exposure"}, {"type": "null"}]
+    },
+    "realized_gross_exposure": {"type": "null"},
+    "target_stock_weights": {
+      "type": "object",
+      "propertyNames": {"$ref": "#/$defs/instrumentId"},
+      "additionalProperties": {"$ref": "#/$defs/positionWeight"},
+      "maxProperties": 3
+    },
+    "feasible_stock_weights": {"$ref": "#/$defs/actualWeights"},
+    "current_stock_weights": {
+      "oneOf": [{"$ref": "#/$defs/actualWeights"}, {"type": "null"}]
+    },
+    "realized_stock_weights": {"type": "null"},
+    "target_lot_quantities": {
+      "type": "object",
+      "propertyNames": {"$ref": "#/$defs/instrumentId"},
+      "additionalProperties": {"type": "integer", "minimum": 0},
+      "maxProperties": 3
+    },
+    "feasible_lot_quantities": {"$ref": "#/$defs/positiveQuantities"},
+    "current_lot_quantities": {
+      "oneOf": [{"$ref": "#/$defs/positiveQuantities"}, {"type": "null"}]
+    },
+    "realized_lot_quantities": {"type": "null"},
+    "buy_orders": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/buyOrder"}
+    },
+    "sell_orders": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/sellOrder"}
+    },
+    "hold_positions": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/holdPosition"}
+    },
+    "cash_weight": {
+      "oneOf": [{"$ref": "#/$defs/exposure"}, {"type": "null"}]
+    },
+    "maximum_execution_price_deviation": {"$ref": "#/$defs/exposure"},
+    "cancel_conditions": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "expected_cost": {"$ref": "#/$defs/nonNegativeDecimal"},
+    "model_reasons": {"$ref": "#/$defs/reasons"},
+    "risk_reasons": {"$ref": "#/$defs/reasons"},
+    "no_trade_reasons": {"$ref": "#/$defs/reasons"},
+    "data_sha256": {"$ref": "#/$defs/sha256"},
+    "model_sha256": {"$ref": "#/$defs/sha256"},
+    "policy_sha256": {"$ref": "#/$defs/sha256"},
+    "intent_sha256": {"$ref": "#/$defs/sha256"},
+    "failed_stage": {
+      "oneOf": [
+        {"type": "string", "pattern": "^[A-Z][A-Z0-9_]{0,63}$"},
+        {"type": "null"}
+      ]
+    },
+    "failure_codes": {"$ref": "#/$defs/reasons"},
+    "failure_receipt_sha256": {
+      "oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+    },
+    "decision_sha256": {"$ref": "#/$defs/sha256"},
+    "returns_net_of_full_costs": {"const": true},
+    "automatic_order_submission": {"const": false},
+    "paper_eligibility": {"const": false},
+    "trade_eligibility": {"const": false},
+    "real_money_list_allowed": {"const": false},
+    "live_supported": {"const": false}
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"decision_status": {"const": "BLOCKED"}},
+        "required": ["decision_status"]
+      },
+      "then": {
+        "properties": {
+          "target_gross_exposure": {"const": "0"},
+          "feasible_gross_exposure": {"const": "0"},
+          "buy_orders": {"maxItems": 0},
+          "sell_orders": {"maxItems": 0},
+          "hold_positions": {"maxItems": 0},
+          "failed_stage": {"type": "string", "minLength": 1},
+          "failure_codes": {"minItems": 1},
+          "failure_receipt_sha256": {"$ref": "#/$defs/sha256"}
+        }
+      },
+      "else": {
+        "properties": {
+          "execution_date": {"$ref": "#/$defs/date"},
+          "current_gross_exposure": {"$ref": "#/$defs/exposure"},
+          "realized_gross_exposure": {"type": "null"},
+          "current_stock_weights": {"$ref": "#/$defs/actualWeights"},
+          "realized_stock_weights": {"type": "null"},
+          "current_lot_quantities": {"$ref": "#/$defs/positiveQuantities"},
+          "realized_lot_quantities": {"type": "null"},
+          "cash_weight": {"$ref": "#/$defs/exposure"},
+          "failed_stage": {"type": "null"},
+          "failure_codes": {"maxItems": 0},
+          "failure_receipt_sha256": {"type": "null"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "decision_status": {
+            "enum": ["DATA_FAIL_CLOSED", "MANUAL_PAUSE"]
+          }
+        },
+        "required": ["decision_status"]
+      },
+      "then": {
+        "properties": {
+          "buy_orders": {"maxItems": 0}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "date": {
+      "type": "string",
+      "format": "date",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "instrumentId": {
+      "type": "string",
+      "pattern": "^[0-9A-Z][0-9A-Z.]{2,31}$"
+    },
+    "nonNegativeDecimal": {
+      "type": "string",
+      "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"
+    },
+    "positiveDecimal": {
+      "type": "string",
+      "pattern": "^(?:0\\.(?:0*[1-9][0-9]*)|[1-9][0-9]*(?:\\.[0-9]+)?)$"
+    },
+    "exposure": {
+      "type": "string",
+      "pattern": "^(?:0|0\\.[0-9]+|1(?:\\.0+)?)$"
+    },
+    "positionWeight": {
+      "type": "string",
+      "pattern": "^0\\.(?:[0-3][0-9]*|40*)$",
+      "not": {"pattern": "^0\\.0+$"}
+    },
+    "actualWeights": {
+      "type": "object",
+      "propertyNames": {"$ref": "#/$defs/instrumentId"},
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^(?:0\\.(?:[0-9]*[1-9][0-9]*)|1(?:\\.0+)?)$"
+      }
+    },
+    "positiveQuantities": {
+      "type": "object",
+      "propertyNames": {"$ref": "#/$defs/instrumentId"},
+      "additionalProperties": {"type": "integer", "minimum": 1}
+    },
+    "reasons": {
+      "type": "array",
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "baseOrder": {
+      "type": "object",
+      "required": [
+        "instrument_id",
+        "quantity",
+        "reference_price",
+        "target_weight",
+        "maximum_execution_price_deviation",
+        "price_deviation_enforced",
+        "cancel_conditions"
+      ],
+      "properties": {
+        "instrument_id": {"$ref": "#/$defs/instrumentId"},
+        "quantity": {"type": "integer", "minimum": 1},
+        "reference_price": {"$ref": "#/$defs/positiveDecimal"},
+        "target_weight": {"$ref": "#/$defs/exposure"},
+        "maximum_execution_price_deviation": {"$ref": "#/$defs/exposure"},
+        "price_deviation_enforced": {"type": "boolean"},
+        "cancel_conditions": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "buyOrder": {
+      "unevaluatedProperties": false,
+      "allOf": [
+        {"$ref": "#/$defs/baseOrder"},
+        {
+          "type": "object",
+          "required": ["side", "maximum_buy_price"],
+          "properties": {
+            "side": {"const": "BUY"},
+            "price_deviation_enforced": {"const": true},
+            "maximum_buy_price": {"$ref": "#/$defs/positiveDecimal"}
+          }
+        }
+      ]
+    },
+    "sellOrder": {
+      "unevaluatedProperties": false,
+      "allOf": [
+        {"$ref": "#/$defs/baseOrder"},
+        {
+          "type": "object",
+          "required": ["side"],
+          "properties": {
+            "side": {"const": "SELL"},
+            "price_deviation_enforced": {"const": false}
+          }
+        }
+      ]
+    },
+    "holdPosition": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instrument_id", "quantity", "target_quantity", "target_weight", "reason"],
+      "properties": {
+        "instrument_id": {"$ref": "#/$defs/instrumentId"},
+        "quantity": {"type": "integer", "minimum": 1},
+        "target_quantity": {"type": "integer", "minimum": 0},
+        "target_weight": {"$ref": "#/$defs/exposure"},
+        "reason": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

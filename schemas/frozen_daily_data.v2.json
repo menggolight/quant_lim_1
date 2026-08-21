@@ -1,0 +1,120 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/frozen_daily_data.v2.json",
+  "title": "Frozen daily controlled-data envelope v2",
+  "description": "After-close controlled envelope. Account drawdown and Alpha distribution are derived by the pipeline; out-of-universe held references are exit-only. Hashes are not source authentication.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "update_id",
+    "alpha_snapshot_sha256",
+    "non_alpha_exposure_metrics",
+    "instrument_rules",
+    "held_position_references",
+    "source_authentication",
+    "data_update_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "frozen-daily-data.v2"},
+    "update_id": {"type": "string", "minLength": 1, "pattern": "^\\S+$"},
+    "alpha_snapshot_sha256": {"$ref": "#/$defs/sha256"},
+    "non_alpha_exposure_metrics": {
+      "type": "array",
+      "minItems": 4,
+      "maxItems": 4,
+      "items": {"$ref": "#/$defs/metric"}
+    },
+    "instrument_rules": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/instrumentRule"}
+    },
+    "held_position_references": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/heldReference"}
+    },
+    "source_authentication": {
+      "const": "external_controlled_adapters_required_hash_is_not_source_proof"
+    },
+    "data_update_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "metric": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "category",
+        "status",
+        "value",
+        "observation_session",
+        "available_at",
+        "source_snapshot_sha256",
+        "failure_codes"
+      ],
+      "properties": {
+        "category": {
+          "enum": [
+            "CSI800_TOTAL_RETURN_TREND",
+            "MARKET_BREADTH",
+            "REALIZED_VOLATILITY",
+            "MARKET_DRAWDOWN"
+          ]
+        },
+        "status": {"enum": ["OK", "DATA_FAILED"]},
+        "value": {"type": ["number", "null"]},
+        "observation_session": {"type": ["string", "null"], "format": "date"},
+        "available_at": {"type": ["string", "null"], "format": "date-time"},
+        "source_snapshot_sha256": {
+          "oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+        },
+        "failure_codes": {
+          "type": "array",
+          "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        }
+      }
+    },
+    "instrumentRule": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "instrument_id",
+        "name",
+        "instrument_type",
+        "lot_size",
+        "tick_size",
+        "sell_stamp_duty_rate",
+        "t_plus_one"
+      ],
+      "properties": {
+        "instrument_id": {"type": "string", "pattern": "^[0-9A-Z][0-9A-Z.]{2,31}$"},
+        "name": {"type": "string"},
+        "instrument_type": {"type": "string", "minLength": 1},
+        "lot_size": {"type": "integer", "minimum": 1},
+        "tick_size": {"type": "string", "pattern": "^(?:0\\.(?:0*[1-9][0-9]*)|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+        "sell_stamp_duty_rate": {"type": "string", "pattern": "^(?:0|0\\.[0-9]+)$"},
+        "t_plus_one": {"type": "boolean"}
+      }
+    },
+    "heldReference": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "instrument_id",
+        "session_date",
+        "available_at",
+        "close",
+        "source_record_sha256"
+      ],
+      "properties": {
+        "instrument_id": {"type": "string", "pattern": "^[0-9A-Z][0-9A-Z.]{2,31}$"},
+        "session_date": {"type": "string", "format": "date"},
+        "available_at": {"type": "string", "format": "date-time"},
+        "close": {"type": "string", "pattern": "^(?:0\\.(?:0*[1-9][0-9]*)|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+        "source_record_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

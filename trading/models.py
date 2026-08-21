@@ -51,6 +51,32 @@ EMPTY_CASH_INTENT_TYPES = frozenset(
     }
 )
 
+# These sets are part of the Adaptive Exposure V2 execution contract.  Keep
+# them centralized so the planner and the independent Gate cannot silently
+# drift on intent semantics.
+RISK_REDUCTION_INTENT_TYPES = frozenset(
+    {
+        PortfolioIntentType.NO_ALPHA_CASH,
+        PortfolioIntentType.DEFENSIVE_REDUCTION,
+        PortfolioIntentType.RISK_OFF,
+        PortfolioIntentType.ACCOUNT_DRAWDOWN_EXIT,
+    }
+)
+FULL_EXIT_INTENT_TYPES = frozenset(
+    {
+        PortfolioIntentType.NO_ALPHA_CASH,
+        PortfolioIntentType.RISK_OFF,
+        PortfolioIntentType.ACCOUNT_DRAWDOWN_EXIT,
+    }
+)
+NO_BUY_INTENT_TYPES = frozenset(
+    {
+        *RISK_REDUCTION_INTENT_TYPES,
+        PortfolioIntentType.DATA_FAIL_CLOSED,
+        PortfolioIntentType.MANUAL_PAUSE,
+    }
+)
+
 
 class ExecutionMode(str, Enum):
     PAPER = "PAPER"
@@ -377,6 +403,7 @@ class RebalancePlan:
     controlled_calendar_sha256: str = ""
     controlled_session_evidence_sha256: str = ""
     execution_quote_bundle_sha256: str = ""
+    execution_rule_bundle_sha256: str = ""
 
     def __post_init__(self) -> None:
         if not self.decision_id or not self.account_fingerprint:
@@ -402,6 +429,8 @@ class RebalancePlan:
             raise ValueError("previous_controlled_session must be a date")
         if not isinstance(self.execution_quote_bundle_sha256, str):
             raise ValueError("execution_quote_bundle_sha256 must be a string")
+        if not isinstance(self.execution_rule_bundle_sha256, str):
+            raise ValueError("execution_rule_bundle_sha256 must be a string")
         if self.parent_attempt_id is not None and self.parent_attempt_id == self.attempt_id:
             raise ValueError("parent_attempt_id must differ from attempt_id")
         for field_name in ("target_gross_exposure", "feasible_gross_exposure"):

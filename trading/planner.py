@@ -15,6 +15,7 @@ from trading.integrity import (
     controlled_session_evidence_sha256,
     controlled_sessions_are_adjacent,
     execution_quote_bundle_sha256,
+    execution_rule_bundle_sha256,
     is_lower_sha256,
     legacy_client_order_id,
     legacy_rebalance_plan_id,
@@ -24,6 +25,8 @@ from trading.models import (
     ADAPTIVE_EXPOSURE_V2_MAX_POSITIONS,
     ADAPTIVE_EXPOSURE_V2_MAX_POSITION_WEIGHT,
     ADAPTIVE_EXPOSURE_V2_STRATEGY_ID,
+    NO_BUY_INTENT_TYPES,
+    RISK_REDUCTION_INTENT_TYPES,
     AccountSnapshot,
     InstrumentRule,
     MarketQuote,
@@ -40,14 +43,6 @@ from trading.risk import RiskLimits
 
 
 ZERO = Decimal("0")
-_CROSS_SESSION_RETRY_INTENTS = frozenset(
-    {
-        PortfolioIntentType.NO_ALPHA_CASH,
-        PortfolioIntentType.DEFENSIVE_REDUCTION,
-        PortfolioIntentType.RISK_OFF,
-        PortfolioIntentType.ACCOUNT_DRAWDOWN_EXIT,
-    }
-)
 
 
 def _whole_lots(raw_quantity: Decimal, lot_size: int) -> int:
@@ -88,6 +83,7 @@ def _validate_parent_attempt(
         execution_quote_bundle_sha256=(
             parent.execution_quote_bundle_sha256
         ),
+        execution_rule_bundle_sha256=parent.execution_rule_bundle_sha256,
     )
     if parent.plan_id != expected_parent_id:
         raise ValueError("V2 retry parent attempt plan binding is invalid")
@@ -167,6 +163,7 @@ def build_rebalance_plan(
     parent_plan_sha256 = ""
     session_evidence_sha256 = ""
     execution_quotes_sha256 = ""
+    execution_rules_sha256 = ""
     if type(bootstrap) is not bool:
         raise ValueError("bootstrap must be a boolean")
     if portfolio_intent is not None and not isinstance(portfolio_intent, PortfolioIntent):
@@ -183,7 +180,7 @@ def build_rebalance_plan(
         cross_session = execution_session != intent_session
         if (
             cross_session
-            and portfolio_intent.intent_type not in _CROSS_SESSION_RETRY_INTENTS
+            and portfolio_intent.intent_type not in RISK_REDUCTION_INTENT_TYPES
         ):
             raise ValueError(
                 "Ordinary alpha intent must remain in the same execution session"
@@ -239,13 +236,6 @@ def build_rebalance_plan(
                 raise ValueError(
                     "Previous and execution sessions must be strictly adjacent in the controlled calendar payload"
                 )
-            if parent_attempt is None and (
-                portfolio_intent.intent_type
-                is not PortfolioIntentType.ACCOUNT_DRAWDOWN_EXIT
-            ):
-                raise ValueError(
-                    "Cross-session risk reduction requires a parent attempt"
-                )
             if parent_attempt is not None and (
                 _execution_session(
                     parent_attempt.decision_time, portfolio_intent.decision_at
@@ -263,12 +253,9 @@ def build_rebalance_plan(
                 raise ValueError(
                     "Previous controlled session does not match parent attempt session"
                 )
-            if (
-                parent_attempt is None
-                and previous_controlled_session != intent_session
-            ):
+            if parent_attempt is None and previous_controlled_session != intent_session:
                 raise ValueError(
-                    "First drawdown exit must bind the intent controlled session"
+                    "First cross-session execution must bind the intent controlled session"
                 )
             if (
                 not account.snapshot_id
@@ -319,7 +306,7 @@ def build_rebalance_plan(
         target_gross_exposure = sum(
             (Decimal(str(value)) for value in target_weights.values()), ZERO
         )
-    reduction_intent = intent_type in _CROSS_SESSION_RETRY_INTENTS
+    reduction_intent = intent_type in RISK_REDUCTION_INTENT_TYPES
 
     def client_order_id(instrument_id: str, side: Side) -> str:
         if is_v2:
@@ -344,6 +331,7 @@ def build_rebalance_plan(
             raise ValueError(f"Quote mapping key mismatch: {key} != {quote.instrument_id}")
     if is_v2:
         execution_quotes_sha256 = execution_quote_bundle_sha256(quotes)
+        execution_rules_sha256 = execution_rule_bundle_sha256(fees, instruments)
     rejections: list[PlanRejection] = []
     blocked_exit_reasons: list[PlanRejection] = []
     orders: list[OrderIntent] = []
@@ -416,6 +404,18 @@ def build_rebalance_plan(
             current_weight = quote.last * position.quantity / equity
             if target_weight > current_weight:
                 raise ValueError("Defensive reduction cannot increase a position")
+    if intent_type in {
+        PortfolioIntentType.DATA_FAIL_CLOSED,
+        PortfolioIntentType.MANUAL_PAUSE,
+    }:
+        for instrument_id, target_weight in normalized_targets.items():
+            position = account.positions.get(instrument_id)
+            quote = quotes.get(instrument_id)
+            if position is None or quote is None:
+                raise ValueError(f"{intent_type.value} cannot add a new position")
+            current_weight = quote.last * position.quantity / equity
+            if target_weight > current_weight:
+                raise ValueError(f"{intent_type.value} cannot increase a position")
 
     projected_cash = account.cash
     projected_positions = dict(account.positions)
@@ -504,6 +504,18 @@ def build_rebalance_plan(
         )
         orders.append(order)
         projected_cash = money(projected_cash + notional - estimated_fee)
+        if reduction_intent and sellable_quantity < required_quantity:
+            blocked_exit_reasons.append(
+                PlanRejection(
+                    instrument_id,
+                    (
+                        "sell_blocked_t_plus_one"
+                        if rule.t_plus_one
+                        else "insufficient_sellable_quantity"
+                    ),
+                    "部分可卖数量已生成卖单，剩余目标减仓数量当前不可卖",
+                )
+            )
         remaining = position.quantity - sellable_quantity
         if remaining:
             projected_positions[instrument_id] = Position(
@@ -545,6 +557,15 @@ def build_rebalance_plan(
 
     buy_candidates.sort(key=lambda item: (item[0], item[1]), reverse=True)
     for delta, instrument_id in buy_candidates:
+        if intent_type in NO_BUY_INTENT_TYPES:
+            rejections.append(
+                PlanRejection(
+                    instrument_id,
+                    "no_buy_intent",
+                    f"{intent_type.value} 不允许增加风险或生成买单",
+                )
+            )
+            continue
         if len(orders) >= limits.max_orders_per_plan:
             rejections.append(PlanRejection(instrument_id, "order_count_limit", "订单数量达到本次上限"))
             continue
@@ -681,6 +702,7 @@ def build_rebalance_plan(
             (order.client_order_id for order in orders),
             session_evidence_sha256,
             execution_quote_bundle_sha256=execution_quotes_sha256,
+            execution_rule_bundle_sha256=execution_rules_sha256,
         )
     else:
         plan_id = legacy_rebalance_plan_id(
@@ -718,6 +740,7 @@ def build_rebalance_plan(
         controlled_calendar_sha256=controlled_calendar_sha256,
         controlled_session_evidence_sha256=session_evidence_sha256,
         execution_quote_bundle_sha256=execution_quotes_sha256,
+        execution_rule_bundle_sha256=execution_rules_sha256,
     )
 
 
@@ -768,6 +791,10 @@ def execution_plan_record(plan: RebalancePlan) -> dict[str, object]:
         raise ValueError(
             "A V2 execution record requires an execution quote bundle SHA-256"
         )
+    if not is_lower_sha256(plan.execution_rule_bundle_sha256):
+        raise ValueError(
+            "A V2 execution record requires an execution rule bundle SHA-256"
+        )
     execution_session = (
         _execution_session(
             plan.decision_time,
@@ -778,7 +805,7 @@ def execution_plan_record(plan: RebalancePlan) -> dict[str, object]:
     )
     risk_reduction_turnover = plan.turnover_ratio - plan.ordinary_turnover_ratio
     return {
-        "schema_version": "portfolio-execution-plan.v1",
+        "schema_version": "portfolio-execution-plan.v2",
         "plan_id": plan.plan_id,
         "strategy_id": plan.strategy_id,
         "intent_id": plan.intent_id,
@@ -798,6 +825,7 @@ def execution_plan_record(plan: RebalancePlan) -> dict[str, object]:
             plan.controlled_session_evidence_sha256 or None
         ),
         "execution_quote_bundle_sha256": plan.execution_quote_bundle_sha256,
+        "execution_rule_bundle_sha256": plan.execution_rule_bundle_sha256,
         "official_trading_calendar_proven": False,
         "execution_session": execution_session.isoformat(),
         "planned_at": plan.decision_time.isoformat(),

@@ -1,0 +1,51 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/frozen_alpha_model.v1.json",
+  "title": "Frozen train-only alpha model v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "model_id", "model_version", "artifact_status", "training_partition",
+    "training_window_start", "training_window_end", "training_data_cutoff_at", "trained_at",
+    "frozen_at", "training_dataset_sha256", "training_code_sha256",
+    "preprocessing_policy_sha256", "model_config_sha256", "financial_submodel",
+    "non_financial_submodel", "model_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "frozen-alpha-model.v1"},
+    "model_id": {"type": "string", "minLength": 1},
+    "model_version": {"type": "string", "minLength": 1},
+    "artifact_status": {"const": "frozen_train_only"},
+    "training_partition": {"const": "train_only"},
+    "training_window_start": {"type": "string", "format": "date"},
+    "training_window_end": {"type": "string", "format": "date"},
+    "training_data_cutoff_at": {"type": "string", "format": "date-time"},
+    "trained_at": {"type": "string", "format": "date-time"},
+    "frozen_at": {"type": "string", "format": "date-time"},
+    "training_dataset_sha256": {"$ref": "#/$defs/sha256"},
+    "training_code_sha256": {"$ref": "#/$defs/sha256"},
+    "preprocessing_policy_sha256": {"$ref": "#/$defs/sha256"},
+    "model_config_sha256": {"$ref": "#/$defs/sha256"},
+    "financial_submodel": {"$ref": "#/$defs/submodel"},
+    "non_financial_submodel": {"$ref": "#/$defs/submodel"},
+    "model_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "submodel": {
+      "type": "object", "additionalProperties": false,
+      "required": ["submodel_id", "feature_ids", "intercept", "coefficients", "centers", "scales"],
+      "properties": {
+        "submodel_id": {"enum": ["financial", "non_financial"]},
+        "feature_ids": {
+          "type": "array", "minItems": 8, "maxItems": 12, "uniqueItems": true,
+          "items": {"type": "string"}
+        },
+        "intercept": {"type": "number"},
+        "coefficients": {"type": "array", "minItems": 8, "maxItems": 12, "items": {"type": "number"}},
+        "centers": {"type": "array", "minItems": 8, "maxItems": 12, "items": {"type": "number"}},
+        "scales": {"type": "array", "minItems": 8, "maxItems": 12, "items": {"type": "number", "exclusiveMinimum": 0}}
+      }
+    }
+  }
+}

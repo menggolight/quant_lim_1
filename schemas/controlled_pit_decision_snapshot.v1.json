@@ -1,0 +1,99 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/controlled_pit_decision_snapshot.v1.json",
+  "title": "Controlled PIT decision snapshot v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "decision_at", "universe_as_of", "universe_available_at",
+    "universe_version", "member_ids", "instruments", "trading_sessions",
+    "benchmark_instrument_id", "benchmark_price_bars",
+    "trading_calendar_receipt_sha256", "universe_receipt_sha256",
+    "financial_data_receipt_sha256", "industry_data_receipt_sha256",
+    "price_data_receipt_sha256", "input_snapshot_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "controlled-pit-decision-snapshot.v1"},
+    "decision_at": {"type": "string", "format": "date-time"},
+    "universe_as_of": {"type": "string", "format": "date"},
+    "universe_available_at": {"type": "string", "format": "date-time"},
+    "universe_version": {"type": "string", "minLength": 1},
+    "member_ids": {
+      "type": "array", "minItems": 1, "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[0-9]{6}\\.(SH|SZ)$"}
+    },
+    "instruments": {"type": "array", "items": {"$ref": "#/$defs/instrument"}},
+    "trading_sessions": {
+      "type": "array", "minItems": 1, "uniqueItems": true,
+      "items": {"type": "string", "format": "date"}
+    },
+    "benchmark_instrument_id": {"type": "string", "minLength": 1},
+    "benchmark_price_bars": {"type": "array", "items": {"$ref": "#/$defs/price_bar"}},
+    "trading_calendar_receipt_sha256": {"$ref": "#/$defs/sha256"},
+    "universe_receipt_sha256": {"$ref": "#/$defs/sha256"},
+    "financial_data_receipt_sha256": {"$ref": "#/$defs/sha256"},
+    "industry_data_receipt_sha256": {"$ref": "#/$defs/sha256"},
+    "price_data_receipt_sha256": {"$ref": "#/$defs/sha256"},
+    "input_snapshot_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "price_bar": {
+      "type": "object", "additionalProperties": false,
+      "required": ["instrument_id", "session_date", "close", "high", "available_at", "source_record_id", "source_record_sha256"],
+      "properties": {
+        "instrument_id": {"type": "string", "minLength": 1},
+        "session_date": {"type": "string", "format": "date"},
+        "close": {"type": "number", "exclusiveMinimum": 0},
+        "high": {"type": "number", "exclusiveMinimum": 0},
+        "available_at": {"type": "string", "format": "date-time"},
+        "source_record_id": {"type": "string", "minLength": 1},
+        "source_record_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "fundamental": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "instrument_id", "period_end", "first_disclosed_at", "source_record_id",
+        "source_record_sha256", "revision_sequence", "flow_basis", "statement_scope",
+        "currency", "roe", "net_profit", "operating_cash_flow", "operating_profit",
+        "gross_profit", "total_assets", "total_liabilities", "revenue"
+      ],
+      "properties": {
+        "instrument_id": {"type": "string", "pattern": "^[0-9]{6}\\.(SH|SZ)$"},
+        "period_end": {"type": "string", "format": "date"},
+        "first_disclosed_at": {"type": "string", "format": "date-time"},
+        "source_record_id": {"type": "string", "minLength": 1},
+        "source_record_sha256": {"$ref": "#/$defs/sha256"},
+        "revision_sequence": {"type": "integer", "minimum": 1},
+        "flow_basis": {"const": "single_quarter"},
+        "statement_scope": {"const": "consolidated"},
+        "currency": {"const": "CNY"},
+        "roe": {"type": ["number", "null"]},
+        "net_profit": {"type": ["number", "null"]},
+        "operating_cash_flow": {"type": ["number", "null"]},
+        "operating_profit": {"type": ["number", "null"]},
+        "gross_profit": {"type": ["number", "null"]},
+        "total_assets": {"type": ["number", "null"]},
+        "total_liabilities": {"type": ["number", "null"]},
+        "revenue": {"type": ["number", "null"]}
+      }
+    },
+    "instrument": {
+      "type": "object", "additionalProperties": false,
+      "required": [
+        "instrument_id", "industry", "industry_is_financial",
+        "constituent_available_at", "industry_available_at", "fundamentals", "price_bars"
+      ],
+      "properties": {
+        "instrument_id": {"type": "string", "pattern": "^[0-9]{6}\\.(SH|SZ)$"},
+        "industry": {"type": ["string", "null"]},
+        "industry_is_financial": {"type": ["boolean", "null"]},
+        "constituent_available_at": {"type": ["string", "null"], "format": "date-time"},
+        "industry_available_at": {"type": ["string", "null"], "format": "date-time"},
+        "fundamentals": {"type": "array", "items": {"$ref": "#/$defs/fundamental"}},
+        "price_bars": {"type": "array", "items": {"$ref": "#/$defs/price_bar"}}
+      }
+    }
+  }
+}

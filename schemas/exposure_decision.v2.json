@@ -1,0 +1,34 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/exposure_decision.v2.json",
+  "title": "Adaptive Exposure V2 exposure decision",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "decision_at", "previous_state", "candidate_state", "state",
+    "target_gross_exposure", "transition_status", "pending_state",
+    "pending_consecutive_sessions", "reason_codes", "input_snapshot_sha256",
+    "policy_sha256", "previous_state_sha256", "state_sha256", "decision_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "exposure-decision.v2"},
+    "decision_at": {"type": "string", "format": "date-time"},
+    "previous_state": {"$ref": "#/$defs/state"},
+    "candidate_state": {"$ref": "#/$defs/state"},
+    "state": {"$ref": "#/$defs/state"},
+    "target_gross_exposure": {"enum": [0, 0.3, 0.6, 1]},
+    "transition_status": {"enum": ["HOLD", "HYSTERESIS_PENDING", "STATE_CHANGED", "IMMEDIATE_RISK_OFF"]},
+    "pending_state": {"anyOf": [{"$ref": "#/$defs/state"}, {"type": "null"}]},
+    "pending_consecutive_sessions": {"type": "integer", "minimum": 0},
+    "reason_codes": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"type": "string", "minLength": 1}},
+    "input_snapshot_sha256": {"$ref": "#/$defs/sha256"},
+    "policy_sha256": {"$ref": "#/$defs/sha256"},
+    "previous_state_sha256": {"$ref": "#/$defs/sha256"},
+    "state_sha256": {"$ref": "#/$defs/sha256"},
+    "decision_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "state": {"enum": ["RISK_OFF", "DEFENSIVE", "NEUTRAL", "RISK_ON"]}
+  }
+}

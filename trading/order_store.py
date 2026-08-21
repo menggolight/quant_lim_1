@@ -424,59 +424,75 @@ class OrderStore:
         details: Mapping[str, Any],
         account: AccountSnapshot,
         mark_bootstrap_used: bool,
+        *,
+        expected_fingerprint: str,
     ) -> None:
         previous = self.status(client_order_id)
-        if previous is not OrderStatus.ACKNOWLEDGED:
+        if previous is not OrderStatus.RISK_APPROVED:
             raise InvalidOrderTransition(
                 f"{client_order_id}: {previous.value} -> {OrderStatus.FILLED.value}"
             )
+        if not is_lower_sha256(expected_fingerprint):
+            raise ValueError("expected_fingerprint must be a lowercase SHA-256")
         timestamp = event_time.isoformat()
         details_json = json.dumps(dict(details), ensure_ascii=False, sort_keys=True)
         cash, positions_json, snapshot_id, as_of, fingerprint = self._account_values(account)
         with self._connection:
-            cursor = self._connection.execute(
-                "UPDATE orders SET status = ?, updated_at = ? WHERE client_order_id = ? AND status = ?",
-                (OrderStatus.FILLED.value, timestamp, client_order_id, previous.value),
-            )
-            if cursor.rowcount != 1:
-                raise RuntimeError(f"Concurrent paper fill detected for {client_order_id}")
-            self._connection.execute(
+            for event_previous, event_status, event_details in (
+                (previous, OrderStatus.SUBMITTING, "{}"),
+                (OrderStatus.SUBMITTING, OrderStatus.ACKNOWLEDGED, "{}"),
+                (OrderStatus.ACKNOWLEDGED, OrderStatus.FILLED, details_json),
+            ):
+                cursor = self._connection.execute(
+                    "UPDATE orders SET status = ?, updated_at = ? "
+                    "WHERE client_order_id = ? AND status = ?",
+                    (
+                        event_status.value,
+                        timestamp,
+                        client_order_id,
+                        event_previous.value,
+                    ),
+                )
+                if cursor.rowcount != 1:
+                    raise RuntimeError(
+                        f"Concurrent paper fill detected for {client_order_id}"
+                    )
+                self._connection.execute(
+                    """
+                    INSERT INTO order_events (
+                        client_order_id, previous_status, status, event_time, details_json
+                    ) VALUES (?, ?, ?, ?, ?)
+                    """,
+                    (
+                        client_order_id,
+                        event_previous.value,
+                        event_status.value,
+                        timestamp,
+                        event_details,
+                    ),
+                )
+            account_cursor = self._connection.execute(
                 """
-                INSERT INTO order_events (
-                    client_order_id, previous_status, status, event_time, details_json
-                ) VALUES (?, ?, ?, ?, ?)
+                UPDATE paper_accounts
+                SET cash = ?, positions_json = ?, snapshot_id = ?, as_of = ?,
+                    fingerprint = ?, updated_at = ?
+                WHERE strategy_id = ? AND fingerprint = ?
                 """,
                 (
-                    client_order_id,
-                    previous.value,
-                    OrderStatus.FILLED.value,
-                    timestamp,
-                    details_json,
-                ),
-            )
-            self._connection.execute(
-                """
-                INSERT INTO paper_accounts (
-                    strategy_id, cash, positions_json, snapshot_id, as_of, fingerprint, updated_at
-                ) VALUES (?, ?, ?, ?, ?, ?, ?)
-                ON CONFLICT(strategy_id) DO UPDATE SET
-                    cash = excluded.cash,
-                    positions_json = excluded.positions_json,
-                    snapshot_id = excluded.snapshot_id,
-                    as_of = excluded.as_of,
-                    fingerprint = excluded.fingerprint,
-                    updated_at = excluded.updated_at
-                """,
-                (
-                    account.strategy_id,
                     cash,
                     positions_json,
                     snapshot_id,
                     as_of,
                     fingerprint,
                     timestamp,
+                    account.strategy_id,
+                    expected_fingerprint,
                 ),
             )
+            if account_cursor.rowcount != 1:
+                raise ConcurrentPaperAccountUpdate(
+                    "Paper account changed before fill commit"
+                )
             if mark_bootstrap_used:
                 self._connection.execute(
                     """

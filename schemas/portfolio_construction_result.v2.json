@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/portfolio_construction_result.v2.json",
+  "title": "Adaptive Exposure V2 portfolio construction result",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "strategy_id", "decision_at", "requested_intent_type", "intent_type",
+    "input_snapshot_sha256", "model_sha256", "constructor_policy_sha256", "constructor_input_sha256",
+    "account_state_sha256", "current_cash", "current_quantities", "current_nav",
+    "current_gross_exposure", "current_stock_weights", "target_gross_exposure", "target_stock_weights",
+    "feasible_gross_exposure", "feasible_stock_weights", "feasible_quantities", "projected_cash",
+    "expected_improvement", "proposed_expected_cost", "expected_cost", "expected_cost_ratio",
+    "required_improvement", "alpha_trade_allowed", "actions", "exclusions", "reason_codes",
+    "manual_execution_required", "automatic_submission", "paper_eligibility", "trade_eligibility",
+    "real_money_list_allowed", "live_supported", "construction_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "portfolio-construction-result.v2"},
+    "strategy_id": {"const": "a-share-small-account-adaptive-exposure-v2"},
+    "decision_at": {"type": "string", "format": "date-time"},
+    "requested_intent_type": {"$ref": "#/$defs/intentType"},
+    "intent_type": {"$ref": "#/$defs/intentType"},
+    "input_snapshot_sha256": {"$ref": "#/$defs/sha256"},
+    "model_sha256": {"$ref": "#/$defs/sha256"},
+    "constructor_policy_sha256": {"$ref": "#/$defs/sha256"},
+    "constructor_input_sha256": {"$ref": "#/$defs/sha256"},
+    "account_state_sha256": {"$ref": "#/$defs/sha256"},
+    "current_cash": {"$ref": "#/$defs/decimal"},
+    "current_quantities": {"$ref": "#/$defs/quantities"},
+    "current_nav": {"$ref": "#/$defs/decimal"},
+    "current_gross_exposure": {"$ref": "#/$defs/decimal"},
+    "current_stock_weights": {"$ref": "#/$defs/weights"},
+    "target_gross_exposure": {"$ref": "#/$defs/decimal"},
+    "target_stock_weights": {"$ref": "#/$defs/weights"},
+    "feasible_gross_exposure": {"$ref": "#/$defs/decimal"},
+    "feasible_stock_weights": {"$ref": "#/$defs/weights"},
+    "feasible_quantities": {"$ref": "#/$defs/quantities"},
+    "projected_cash": {"$ref": "#/$defs/decimal"},
+    "expected_improvement": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
+    "proposed_expected_cost": {"$ref": "#/$defs/decimal"},
+    "expected_cost": {"$ref": "#/$defs/decimal"},
+    "expected_cost_ratio": {"$ref": "#/$defs/decimal"},
+    "required_improvement": {"$ref": "#/$defs/decimal"},
+    "alpha_trade_allowed": {"type": "boolean"},
+    "actions": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/action"}},
+    "exclusions": {"type": "array", "items": {"$ref": "#/$defs/exclusion"}},
+    "reason_codes": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/reason"}},
+    "manual_execution_required": {"const": true},
+    "automatic_submission": {"const": false},
+    "paper_eligibility": {"const": false},
+    "trade_eligibility": {"const": false},
+    "real_money_list_allowed": {"const": false},
+    "live_supported": {"const": false},
+    "construction_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "intent_type": {
+            "enum": [
+              "NO_ALPHA_CASH",
+              "DEFENSIVE_REDUCTION",
+              "RISK_OFF",
+              "ACCOUNT_DRAWDOWN_EXIT"
+            ]
+          }
+        },
+        "required": ["intent_type"]
+      },
+      "then": {
+        "properties": {
+          "actions": {
+            "items": {
+              "properties": {
+                "action": {"enum": ["SELL", "HOLD", "CASH"]}
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "decimal": {"type": "string", "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
+    "instrument": {"type": "string", "pattern": "^[0-9A-Z][0-9A-Z.]{2,31}$"},
+    "reason": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+    "intentType": {"enum": ["ALPHA_REBALANCE", "NO_ALPHA_CASH", "DEFENSIVE_REDUCTION", "RISK_OFF", "ACCOUNT_DRAWDOWN_EXIT"]},
+    "quantities": {"type": "object", "propertyNames": {"$ref": "#/$defs/instrument"}, "additionalProperties": {"type": "integer", "minimum": 0}},
+    "weights": {"type": "object", "maxProperties": 3, "propertyNames": {"$ref": "#/$defs/instrument"}, "additionalProperties": {"$ref": "#/$defs/decimal"}},
+    "action": {
+      "type": "object", "additionalProperties": false,
+      "required": ["action", "instrument_id", "order_quantity", "whole_lots", "odd_lot_quantity", "current_quantity", "target_quantity", "lot_size", "reference_price", "target_weight", "feasible_weight", "estimated_cost", "reason_codes"],
+      "properties": {
+        "action": {"enum": ["BUY", "SELL", "HOLD", "CASH"]},
+        "instrument_id": {"anyOf": [{"$ref": "#/$defs/instrument"}, {"type": "null"}]},
+        "order_quantity": {"type": "integer", "minimum": 0},
+        "whole_lots": {"type": "integer", "minimum": 0},
+        "odd_lot_quantity": {"type": "integer", "minimum": 0},
+        "current_quantity": {"type": "integer", "minimum": 0},
+        "target_quantity": {"type": "integer", "minimum": 0},
+        "lot_size": {"anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]},
+        "reference_price": {"$ref": "#/$defs/decimal"},
+        "target_weight": {"$ref": "#/$defs/decimal"},
+        "feasible_weight": {"$ref": "#/$defs/decimal"},
+        "estimated_cost": {"$ref": "#/$defs/decimal"},
+        "reason_codes": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/reason"}}
+      }
+    },
+    "exclusion": {
+      "type": "object", "additionalProperties": false,
+      "required": ["instrument_id", "codes"],
+      "properties": {"instrument_id": {"$ref": "#/$defs/instrument"}, "codes": {"type": "array", "minItems": 1, "uniqueItems": true, "items": {"$ref": "#/$defs/reason"}}}
+    }
+  }
+}

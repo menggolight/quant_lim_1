@@ -8,7 +8,14 @@ from datetime import date, timezone
 from decimal import Decimal
 from typing import Any, Iterable, Mapping
 
-from trading.models import AccountSnapshot, MarketQuote, RebalancePlan, Side
+from trading.costs import FeeSchedule
+from trading.models import (
+    AccountSnapshot,
+    InstrumentRule,
+    MarketQuote,
+    RebalancePlan,
+    Side,
+)
 
 
 def _digest(payload: dict[str, Any]) -> str:
@@ -25,6 +32,12 @@ def is_lower_sha256(value: object) -> bool:
     return isinstance(value, str) and len(value) == 64 and all(
         character in "0123456789abcdef" for character in value
     )
+
+
+def _canonical_decimal(value: Decimal) -> str:
+    if value == 0:
+        return "0"
+    return format(value.normalize(), "f")
 
 
 def canonical_controlled_calendar_sha256(
@@ -108,17 +121,12 @@ def execution_quote_bundle_sha256(
         ):
             raise ValueError("execution quote bundle flags must be booleans")
 
-        def canonical_decimal(value: Decimal) -> str:
-            if value == 0:
-                return "0"
-            return format(value.normalize(), "f")
-
         records.append(
             {
                 "instrument_id": instrument_id,
-                "bid": canonical_decimal(quote.bid),
-                "ask": canonical_decimal(quote.ask),
-                "last": canonical_decimal(quote.last),
+                "bid": _canonical_decimal(quote.bid),
+                "ask": _canonical_decimal(quote.ask),
+                "last": _canonical_decimal(quote.last),
                 "as_of": quote.as_of.astimezone(timezone.utc).isoformat(),
                 "suspended": quote.suspended,
                 "buy_blocked": quote.buy_blocked,
@@ -129,6 +137,76 @@ def execution_quote_bundle_sha256(
         {
             "scope": "execution-quote-bundle.v1",
             "quotes": records,
+        }
+    )
+
+
+def execution_rule_bundle_sha256(
+    fees: FeeSchedule,
+    instruments: Mapping[str, InstrumentRule],
+) -> str:
+    """Hash the exact fee and instrument-rule bundle used for execution.
+
+    The bundle deliberately includes every supplied ``InstrumentRule`` and a
+    versioned whole-lot policy.  Planner, Gate, and PaperBroker must receive the
+    same canonical bundle; a matching digest proves content identity only, not
+    that the metadata came from an official registry.
+    """
+
+    if not isinstance(fees, FeeSchedule):
+        raise ValueError("execution rule bundle requires a FeeSchedule")
+    if any(
+        not isinstance(value, Decimal) or not value.is_finite()
+        for value in (
+            fees.commission_rate,
+            fees.minimum_commission,
+            fees.exchange_fee_rate,
+        )
+    ):
+        raise ValueError("execution rule bundle fee values must be Decimal")
+    if not isinstance(instruments, Mapping):
+        raise ValueError("execution rule bundle instruments must be a mapping")
+    records: list[dict[str, object]] = []
+    for instrument_id, instrument in sorted(instruments.items(), key=lambda item: item[0]):
+        if (
+            not isinstance(instrument_id, str)
+            or not isinstance(instrument, InstrumentRule)
+            or instrument.instrument_id != instrument_id
+            or not isinstance(instrument.name, str)
+            or not isinstance(instrument.instrument_type, str)
+            or type(instrument.lot_size) is not int
+            or not isinstance(instrument.tick_size, Decimal)
+            or not isinstance(instrument.sell_stamp_duty_rate, Decimal)
+            or not instrument.tick_size.is_finite()
+            or not instrument.sell_stamp_duty_rate.is_finite()
+            or type(instrument.t_plus_one) is not bool
+        ):
+            raise ValueError("execution rule bundle mapping is invalid")
+        records.append(
+            {
+                "instrument_id": instrument_id,
+                "name": instrument.name,
+                "instrument_type": instrument.instrument_type,
+                "lot_size": instrument.lot_size,
+                "tick_size": _canonical_decimal(instrument.tick_size),
+                "sell_stamp_duty_rate": _canonical_decimal(
+                    instrument.sell_stamp_duty_rate
+                ),
+                "t_plus_one": instrument.t_plus_one,
+            }
+        )
+    return _digest(
+        {
+            "scope": "execution-rule-bundle.v1",
+            "fee_schedule": {
+                "commission_rate": _canonical_decimal(fees.commission_rate),
+                "minimum_commission": _canonical_decimal(
+                    fees.minimum_commission
+                ),
+                "exchange_fee_rate": _canonical_decimal(fees.exchange_fee_rate),
+            },
+            "whole_lot_policy": "floor_to_instrument_lot.v1",
+            "instrument_rules": records,
         }
     )
 
@@ -180,6 +258,7 @@ def adaptive_v2_rebalance_plan_id(
     client_order_ids: Iterable[str],
     controlled_session_evidence_sha256: str = "",
     execution_quote_bundle_sha256: str = "",
+    execution_rule_bundle_sha256: str = "",
 ) -> str:
     return _short_pipe_digest(
         (
@@ -191,6 +270,7 @@ def adaptive_v2_rebalance_plan_id(
             parent_plan_sha256,
             controlled_session_evidence_sha256,
             execution_quote_bundle_sha256,
+            execution_rule_bundle_sha256,
             bound_account_sha256,
             *client_order_ids,
         )
@@ -241,8 +321,7 @@ def account_fingerprint(account: AccountSnapshot) -> str:
 
 
 def plan_fingerprint(plan: RebalancePlan) -> str:
-    return _digest(
-        {
+    payload: dict[str, Any] = {
             "plan_id": plan.plan_id,
             "decision_id": plan.decision_id,
             "account_fingerprint": plan.account_fingerprint,
@@ -307,4 +386,8 @@ def plan_fingerprint(plan: RebalancePlan) -> str:
                 else None
             ),
         }
-    )
+    if plan.execution_rule_bundle_sha256:
+        payload["execution_rule_bundle_sha256"] = (
+            plan.execution_rule_bundle_sha256
+        )
+    return _digest(payload)

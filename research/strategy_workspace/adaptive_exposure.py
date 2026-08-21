@@ -20,10 +20,10 @@ from .contracts import canonical_sha256
 DEFAULT_ADAPTIVE_EXPOSURE_POLICY_PATH = Path(
     "configs/strategy_adaptive_exposure.v2.json"
 )
-ADAPTIVE_EXPOSURE_SCHEMA_VERSION = "strategy-adaptive-exposure-policy.v1"
+ADAPTIVE_EXPOSURE_SCHEMA_VERSION = "strategy-adaptive-exposure-policy.v2"
 ADAPTIVE_EXPOSURE_STRATEGY_ID = "a-share-small-account-adaptive-exposure-v2"
 FROZEN_ADAPTIVE_EXPOSURE_POLICY_SHA256 = (
-    "bbfb4bf60c92129ca56d0e5473d1ab433ae379ad145444a336f96ef88bc195c1"
+    "4e66ae5c769c5151c7592ad9accf637f84132bffdba5cc85d0fef87ee351f9a4"
 )
 
 EXPECTED_EXPOSURE_STATES = {

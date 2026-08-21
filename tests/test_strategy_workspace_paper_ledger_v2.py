@@ -18,6 +18,9 @@ from research.strategy_workspace.paper_ledger_v2 import (
     ADAPTIVE_POLICY_SCHEMA_VERSION,
     ADAPTIVE_STRATEGY_ID,
     PAPER_LEDGER_V2_VERSION,
+    CanonicalExecutionCostBundleV1,
+    ControlledCloseMarkBundleV1,
+    PaperCloseExecutionEvidenceV1,
     PaperDailySessionDraftV2,
     PaperExecutionAttemptV2,
     PaperLedgerV2Error,
@@ -26,11 +29,30 @@ from research.strategy_workspace.paper_ledger_v2 import (
     create_or_verify_paper_ledger_v2,
     verify_paper_ledger_v2,
 )
-from trading.models import PortfolioIntent, PortfolioIntentType
+from trading.costs import FeeSchedule
+from trading.models import InstrumentRule, PortfolioIntent, PortfolioIntentType
 
 
 CST = timezone(timedelta(hours=8))
 POLICY_SHA256 = FROZEN_ADAPTIVE_EXPOSURE_POLICY_SHA256
+FEES = FeeSchedule(
+    commission_rate=Decimal("0.00018"),
+    minimum_commission=Decimal("5"),
+    exchange_fee_rate=Decimal("0.00001"),
+)
+RULES = {
+    instrument_id: InstrumentRule(
+        instrument_id=instrument_id,
+        name=instrument_id,
+        instrument_type="stock",
+        lot_size=100,
+        tick_size=Decimal("0.01"),
+        sell_stamp_duty_rate=Decimal("0.0005"),
+        t_plus_one=True,
+    )
+    for instrument_id in ("600000.SH", "600001.SH")
+}
+COST_BUNDLE = CanonicalExecutionCostBundleV1(FEES, RULES)
 
 
 def at(day: date, hour: int, minute: int) -> datetime:
@@ -92,6 +114,11 @@ def attempt(
         evidence_sha256=sha256(
             f"evidence:{attempt_id}:{instrument_id}".encode("utf-8")
         ).hexdigest(),
+        execution_cost_bundle_sha256=COST_BUNDLE.cost_bundle_sha256,
+        commission_rate=FEES.commission_rate,
+        minimum_commission=FEES.minimum_commission,
+        sell_tax_rate=RULES[instrument_id].sell_stamp_duty_rate,
+        transfer_fee_rate=FEES.exchange_fee_rate,
         blocked_reason=blocked_reason,
     )
 
@@ -119,14 +146,46 @@ def draft(
     closing_intent: PortfolioIntent | None = None,
     attempts: tuple[PaperExecutionAttemptV2, ...] = (),
     positions: tuple[PaperPositionMarkV2, ...] = (),
+    cost_bundle: CanonicalExecutionCostBundleV1 = COST_BUNDLE,
 ) -> PaperDailySessionDraftV2:
+    receipt = sha256(f"close-receipt:{day}".encode("utf-8")).hexdigest()
+    close_bundle = ControlledCloseMarkBundleV1.from_close_prices(
+        session_date=day,
+        observed_at=at(day, 15, 0),
+        available_at=at(day, 15, 10),
+        source="controlled-test-close",
+        source_receipt_sha256=receipt,
+        position_closes={
+            item.instrument_id: (item.quantity, item.close_price)
+            for item in positions
+        },
+    )
+    execution_evidence = PaperCloseExecutionEvidenceV1(
+        signal_id=f"signal:{day}",
+        signal_sha256=sha256(f"signal:{day}".encode("utf-8")).hexdigest(),
+        consumption_sha256=sha256(
+            f"consumption:{day}".encode("utf-8")
+        ).hexdigest(),
+        fill_bundle_sha256=sha256(
+            f"fill-bundle:{day}".encode("utf-8")
+        ).hexdigest(),
+        frozen_execution_rule_bundle_sha256=(
+            cost_bundle.execution_rule_bundle_sha256
+        ),
+        review_execution_rule_bundle_sha256=(
+            cost_bundle.execution_rule_bundle_sha256
+        ),
+        execution_cost_bundle_sha256=cost_bundle.cost_bundle_sha256,
+        execution_intent_sha256=execution_intent.intent_sha256,
+    )
     return PaperDailySessionDraftV2(
         trading_date=day,
         execution_intent=execution_intent,
         closing_intent=closing_intent or execution_intent,
         attempts=attempts,
-        positions=positions,
-        mark_bundle_sha256=sha256(f"marks:{day}".encode("utf-8")).hexdigest(),
+        execution_cost_bundle=cost_bundle,
+        close_mark_bundle=close_bundle,
+        execution_evidence=execution_evidence,
     )
 
 
@@ -206,6 +265,10 @@ class PaperLedgerV2Tests(unittest.TestCase):
 
     def test_header_binds_strategy_policy_calendar_and_external_schema(self) -> None:
         calendar = (date(2026, 8, 24), date(2026, 8, 25))
+        self.assertEqual(
+            ADAPTIVE_POLICY_SCHEMA_VERSION,
+            "strategy-adaptive-exposure-policy.v2",
+        )
         with tempfile.TemporaryDirectory() as folder:
             path = Path(folder) / "paper-v2.jsonl"
             self.create(path, calendar, at(date(2026, 8, 21), 16, 0))
@@ -230,6 +293,17 @@ class PaperLedgerV2Tests(unittest.TestCase):
                         policy_sha256="e" * 64,
                         controlled_trading_dates=calendar,
                     )
+            with self.assertRaisesRegex(
+                PaperLedgerV2Error,
+                "policy_schema_version must remain",
+            ):
+                create_or_verify_paper_ledger_v2(
+                    Path(folder) / "old-policy-paper-v2.jsonl",
+                    strategy_id=ADAPTIVE_STRATEGY_ID,
+                    policy_schema_version="strategy-adaptive-exposure-policy.v1",
+                    policy_sha256=POLICY_SHA256,
+                    controlled_trading_dates=calendar,
+                )
 
         schema_path = (
             Path(__file__).resolve().parents[1]
@@ -243,9 +317,18 @@ class PaperLedgerV2Tests(unittest.TestCase):
             schema["$defs"]["headerContent"]["properties"]["schema_version"]["const"],
             PAPER_LEDGER_V2_VERSION,
         )
+        self.assertEqual(
+            schema["$defs"]["headerContent"]["properties"][
+                "policy_schema_version"
+            ]["const"],
+            ADAPTIVE_POLICY_SCHEMA_VERSION,
+        )
         daily_contract = schema["$defs"]["dailySessionContent"]
         self.assertIn("execution_intent", daily_contract["required"])
         self.assertIn("closing_intent", daily_contract["required"])
+        self.assertIn("execution_cost_bundle", daily_contract["required"])
+        self.assertIn("close_mark_bundle", daily_contract["required"])
+        self.assertIn("execution_evidence", daily_contract["required"])
         self.assertNotIn("active_intent", daily_contract["properties"])
 
     def test_real_fills_recompute_cash_cost_nav_and_three_exposures(self) -> None:
@@ -290,6 +373,10 @@ class PaperLedgerV2Tests(unittest.TestCase):
                 Decimal(session["realized_gross_exposure"]), expected_realized
             )
             self.assertEqual(
+                session["feasible_gross_exposure"],
+                "0.30000000",
+            )
+            self.assertNotEqual(
                 session["feasible_gross_exposure"],
                 session["realized_gross_exposure"],
             )
@@ -751,6 +838,154 @@ class PaperLedgerV2Tests(unittest.TestCase):
                     ),
                     at(day, 15, 30),
                 )
+
+    def test_costs_are_recomputed_from_bound_bundle_not_module_constants(self) -> None:
+        day = date(2026, 9, 20)
+        alpha = intent(
+            "bound-cost-alpha",
+            day - timedelta(days=1),
+            PortfolioIntentType.ALPHA_REBALANCE,
+            "0.30",
+            {"600000.SH": Decimal("0.30")},
+        )
+        alternate_fees = FeeSchedule(
+            commission_rate=Decimal("0.01"),
+            minimum_commission=Decimal("0"),
+            exchange_fee_rate=Decimal("0.00001"),
+        )
+        alternate_bundle = CanonicalExecutionCostBundleV1(
+            alternate_fees,
+            RULES,
+        )
+        buy = replace(
+            attempt(
+                "alternate-cost-buy",
+                alpha,
+                day,
+                side="BUY",
+                requested=300,
+                filled=300,
+                status="FILLED",
+                reference_open="10",
+                fill_price="10.01",
+            ),
+            execution_cost_bundle_sha256=alternate_bundle.cost_bundle_sha256,
+            commission_rate=alternate_fees.commission_rate,
+            minimum_commission=alternate_fees.minimum_commission,
+            transfer_fee_rate=alternate_fees.exchange_fee_rate,
+        )
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "paper-v2.jsonl"
+            self.create(path, (day,), at(day - timedelta(days=1), 16, 0))
+            session = self.append(
+                path,
+                draft(
+                    day,
+                    alpha,
+                    attempts=(buy,),
+                    positions=(mark(300, "10"),),
+                    cost_bundle=alternate_bundle,
+                ),
+                at(day, 15, 30),
+            ).daily_sessions[-1]
+        self.assertEqual(session["attempts"][0]["commission"], "30.03")
+        self.assertEqual(session["session_transaction_cost"], "33.06")
+        self.assertEqual(
+            session["execution_cost_bundle"]["fee_schedule"]["commission_rate"],
+            "0.01",
+        )
+
+    def test_attempt_rate_drift_from_bound_cost_bundle_is_rejected(self) -> None:
+        day = date(2026, 9, 20)
+        alpha = intent(
+            "rate-drift-alpha",
+            day - timedelta(days=1),
+            PortfolioIntentType.ALPHA_REBALANCE,
+            "0.30",
+            {"600000.SH": Decimal("0.30")},
+        )
+        buy = replace(
+            attempt(
+                "rate-drift-buy",
+                alpha,
+                day,
+                side="BUY",
+                requested=300,
+                filled=300,
+                status="FILLED",
+                reference_open="10",
+                fill_price="10.01",
+            ),
+            commission_rate=Decimal("0"),
+        )
+        with self.assertRaisesRegex(PaperLedgerV2Error, "fee rates differ"):
+            draft(
+                day,
+                alpha,
+                attempts=(buy,),
+                positions=(mark(300, "10"),),
+            )
+
+    def test_sell_cost_includes_commission_tax_transfer_and_slippage(self) -> None:
+        day = date(2026, 9, 20)
+        exit_intent = intent(
+            "complete-sell-cost",
+            day - timedelta(days=1),
+            PortfolioIntentType.RISK_OFF,
+            "0",
+        )
+        sell = attempt(
+            "complete-sell-cost-attempt",
+            exit_intent,
+            day,
+            side="SELL",
+            requested=300,
+            filled=300,
+            status="FILLED",
+            reference_open="10",
+            fill_price="9.99",
+        )
+        COST_BUNDLE.validate_attempt(sell)
+        self.assertEqual(sell.commission, Decimal("5.00"))
+        self.assertEqual(sell.sell_tax, Decimal("1.50"))
+        self.assertEqual(sell.transfer_fee, Decimal("0.03"))
+        self.assertEqual(sell.slippage_cost, Decimal("3.00"))
+        self.assertEqual(sell.total_cost, Decimal("9.53"))
+
+    def test_close_marks_require_receipt_bound_prices_and_timely_availability(self) -> None:
+        day = date(2026, 9, 20)
+        receipt = sha256(b"controlled-close-receipt").hexdigest()
+        with self.assertRaisesRegex(PaperLedgerV2Error, "does not bind the close receipt"):
+            ControlledCloseMarkBundleV1(
+                session_date=day,
+                observed_at=at(day, 15, 0),
+                available_at=at(day, 15, 10),
+                source="controlled-test-close",
+                source_receipt_sha256=receipt,
+                positions=(mark(100, "10"),),
+            )
+
+        alpha = intent(
+            "late-close-alpha",
+            day - timedelta(days=1),
+            PortfolioIntentType.NO_ALPHA_CASH,
+            "0",
+        )
+        late_bundle = ControlledCloseMarkBundleV1.from_close_prices(
+            session_date=day,
+            observed_at=at(day, 15, 0),
+            available_at=at(day, 15, 40),
+            source="controlled-test-close",
+            source_receipt_sha256=receipt,
+            position_closes={},
+        )
+        normal = draft(day, alpha)
+        late_draft = replace(normal, close_mark_bundle=late_bundle)
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "paper-v2.jsonl"
+            self.create(path, (day,), at(day - timedelta(days=1), 16, 0))
+            with self.assertRaisesRegex(PaperLedgerV2Error, "unavailable"):
+                self.append(path, late_draft, at(day, 15, 30))
 
     def test_rehashed_zero_exposure_claim_is_rejected_by_semantic_replay(self) -> None:
         day = date(2026, 9, 21)

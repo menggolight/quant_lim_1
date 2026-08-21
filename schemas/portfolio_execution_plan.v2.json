@@ -1,0 +1,339 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/portfolio_execution_plan.v2.json",
+  "title": "Adaptive exposure portfolio execution plan v2",
+  "description": "Intent-bound execution plan and reconciliation envelope. Feasible and realized exposure must be computed from controlled account, quote, lot, fee, and fill evidence rather than trusted caller assertions.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "plan_id",
+    "strategy_id",
+    "intent_id",
+    "intent_type",
+    "intent_sha256",
+    "execution_quote_bundle_sha256",
+    "execution_rule_bundle_sha256",
+    "attempt_id",
+    "parent_attempt_id",
+    "previous_controlled_session",
+    "controlled_calendar_sha256",
+    "controlled_session_evidence_sha256",
+    "official_trading_calendar_proven",
+    "execution_session",
+    "planned_at",
+    "account_snapshot_sha256",
+    "plan_status",
+    "target_gross_exposure",
+    "feasible_gross_exposure",
+    "realized_gross_exposure",
+    "projected_cash",
+    "realized_cash",
+    "orders",
+    "blocked_exit_reasons",
+    "fatal_rejections",
+    "ordinary_turnover_ratio",
+    "risk_reduction_turnover_ratio",
+    "ordinary_turnover_limit",
+    "risk_reduction_exemption_used",
+    "estimated_total_cost",
+    "realized_total_cost",
+    "plan_sha256",
+    "live_supported"
+  ],
+  "properties": {
+    "schema_version": {"const": "portfolio-execution-plan.v2"},
+    "plan_id": {"$ref": "#/$defs/identifier"},
+    "strategy_id": {"const": "a-share-small-account-adaptive-exposure-v2"},
+    "intent_id": {"$ref": "#/$defs/identifier"},
+    "intent_type": {"$ref": "#/$defs/intentType"},
+    "intent_sha256": {"$ref": "#/$defs/sha256"},
+    "execution_quote_bundle_sha256": {
+      "description": "Canonical SHA-256 of the exact normalized quote mapping consumed by the planner; distinct from the intent upstream research market_data_sha256.",
+      "$ref": "#/$defs/sha256"
+    },
+    "execution_rule_bundle_sha256": {
+      "description": "Canonical SHA-256 of the exact FeeSchedule, all InstrumentRule records, and the versioned whole-lot policy consumed by Planner, Gate, and PaperBroker.",
+      "$ref": "#/$defs/sha256"
+    },
+    "attempt_id": {"$ref": "#/$defs/identifier"},
+    "parent_attempt_id": {
+      "oneOf": [
+        {"$ref": "#/$defs/identifier"},
+        {"type": "null"}
+      ]
+    },
+    "previous_controlled_session": {
+      "oneOf": [
+        {"$ref": "#/$defs/date"},
+        {"type": "null"}
+      ]
+    },
+    "controlled_calendar_sha256": {
+      "oneOf": [
+        {"$ref": "#/$defs/sha256"},
+        {"type": "null"}
+      ]
+    },
+    "controlled_session_evidence_sha256": {
+      "oneOf": [
+        {"$ref": "#/$defs/sha256"},
+        {"type": "null"}
+      ]
+    },
+    "official_trading_calendar_proven": {
+      "description": "Internal session-chain evidence never proves an official exchange calendar.",
+      "const": false
+    },
+    "execution_session": {"$ref": "#/$defs/date"},
+    "planned_at": {"$ref": "#/$defs/dateTime"},
+    "account_snapshot_sha256": {"$ref": "#/$defs/sha256"},
+    "plan_status": {
+      "enum": ["PLANNED", "PARTIALLY_EXECUTED", "EXECUTED", "BLOCKED"]
+    },
+    "target_gross_exposure": {"$ref": "#/$defs/exposure"},
+    "feasible_gross_exposure": {"$ref": "#/$defs/exposure"},
+    "realized_gross_exposure": {
+      "oneOf": [
+        {"$ref": "#/$defs/exposure"},
+        {"type": "null"}
+      ]
+    },
+    "projected_cash": {"$ref": "#/$defs/nonNegativeDecimal"},
+    "realized_cash": {
+      "oneOf": [
+        {"$ref": "#/$defs/nonNegativeDecimal"},
+        {"type": "null"}
+      ]
+    },
+    "orders": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/order"}
+    },
+    "blocked_exit_reasons": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/blockedExit"}
+    },
+    "fatal_rejections": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/rejection"}
+    },
+    "ordinary_turnover_ratio": {"$ref": "#/$defs/nonNegativeDecimal"},
+    "risk_reduction_turnover_ratio": {"$ref": "#/$defs/nonNegativeDecimal"},
+    "ordinary_turnover_limit": {"$ref": "#/$defs/nonNegativeDecimal"},
+    "risk_reduction_exemption_used": {"type": "boolean"},
+    "estimated_total_cost": {"$ref": "#/$defs/nonNegativeDecimal"},
+    "realized_total_cost": {
+      "oneOf": [
+        {"$ref": "#/$defs/nonNegativeDecimal"},
+        {"type": "null"}
+      ]
+    },
+    "plan_sha256": {"$ref": "#/$defs/sha256"},
+    "live_supported": {"const": false}
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "intent_type": {
+            "enum": ["NO_ALPHA_CASH", "RISK_OFF", "ACCOUNT_DRAWDOWN_EXIT"]
+          }
+        },
+        "required": ["intent_type"]
+      },
+      "then": {
+        "properties": {
+          "target_gross_exposure": {"enum": ["0", "0.0", "0.00"]},
+          "orders": {
+            "items": {
+              "allOf": [
+                {"$ref": "#/$defs/order"},
+                {
+                  "properties": {
+                    "side": {"const": "SELL"},
+                    "risk_class": {"enum": ["RISK_REDUCING", "FORCED_EXIT"]}
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "intent_type": {
+            "enum": [
+              "NO_ALPHA_CASH",
+              "DEFENSIVE_REDUCTION",
+              "RISK_OFF",
+              "ACCOUNT_DRAWDOWN_EXIT",
+              "DATA_FAIL_CLOSED",
+              "MANUAL_PAUSE"
+            ]
+          }
+        },
+        "required": ["intent_type"]
+      },
+      "then": {
+        "properties": {
+          "orders": {
+            "items": {
+              "allOf": [
+                {"$ref": "#/$defs/order"},
+                {
+                  "properties": {
+                    "side": {"const": "SELL"},
+                    "risk_class": {
+                      "enum": ["RISK_REDUCING", "FORCED_EXIT"]
+                    }
+                  }
+                }
+              ]
+            }
+          }
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "plan_status": {"enum": ["EXECUTED", "PARTIALLY_EXECUTED"]}
+        },
+        "required": ["plan_status"]
+      },
+      "then": {
+        "properties": {
+          "realized_gross_exposure": {"$ref": "#/$defs/exposure"},
+          "realized_cash": {"$ref": "#/$defs/nonNegativeDecimal"},
+          "realized_total_cost": {"$ref": "#/$defs/nonNegativeDecimal"}
+        }
+      },
+      "else": {
+        "properties": {
+          "realized_gross_exposure": {"type": "null"},
+          "realized_cash": {"type": "null"},
+          "realized_total_cost": {"type": "null"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "sha256": {
+      "type": "string",
+      "pattern": "^[0-9a-f]{64}$"
+    },
+    "date": {
+      "type": "string",
+      "format": "date",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}$"
+    },
+    "dateTime": {
+      "type": "string",
+      "format": "date-time",
+      "pattern": "^[0-9]{4}-[0-9]{2}-[0-9]{2}T[0-9]{2}:[0-9]{2}:[0-9]{2}(?:\\.[0-9]+)?(?:Z|[+-][0-9]{2}:[0-9]{2})$"
+    },
+    "nonNegativeDecimal": {
+      "type": "string",
+      "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"
+    },
+    "exposure": {
+      "type": "string",
+      "pattern": "^(?:0|0\\.[0-9]+|1(?:\\.0+)?)$"
+    },
+    "intentType": {
+      "enum": [
+        "ALPHA_REBALANCE",
+        "NO_ALPHA_CASH",
+        "DEFENSIVE_REDUCTION",
+        "RISK_OFF",
+        "ACCOUNT_DRAWDOWN_EXIT",
+        "DATA_FAIL_CLOSED",
+        "MANUAL_PAUSE"
+      ]
+    },
+    "order": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "client_order_id",
+        "instrument_id",
+        "side",
+        "risk_class",
+        "quantity",
+        "limit_price",
+        "estimated_fee",
+        "status",
+        "unfilled_reason"
+      ],
+      "properties": {
+        "client_order_id": {"$ref": "#/$defs/identifier"},
+        "instrument_id": {
+          "type": "string",
+          "pattern": "^[0-9A-Z][0-9A-Z.]{2,31}$"
+        },
+        "side": {"enum": ["BUY", "SELL"]},
+        "risk_class": {
+          "enum": [
+            "RISK_INCREASING",
+            "RISK_NEUTRAL",
+            "RISK_REDUCING",
+            "FORCED_EXIT"
+          ]
+        },
+        "quantity": {"type": "integer", "minimum": 1},
+        "limit_price": {"$ref": "#/$defs/positiveDecimal"},
+        "estimated_fee": {"$ref": "#/$defs/nonNegativeDecimal"},
+        "status": {
+          "enum": ["PLANNED", "FILLED", "PARTIAL", "UNFILLED", "DUPLICATE"]
+        },
+        "unfilled_reason": {
+          "oneOf": [
+            {"type": "string", "minLength": 1},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "positiveDecimal": {
+      "type": "string",
+      "pattern": "^(?:0\\.(?:0*[1-9][0-9]*)|[1-9][0-9]*(?:\\.[0-9]+)?)$"
+    },
+    "blockedExit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instrument_id", "code", "message"],
+      "properties": {
+        "instrument_id": {
+          "type": "string",
+          "pattern": "^[0-9A-Z][0-9A-Z.]{2,31}$"
+        },
+        "code": {
+          "enum": [
+            "sell_blocked_t_plus_one",
+            "sell_blocked_suspended",
+            "sell_blocked_limit_down",
+            "insufficient_sellable_quantity"
+          ]
+        },
+        "message": {"type": "string", "minLength": 1}
+      }
+    },
+    "rejection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["instrument_id", "code", "message"],
+      "properties": {
+        "instrument_id": {"type": "string", "minLength": 1},
+        "code": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+        "message": {"type": "string", "minLength": 1}
+      }
+    }
+  }
+}

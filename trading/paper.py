@@ -8,8 +8,14 @@ from datetime import datetime, timezone
 from typing import Mapping
 
 from trading.costs import FeeSchedule, money
-from trading.integrity import account_fingerprint, plan_fingerprint
+from trading.integrity import (
+    account_fingerprint,
+    execution_rule_bundle_sha256,
+    is_lower_sha256,
+    plan_fingerprint,
+)
 from trading.models import (
+    ADAPTIVE_EXPOSURE_V2_STRATEGY_ID,
     AccountSnapshot,
     ExecutionMode,
     InstrumentRule,
@@ -69,6 +75,21 @@ class PaperBroker:
     ) -> PaperExecutionResult:
         if plan.strategy_id != self._account.strategy_id:
             raise ValueError("Plan strategy_id does not match paper account")
+        is_v2 = (
+            plan.bound_portfolio_intent is not None
+            or plan.strategy_id == ADAPTIVE_EXPOSURE_V2_STRATEGY_ID
+        )
+        if is_v2:
+            broker_rule_bundle_sha256 = execution_rule_bundle_sha256(
+                self._fees,
+                self._instruments,
+            )
+            if (
+                not is_lower_sha256(plan.execution_rule_bundle_sha256)
+                or plan.execution_rule_bundle_sha256
+                != broker_rule_bundle_sha256
+            ):
+                raise ValueError("Paper execution rule bundle differs from the plan")
         known_statuses: list[OrderStatus] = []
         all_known = True
         for order in plan.orders:
@@ -95,6 +116,11 @@ class PaperBroker:
             raise ValueError("Execution approval is not currently valid")
         if approval.plan_fingerprint != plan_fingerprint(plan):
             raise ValueError("Execution approval does not match the plan")
+        if is_v2 and (
+            approval.execution_rule_bundle_sha256
+            != plan.execution_rule_bundle_sha256
+        ):
+            raise ValueError("Execution approval does not bind the rule bundle")
         current_account_fingerprint = account_fingerprint(self._account)
         if approval.account_fingerprint != current_account_fingerprint:
             raise ValueError("Execution approval does not match the current account")
@@ -126,10 +152,16 @@ class PaperBroker:
             raise ValueError("Persisted daily order-count limit would be exceeded")
         if plan.bootstrap and self._order_store.bootstrap_used(plan.strategy_id):
             raise ValueError("Bootstrap allowance has already been used")
+        persisted = self._order_store.load_paper_account(self._account.strategy_id)
+        if account_fingerprint(persisted) != account_fingerprint(self._account):
+            raise ValueError("Persisted Paper account changed before execution")
+
+        # Full-batch preflight: no order may enter SUBMITTING until every
+        # instrument rule, lot/tick, fee, cash, and sellability check succeeds.
         cash = self._account.cash
         positions = dict(self._account.positions)
+        prepared: list[tuple[OrderIntent, Decimal, AccountSnapshot]] = []
         fills: list[PaperFill] = []
-
         for order in plan.orders:
             stored_status = self._order_store.status(order.client_order_id)
             if stored_status is OrderStatus.FILLED:
@@ -137,13 +169,15 @@ class PaperBroker:
                 continue
             if stored_status in FINAL_STATUSES:
                 raise ValueError(f"Paper order is terminal but not filled: {stored_status.value}")
-            if stored_status is not None and stored_status is not OrderStatus.PLANNED:
+            if stored_status is not OrderStatus.PLANNED:
                 raise ValueError(f"Paper order requires reconciliation from {stored_status.value}")
-            self._order_store.transition(
-                order.client_order_id, OrderStatus.RISK_APPROVED, execution_time
-            )
-            self._order_store.transition(order.client_order_id, OrderStatus.SUBMITTING, execution_time)
-            rule = self._instruments[order.instrument_id]
+            rule = self._instruments.get(order.instrument_id)
+            if rule is None:
+                raise ValueError("Paper instrument rule is missing")
+            if is_v2 and order.quantity % rule.lot_size:
+                raise ValueError("Paper order quantity violates the bound lot rule")
+            if is_v2 and order.limit_price % rule.tick_size:
+                raise ValueError("Paper order price violates the bound tick rule")
             fee = self._fees.estimate(order.side, order.notional, rule)
             if fee != order.estimated_fee:
                 raise ValueError("Paper fee differs from planned fee")
@@ -172,23 +206,33 @@ class PaperBroker:
                     )
                 else:
                     positions.pop(order.instrument_id, None)
-
             next_account = AccountSnapshot(
                 strategy_id=self._account.strategy_id,
                 cash=money(cash),
-                positions=positions,
+                positions=dict(positions),
                 snapshot_id=f"paper:{plan.plan_id}:{order.client_order_id}",
                 as_of=execution_time,
             )
+            prepared.append((order, fee, next_account))
+        if money(cash) != plan.projected_cash:
+            raise ValueError("Paper full-batch preflight cash differs from plan")
+
+        for order, _, _ in prepared:
             self._order_store.transition(
-                order.client_order_id, OrderStatus.ACKNOWLEDGED, execution_time
+                order.client_order_id,
+                OrderStatus.RISK_APPROVED,
+                execution_time,
             )
+
+        for order, fee, next_account in prepared:
+            expected_fingerprint = account_fingerprint(self._account)
             self._order_store.commit_paper_fill(
                 order.client_order_id,
                 execution_time,
                 details={"paper_fill_price": str(order.limit_price), "paper_fee": str(fee)},
                 account=next_account,
                 mark_bootstrap_used=plan.bootstrap,
+                expected_fingerprint=expected_fingerprint,
             )
             self._account = next_account
             fills.append(self._fill(order, "FILLED"))

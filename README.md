@@ -17,7 +17,7 @@ A股中证800动态PIT股票池
 
 主入口是 `research.strategy_workspace`，完整契约和命令见[策略工作区说明](docs/STRATEGY_WORKSPACE.md)。冻结账户成本为佣金 `0.00018`、单笔最低 `5` 元、卖出税 `0.0005`、双边过户费 `0.00001`、基础单边滑点 10 bps；压力情景为20 bps和双倍佣金。
 
-[自适应仓位 V2](docs/ADAPTIVE_EXPOSURE_V2.md) 是独立、非默认的 P0 安全切片：已经实现显式 `PortfolioIntent`、0%—100%仓位契约、风险退出优先、跨日幂等和日频 Paper 对账，但日历/报价目前只完成内部payload绑定，尚未实现 Alpha/仓位模型、正式样本外回测或受控信号与官方日历/行情接入，也未获得 Paper/交易准入。质量成长 V1 的默认入口、Top2/20%现金规则和既有账本语义保持不变。
+[自适应仓位 V2](docs/ADAPTIVE_EXPOSURE_V2.md) 是独立、非默认的日频信号生产系统：P0.1 七项执行问题已经修复并冻结，Alpha、Exposure、Portfolio Constructor、Next-session Adapter 与 12 阶段 Daily Pipeline 的代码契约已经实现。它每天可产生允许零订单的不可变 BUY/SELL/HOLD/CASH 决策；预期数据/验证失败也生成零订单 `BLOCKED` 日报。紧邻 D+1 的人工复核按 signal 全局CAS只允许一次，账户回撤由已验证账本派生，池外旧持仓保持exit-only覆盖，Paper Ledger使用canonical成本与receipt-bound收盘mark重算完整成本；通知当前仅为本地 outbox。外部受控 PIT、生产官方日历/证券规则/行情 registry、Experiment V3、正式冻结模型和预注册阈值尚未接入，2024—2025 Locked Test 未运行、未解释；`paper_eligibility=false`、`trade_eligibility=false`、`real_money_list_allowed=false`、`live_supported=false`。质量成长 V1 的默认入口、Top2/20%现金规则和既有账本语义保持不变。
 
 当前真实状态是 `blocked_missing_pit_data`，不是“策略已跑完”。2026-08-19 Choice 只读链已真实完成当前800成分、当前一级行业、历史行业日期回显、中证800价格/全收益别名及60只股票价量采集。降级样本完整覆盖2026-02-24至2026-08-18的121个共同交易日，60只均生成六个技术诊断因子；但它使用当前成分与当前行业，不是历史PIT，且相对收益使用价格指数而非正式全收益序列。当前只有单截面，没有排名、历史回测、Paper证书或股票清单。
 
@@ -45,7 +45,7 @@ python -m research.strategy_workspace quality-status `
 | 模块 | 当前边界 |
 |---|---|
 | Strategy Workspace | A股质量成长六因子、Experiment v2、Choice数据门、PIT截面、线性检验、100万元Top Decile/1万元Top2成本账本和append-only Paper账本内核已实现；当前60只非PIT价量诊断已真实运行，正式质量成长PIT数据与正式回测仍未跑，Stage B因 `blocked_missing_controlled_paper_signal_adapter` 和 `blocked_missing_daily_paper_risk_marks` 保持阻塞 |
-| 自适应仓位 V2（非默认） | P0政策、显式现金/退出意图、目标/可实现/实际仓位、内部受控日历下一session回撤退出、逐日重试与独立日频账本已实现；官方日历/行情registry、Alpha、仓位模型、受控实验V3、正式PIT回测和Paper准入均未实现或未通过 |
+| 自适应仓位 V2（非默认） | P0.1执行内核、五模块、不可变日报、本地outbox、紧邻D+1一次性人工复核、人工成交证据与独立日频账本已实现；外部受控PIT、生产官方registry、正式冻结模型/阈值、Experiment V3、Locked Test与Paper准入均未接入或未运行 |
 | 市场数据 V2 | Provider Registry、BaoStock 日线/交易日历/证券基础信息、raw/quarantine/validated、离线回放和结构化探针；真实连通状态以当次探针为准 |
 | 中证行业 Factor Lab V1 | 引擎、Provider、固定 `RM20/RM60/RM120`、预注册 Screen/Confirm、主观假设卡和每周诊断报告已实现；尚无真实统计通过或研究准入结论 |
 | DeepVan 采集 | 整理人工有权读取的可见文本或 OCR 内容，不绕过登录、权限或付费限制 |
@@ -143,7 +143,7 @@ python -m research.broker_report_audit audit `
 ## Paper、Shadow 与 LIVE
 
 - 质量成长 V1 Paper 账本可验证 append-only 哈希链、费用、成交、未成交、持仓和现金重放；当前每决策点的 signal/model/source 哈希仍由调用者提供，且缺日频NAV/回撤盯市，因此准入固定 `blocked_missing_controlled_paper_signal_adapter` 与 `blocked_missing_daily_paper_risk_marks`。
-- 自适应仓位 V2 使用独立日频账本，能对账 NAV、回撤、风险锁定和退出重试，但目前只是 P0 内核，不能反向补足 V1 的 Stage B 证据，也不代表收益回测、券商授权或真实成交。
+- 自适应仓位 V2 使用独立日频账本，能从人工成交和收盘 mark 对账成本后 NAV、回撤、风险锁定和退出重试；五模块与 Daily Pipeline 的实现不能反向补足 V1 的 Stage B 证据，也不代表生产日跑、收益回测、券商授权或真实成交。所有 `paper_eligibility`、`trade_eligibility`、`real_money_list_allowed` 和 LIVE 权限保持关闭。
 - Shadow 只读取并校验本地快照；未认证来源、账户绑定或不完整快照一律拒绝。
 - LIVE 不在仓库能力范围内。枚举即使为兼容保留，所有入口也必须统一拒绝，令牌、白名单和 readiness 均不能解锁。
 
@@ -151,7 +151,7 @@ python -m research.broker_report_audit audit `
 
 - [项目交接状态](docs/STATUS.md)
 - [项目决策记录](docs/DECISIONS.md)
-- [自适应仓位 V2 P0](docs/ADAPTIVE_EXPOSURE_V2.md)
+- [自适应仓位 V2](docs/ADAPTIVE_EXPOSURE_V2.md)
 - [市场数据 V2](docs/MARKET_DATA.md)
 - [中证行业因子挖掘器 V1](docs/FACTOR_LAB.md)
 - [项目架构与数据契约](docs/ARCHITECTURE.md)

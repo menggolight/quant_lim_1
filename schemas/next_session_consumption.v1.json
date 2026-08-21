@@ -1,0 +1,55 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/next_session_consumption.v1.json",
+  "title": "One-shot D+1 manual preflight consumption",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "signal_id", "signal_sha256", "execution_date", "checked_at", "account_fingerprint", "account_state_sha256", "execution_quote_bundle_sha256", "execution_rule_bundle_sha256", "expected_cost", "status", "instructions", "cancel_reasons", "one_shot_consumed", "manual_execution_required", "automatic_submission", "execution_authority", "paper_eligibility", "trade_eligibility", "live_supported", "consumption_sha256"],
+  "properties": {
+    "schema_version": {"const": "next-session-consumption.v1"},
+    "signal_id": {"type": "string", "minLength": 1},
+    "signal_sha256": {"$ref": "#/$defs/sha256"},
+    "execution_date": {"type": "string", "format": "date"},
+    "checked_at": {"type": "string", "format": "date-time"},
+    "account_fingerprint": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "account_state_sha256": {"$ref": "#/$defs/sha256"},
+    "execution_quote_bundle_sha256": {"$ref": "#/$defs/sha256"},
+    "execution_rule_bundle_sha256": {"$ref": "#/$defs/sha256"},
+    "expected_cost": {"$ref": "#/$defs/decimal"},
+    "status": {"enum": ["NO_ORDERS_HOLD_OR_CASH", "READY_FOR_MANUAL_EXECUTION", "PARTIALLY_READY_FOR_MANUAL_EXECUTION", "CANCELED"]},
+    "instructions": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/instruction"}},
+    "cancel_reasons": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/reason"}},
+    "one_shot_consumed": {"const": true},
+    "manual_execution_required": {"const": true},
+    "automatic_submission": {"const": false},
+    "execution_authority": {"const": "none"},
+    "paper_eligibility": {"const": false},
+    "trade_eligibility": {"const": false},
+    "live_supported": {"const": false},
+    "consumption_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "decimal": {"type": "string", "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
+    "reason": {"type": "string", "pattern": "^[a-z][a-z0-9_]{0,63}$"},
+    "instrument": {"type": "string", "pattern": "^[0-9A-Z][0-9A-Z.]{2,31}$"},
+    "instruction": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["action", "instrument_id", "quantity", "execution_lot_size", "frozen_reference_price", "observed_execution_price", "maximum_execution_price_deviation", "observed_price_deviation", "estimated_cost", "status", "cancel_conditions"],
+      "properties": {
+        "action": {"enum": ["BUY", "SELL", "HOLD", "CASH"]},
+        "instrument_id": {"anyOf": [{"$ref": "#/$defs/instrument"}, {"type": "null"}]},
+        "quantity": {"type": "integer", "minimum": 0},
+        "execution_lot_size": {"anyOf": [{"type": "integer", "minimum": 1}, {"type": "null"}]},
+        "frozen_reference_price": {"$ref": "#/$defs/decimal"},
+        "observed_execution_price": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
+        "maximum_execution_price_deviation": {"$ref": "#/$defs/decimal"},
+        "observed_price_deviation": {"anyOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
+        "estimated_cost": {"$ref": "#/$defs/decimal"},
+        "status": {"enum": ["READY_FOR_MANUAL_EXECUTION", "CANCELED", "HOLD", "CASH"]},
+        "cancel_conditions": {"type": "array", "uniqueItems": true, "items": {"$ref": "#/$defs/reason"}}
+      }
+    }
+  }
+}

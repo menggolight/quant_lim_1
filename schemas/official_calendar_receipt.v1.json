@@ -1,0 +1,27 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/official_calendar_receipt.v1.json",
+  "title": "Structured official-calendar receipt",
+  "description": "A self-hashed calendar payload. Hash consistency does not authenticate the source; runtime registry admission is separately required.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "receipt_id", "adapter_id", "adapter_version", "source_id", "source_document_sha256", "issued_at", "available_at", "trading_sessions", "payload_sha256", "trust_statement", "receipt_sha256"],
+  "properties": {
+    "schema_version": {"const": "official-calendar-receipt.v1"},
+    "receipt_id": {"$ref": "#/$defs/identifier"},
+    "adapter_id": {"$ref": "#/$defs/identifier"},
+    "adapter_version": {"$ref": "#/$defs/identifier"},
+    "source_id": {"$ref": "#/$defs/identifier"},
+    "source_document_sha256": {"$ref": "#/$defs/sha256"},
+    "issued_at": {"type": "string", "format": "date-time"},
+    "available_at": {"type": "string", "format": "date-time"},
+    "trading_sessions": {"type": "array", "minItems": 2, "uniqueItems": true, "items": {"type": "string", "format": "date"}},
+    "payload_sha256": {"$ref": "#/$defs/sha256"},
+    "trust_statement": {"const": "hash_consistency_only_registry_controls_source_allowlist"},
+    "receipt_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "identifier": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

@@ -1,0 +1,136 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/manual_fill_bundle.v1.json",
+  "title": "Manual Paper fill evidence bundle v1",
+  "description": "Immutable operator-confirmed evidence. It grants no automatic execution, trading, real-money, or LIVE authority.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "batch_id",
+    "signal_id",
+    "signal_sha256",
+    "consumption_sha256",
+    "frozen_execution_rule_bundle_sha256",
+    "review_execution_rule_bundle_sha256",
+    "execution_cost_bundle_sha256",
+    "intent_id",
+    "intent_sha256",
+    "execution_date",
+    "attempts",
+    "manual_confirmed",
+    "automatic_submission",
+    "live_supported",
+    "fill_bundle_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "manual-fill-bundle.v1"},
+    "batch_id": {"type": "string", "minLength": 1, "pattern": "^\\S+$"},
+    "signal_id": {"type": "string", "minLength": 1},
+    "signal_sha256": {"$ref": "#/$defs/sha256"},
+    "consumption_sha256": {"$ref": "#/$defs/sha256"},
+    "frozen_execution_rule_bundle_sha256": {"$ref": "#/$defs/sha256"},
+    "review_execution_rule_bundle_sha256": {"$ref": "#/$defs/sha256"},
+    "execution_cost_bundle_sha256": {"$ref": "#/$defs/sha256"},
+    "intent_id": {"type": "string", "minLength": 1},
+    "intent_sha256": {"$ref": "#/$defs/sha256"},
+    "execution_date": {"type": "string", "format": "date"},
+    "attempts": {
+      "type": "array",
+      "items": {"$ref": "#/$defs/attempt"}
+    },
+    "manual_confirmed": {"const": true},
+    "automatic_submission": {"const": false},
+    "live_supported": {"const": false},
+    "fill_bundle_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "decimal": {
+      "type": "string",
+      "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"
+    },
+    "nonNegativeDecimal": {
+      "type": "string",
+      "pattern": "^(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"
+    },
+    "attempt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "attempt_id",
+        "intent_id",
+        "intent_sha256",
+        "instrument_id",
+        "side",
+        "status",
+        "requested_quantity",
+        "filled_quantity",
+        "execution_session",
+        "attempted_at",
+        "reference_open",
+        "fill_price",
+        "evidence_sha256",
+        "execution_cost_bundle_sha256",
+        "commission_rate",
+        "minimum_commission",
+        "sell_tax_rate",
+        "transfer_fee_rate",
+        "blocked_reason",
+        "manual_confirmed",
+        "auto_submitted",
+        "live_order_id",
+        "notional",
+        "commission",
+        "sell_tax",
+        "transfer_fee",
+        "slippage_cost",
+        "total_cost"
+      ],
+      "properties": {
+        "attempt_id": {"type": "string", "minLength": 1},
+        "intent_id": {"type": "string", "minLength": 1},
+        "intent_sha256": {"$ref": "#/$defs/sha256"},
+        "instrument_id": {"type": "string", "pattern": "^[0-9A-Z][0-9A-Z.]{2,31}$"},
+        "side": {"enum": ["BUY", "SELL"]},
+        "status": {"enum": ["FILLED", "PARTIAL", "UNFILLED"]},
+        "requested_quantity": {"type": "integer", "minimum": 1},
+        "filled_quantity": {"type": "integer", "minimum": 0},
+        "execution_session": {"type": "string", "format": "date"},
+        "attempted_at": {"type": "string", "format": "date-time"},
+        "reference_open": {"$ref": "#/$defs/nonNegativeDecimal"},
+        "fill_price": {
+          "oneOf": [{"$ref": "#/$defs/nonNegativeDecimal"}, {"type": "null"}]
+        },
+        "evidence_sha256": {"$ref": "#/$defs/sha256"},
+        "execution_cost_bundle_sha256": {"$ref": "#/$defs/sha256"},
+        "commission_rate": {"$ref": "#/$defs/nonNegativeDecimal"},
+        "minimum_commission": {"$ref": "#/$defs/nonNegativeDecimal"},
+        "sell_tax_rate": {"$ref": "#/$defs/nonNegativeDecimal"},
+        "transfer_fee_rate": {"$ref": "#/$defs/nonNegativeDecimal"},
+        "blocked_reason": {
+          "type": ["string", "null"],
+          "enum": [
+            null,
+            "t_plus_one",
+            "suspended",
+            "limit_down_locked",
+            "sellable_quantity",
+            "quote_stale",
+            "account_position_mismatch",
+            "broker_rejected"
+          ]
+        },
+        "manual_confirmed": {"const": true},
+        "auto_submitted": {"const": false},
+        "live_order_id": {"type": "null"},
+        "notional": {"$ref": "#/$defs/nonNegativeDecimal"},
+        "commission": {"$ref": "#/$defs/nonNegativeDecimal"},
+        "sell_tax": {"$ref": "#/$defs/nonNegativeDecimal"},
+        "transfer_fee": {"$ref": "#/$defs/nonNegativeDecimal"},
+        "slippage_cost": {"$ref": "#/$defs/nonNegativeDecimal"},
+        "total_cost": {"$ref": "#/$defs/nonNegativeDecimal"}
+      }
+    }
+  }
+}
