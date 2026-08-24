@@ -210,6 +210,17 @@ def _parse_date(value: str | None) -> date | None:
     return date.fromisoformat(value) if value else None
 
 
+def _write_output_create_only(path: Path, rendered: str) -> None:
+    path.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        with path.open("x", encoding="utf-8", newline="\n") as stream:
+            stream.write(rendered)
+    except FileExistsError as exc:
+        raise FileExistsError(
+            "market-data probe output already exists; refusing to overwrite"
+        ) from exc
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--provider", required=True)
@@ -277,8 +288,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
     rendered = json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
     if args.output is not None:
-        args.output.parent.mkdir(parents=True, exist_ok=True)
-        args.output.write_text(rendered, encoding="utf-8")
+        _write_output_create_only(args.output, rendered)
     sys.stdout.write(rendered)
     return 0 if result["status"] == "passed" else 1
 

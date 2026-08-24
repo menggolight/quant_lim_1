@@ -114,6 +114,29 @@ class ProviderNotConfiguredError(ProviderError):
     code = "not_configured"
 
 
+class ProviderAccessExpiredError(ProviderError):
+    """A versioned provider policy forbids all new access after expiry."""
+
+    status = "failed"
+    code = "provider_access_expired"
+
+    def __init__(self, *, provider_id: str, operation: str) -> None:
+        self.provider_id = str(provider_id)
+        self.operation = str(operation)
+        self.access_status = "expired"
+        super().__init__(
+            f"{self.provider_id} provider access expired; operation "
+            f"{self.operation!r} is disabled by versioned policy"
+        )
+
+
+class ProviderAccessPolicyInvalidError(ProviderError):
+    """Missing or invalid access policy fails closed before provider loading."""
+
+    status = "failed"
+    code = "provider_access_policy_invalid"
+
+
 class ProviderDisabledError(ProviderError):
     code = "provider_disabled"
 

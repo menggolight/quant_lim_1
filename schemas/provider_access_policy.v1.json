@@ -1,0 +1,81 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://local.quant/schemas/provider_access_policy.v1.json",
+  "title": "Provider Access Policy V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "choice",
+    "tushare"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "provider-access-policy-v1"
+    },
+    "choice": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "access_status",
+        "network_fetch_allowed",
+        "diagnostic_session_allowed",
+        "offline_research_consumption_allowed",
+        "historical_evidence_preserved",
+        "automatic_fallback_allowed",
+        "partial_fallback_allowed"
+      ],
+      "properties": {
+        "access_status": {
+          "const": "expired"
+        },
+        "network_fetch_allowed": {
+          "const": false
+        },
+        "diagnostic_session_allowed": {
+          "const": false
+        },
+        "offline_research_consumption_allowed": {
+          "const": false
+        },
+        "historical_evidence_preserved": {
+          "const": true
+        },
+        "automatic_fallback_allowed": {
+          "const": false
+        },
+        "partial_fallback_allowed": {
+          "const": false
+        }
+      }
+    },
+    "tushare": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "access_status",
+        "capability_probe_allowed",
+        "formal_provider_allowed",
+        "automatic_fallback_allowed",
+        "partial_fallback_allowed"
+      ],
+      "properties": {
+        "access_status": {
+          "const": "capability_probe_only"
+        },
+        "capability_probe_allowed": {
+          "const": true
+        },
+        "formal_provider_allowed": {
+          "const": false
+        },
+        "automatic_fallback_allowed": {
+          "const": false
+        },
+        "partial_fallback_allowed": {
+          "const": false
+        }
+      }
+    }
+  }
+}

@@ -10,6 +10,7 @@
 python -m unittest discover -s tests -p "test_market_data*.py" -v
 python -m unittest tests.test_factor_market_data tests.test_factor_evidence_probe tests.test_factor_lab -v
 python -m unittest tests.test_choice_quality_growth_batch tests.test_market_data_choice -v
+python -m unittest tests.test_choice_expired_access tests.test_tushare_capability_contract tests.test_tushare_capability_probe -v
 ```
 
 研报审计专项：
@@ -36,24 +37,35 @@ python -m unittest tests.test_strategy_adaptive_exposure_policy tests.test_adapt
 
 数据门的负向用例还要求 Choice receipt 枚举完整成分 `subject_ids`、中证800全收益 open/close 和 `single_quarter`/`consolidated`/`CNY` 财务口径；Experiment 覆盖 Andrews HAC、Holm、三段Rank IC及金融/非金融子模型的冻结检查。降级路径还验证两列当前成分与16列行业快照的独立导入/重放、800只逐项绑定、无有效日期行业不得升级为PIT、V2 `sample.json + manifest.json` 从双源artifact逐字节重建、恰好60只与exact 11行业、行业等覆盖不得冒充指数代表性，以及调用者自备universe JSON和占位receipt哈希不能绕过；产物始终保持 Paper/trade/real-money为 `false`、LIVE为 `not_supported`。单元测试通过不等于真实数据、统计效力、Paper准入或盈利。
 
-完整回归与编译检查：
+当前Experiment V3仍未正式冻结。涉及市场数据基础设施的安全全仓回归必须精确排除四个Locked/Experiment模块，不能先用`discover`加载后再跳过：
 
 ```powershell
-python -m unittest discover -s tests -v
-python -m compileall agent research trading integrations
+$excluded = @(
+  "test_strategy_workspace_admission",
+  "test_strategy_workspace_evaluation",
+  "test_strategy_workspace_experiment",
+  "test_strategy_workspace_top_decile_backtest"
+)
+$modules = Get-ChildItem tests/test_*.py |
+  Where-Object { $_.BaseName -notin $excluded } |
+  ForEach-Object { "tests.$($_.BaseName)" }
+python -m unittest @modules -v
+python -m compileall -q agent research trading operations integrations tests
 ```
+
+上述四个模块保持`not run`；不能读取或解释Locked Test结果。正式Experiment冻结后的唯一Locked运行须走独立受控流程。
 
 ## 市场数据覆盖重点
 
 - Provider 注册、未知或禁用 Provider；
 - BaoStock 代码双向映射、日线、交易日历、证券基础信息和 SDK 懒加载；
-- Choice SDK 懒加载、逐接口权限分类、股票 `qfq`/沪深300 `none`、独立交易日历、诊断读取与 BaoStock 默认链路隔离；
+- Choice访问到期时在SDK导入/start前确定性返回`provider_access_expired`，诊断session、live capture、historical backfill和新的正式offline消费均被拒绝；旧文件保留且不触发自动fallback；
 - Choice SW2021/sector/EDB 候选的固定 SDK 签名、`None`/空值失败关闭、双哈希和严格离线重放；
 - Choice `10001029` 配额耗尽的独立分类、三次断路及非随机截断后排名/推荐强制关闭；
 - 登录/查询失败、空结果、重复日期、错证券、非法 OHLC、负值、缺字段和非法数字；
 - raw、quarantine、validated 分层及研究消费者隔离；
 - 整批 fallback，不拼接 Primary 与 Secondary；
-- Tushare Token 缺失不影响 BaoStock；
+- Tushare capability plan不读Token/不导入SDK/不联网；live缺Token、SDK缺失、权限、限频、网络、字段漂移、重复主键、非有限数、create-only和重放均结构化失败且Token不落盘；
 - AKShare 的 Eastmoney/`*_em` 准入拒绝；
 - historical backfill 与 offline replay 分离；
 - 本地 JSON、调用者布尔值及直接写入 SQLite 的 `evidence_verified=true` 均不能替代逐条官方 receipt 绑定；

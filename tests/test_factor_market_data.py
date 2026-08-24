@@ -6,6 +6,7 @@ import unittest
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from research.market_data.contracts import canonical_json_bytes
 from research.market_data.index_evidence import (
@@ -193,6 +194,13 @@ SSE_2020 = (
 
 
 class FactorMarketDataTests(unittest.TestCase):
+    def setUp(self):
+        patcher = patch(
+            "research.market_data.provider_access.require_choice_network_access"
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_frozen_universe_is_23_unique_and_semantically_separate(self):
         self.assertEqual(len(ALL_INDEX_IDS), 23)
         self.assertEqual(len(set(ALL_INDEX_IDS)), 23)

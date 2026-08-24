@@ -21,6 +21,7 @@
 | [D-20260821-02](#d-20260821-02-使用固定策略级运行注册表并延后实际仓位事实) | 2026-08-21 | `accepted` | 使用固定策略级运行注册表并延后实际仓位事实 |
 | [D-20260821-03](#d-20260821-03-分离llm因子候选与experiment-v3正式冻结证据) | 2026-08-21 | `accepted` | 分离LLM因子候选与Experiment V3正式冻结证据 |
 | [D-20260824-01](#d-20260824-01-在daily到next信任边界复验完整语义并拒绝契约子类) | 2026-08-24 | `accepted` | 在Daily到Next信任边界复验完整语义并拒绝契约子类 |
+| [D-20260824-02](#d-20260824-02-choice到期后采用tushare-probe-first而不自动迁移) | 2026-08-24 | `accepted` | Choice到期后采用Tushare probe-first而不自动迁移 |
 
 ## D-20260820-01 以仓库作为跨 Agent 交接界面
 
@@ -349,6 +350,55 @@ P0已经能表达现金与跨日风险退出，但仍存在七个会破坏失败
 ### 重新评估条件
 
 只有在新的版本化契约明确替代现有V1/V2类型、同步Schema和对抗测试后，才重新评估exact-type限制；formal Experiment V3、Locked Test及任何准入仍按既有独立门处理。
+
+## D-20260824-02 Choice到期后采用Tushare probe-first而不自动迁移
+
+- 日期：2026-08-24
+- 状态：`accepted`
+- 影响范围：Provider访问策略、Choice新采集、Tushare能力验证、未来Market Data V2迁移
+- 关系：不改变`D-20260821-03`和`D-20260824-01`的Experiment V3、Daily publication及准入边界
+
+### 背景
+
+用户已确认Choice接口权限到期，而当前`market_data.v1`仍把BaoStock作为默认主源、Choice作为显式许可二级诊断源、Tushare V1作为日线独立核验源。Tushare官方文档列出指数、行业、财务和披露接口及积分门槛，但文档不能证明具体Token有权限，也不能证明历史覆盖、PIT语义、单位或Schema满足项目要求。若在没有真实能力证据时直接迁移，会把SDK可调用性误写为数据准入，并可能越过正式Experiment V3与Daily Alpha的失败关闭。
+
+### 决策
+
+- 以版本化、严格Schema约束的Provider Access Policy记录Choice为`expired`。所有新的Choice网络访问和诊断session都必须在SDK导入、初始化或登录前返回`provider_access_expired`；不靠README、环境变量或调用者布尔值控制。
+- Choice历史raw、quarantine、validated、诊断与归档证据不得删除或覆盖。许可证后续使用边界未经人工确认前，策略不得把旧Choice数据作为新的正式研究输入；内容哈希只证明文件一致性。
+- BaoStock保持默认主源，不自动切换到Tushare、AKShare或Eastmoney，也不允许字段级、行级或半批次fallback。
+- Tushare新增独立capability probe，而不扩展现有`TushareProvider` V1。探针只接受代码内固定白名单，默认plan不读Token、不导入SDK、不联网；显式`--live`才可进行有界只读调用。
+- capability receipt固定为`capability_probe_only_not_admitted`及全套false安全字段。endpoint成功、receipt自哈希、Schema通过和重放成功均不能形成正式MarketDataBatch，也不能影响Factor Registry、Experiment V3、Daily publication、Paper、交易、真实资金或LIVE。
+- 未获得真实、可重放的本机receipt前，不创建`market_data.v2`，不实现正式Tushare Provider V2，不决定行业体系切换，也不解锁任何Alpha BUY。下一阶段按dataset独立评估权限、覆盖、PIT、单位、基准和失败条件。
+
+### 证据与真源
+
+- [Provider访问策略](../configs/provider_access.v1.json)
+- [Provider访问策略Schema](../schemas/provider_access_policy.v1.json)
+- [Tushare能力探针配置](../configs/tushare_capability_probe.v1.json)
+- [Tushare迁移边界](TUSHARE_MIGRATION.md)
+- [Tushare capability contract](../research/market_data/tushare_capability.py)
+- [Tushare capability CLI](../agent/tushare_capability_probe.py)
+- [Choice到期测试](../tests/test_choice_expired_access.py)
+- [Tushare契约测试](../tests/test_tushare_capability_contract.py)
+- [Tushare探针测试](../tests/test_tushare_capability_probe.py)
+
+### 放弃的方案
+
+- 直接把Choice的`enabled`改为false：只能挡住Registry的一部分入口，无法保证专用诊断脚本在SDK导入前失败，也没有表达历史证据消费边界。
+- 把全部Tushare接口塞进现有V1 Provider：会把能力试探与正式dataset契约合并，并扩大既有日线核验职责。
+- 接口成功后自动改默认Provider或回填缺失字段：会制造跨Provider拼接、来源不清和半批次成功。
+- 用5000积分或官方文档推断权限与PIT：账户能力、历史覆盖和实际返回字段仍必须由真实Token小样本验证。
+
+### 后果与取舍
+
+- Choice新访问被确定性关闭，但历史证据可继续保存和做受控审计；后续若许可证边界变化，必须通过新版本策略和独立审查恢复，不能临时改布尔值。
+- Tushare能力可以逐endpoint形成脱敏、create-only、可重放证据，代价是本轮不会立即获得正式数据主源或Alpha恢复。
+- 探针输出只能缩小下一阶段的不确定性；全收益基准、历史成分、SW/CSI行业迁移、财务首披链和正式来源认证仍可能继续阻断。
+
+### 重新评估条件
+
+只有在真实capability receipt明确接口权限与覆盖，并由独立Market Data V2决策逐dataset冻结Provider、Schema、PIT、单位、基准、失败条件及迁移策略后，才重新评估正式Tushare适配范围。该重新评估仍不授予Experiment V3、Paper、交易、真实资金或LIVE权限。
 
 ## 新增记录模板
 

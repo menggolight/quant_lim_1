@@ -271,6 +271,15 @@ class ExecutionDateProbeProvider(IncompleteBatchProvider):
 
 
 class ChoiceQualityGrowthProviderTests(unittest.TestCase):
+    def setUp(self):
+        for target in (
+            "research.market_data.provider_access.require_choice_network_access",
+            "research.market_data.provider_access.require_choice_diagnostic_session",
+        ):
+            patcher = patch(target)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def test_fixed_batch_calls_do_not_open_arbitrary_field_or_none_surface(self):
         client = FixedClient()
         provider = ChoiceProvider(
@@ -547,6 +556,13 @@ class ChoiceQualityGrowthProviderTests(unittest.TestCase):
 
 
 class ChoiceQualityGrowthBatchTests(unittest.TestCase):
+    def setUp(self):
+        patcher = patch(
+            "research.market_data.provider_access.require_choice_diagnostic_session"
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def test_fixed_plan_and_internal_grid_are_not_caller_selectable(self):
         plan = fixed_choice_quality_growth_plan(date(2018, 3, 30))
         self.assertEqual(plan["sector_code"], SECTOR_CODE)

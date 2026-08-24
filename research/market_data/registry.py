@@ -9,6 +9,7 @@ from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from typing import Any, Iterable, Mapping
 
+from . import provider_access
 from .admission import evaluate_admission
 from .contracts import (
     DATASET_SCHEMA_VERSIONS,
@@ -23,6 +24,8 @@ from .providers.base import (
     AllProvidersFailedError,
     BatchValidationError,
     MarketDataProvider,
+    ProviderAccessExpiredError,
+    ProviderAccessPolicyInvalidError,
     ProviderDisabledError,
     ProviderError,
     ProviderPayload,
@@ -334,6 +337,7 @@ class MarketDataRegistry:
             raise UnsupportedDatasetError(
                 "diagnostic_session currently requires provider_id='choice'"
             )
+        provider_access.require_choice_diagnostic_session()
         provider = self.provider(provider_id)
         session_factory = getattr(provider, "diagnostic_session", None)
         if not callable(session_factory):
@@ -350,6 +354,21 @@ class MarketDataRegistry:
         provider_id: str | None,
         diagnostic_replay: bool,
     ) -> MarketDataBatch:
+        # Enforce the access boundary against the requested provider identity
+        # before registry lookup.  Otherwise an unregistered or disabled
+        # Choice adapter is classified as an ordinary provider failure and a
+        # fallback caller can silently continue to another provider.
+        resolved_provider_id = str(
+            provider_id or self.config.get("default_provider") or ""
+        ).strip()
+        if resolved_provider_id == "choice":
+            if request.retrieval_mode == "offline_replay":
+                if not diagnostic_replay:
+                    provider_access.require_choice_offline_research_consumption()
+            else:
+                provider_access.require_choice_network_access(
+                    f"registry_fetch_{request.retrieval_mode}"
+                )
         provider = self.provider(provider_id)
         policy = self.config.get("providers", {}).get(provider.provider_id, {})
         declared_datasets = policy.get("datasets", ()) if isinstance(policy, Mapping) else ()
@@ -631,6 +650,10 @@ class MarketDataRegistry:
         for provider_id in candidates:
             try:
                 return self.fetch(request, provider_id=provider_id)
+            except (ProviderAccessExpiredError, ProviderAccessPolicyInvalidError):
+                # An expired or invalid access boundary is a global stop for
+                # this request, never a signal to substitute another provider.
+                raise
             except Exception as exc:
                 error = classify_unexpected_error(exc)
                 attempts.append(

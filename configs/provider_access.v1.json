@@ -1,0 +1,19 @@
+{
+  "schema_version": "provider-access-policy-v1",
+  "choice": {
+    "access_status": "expired",
+    "network_fetch_allowed": false,
+    "diagnostic_session_allowed": false,
+    "offline_research_consumption_allowed": false,
+    "historical_evidence_preserved": true,
+    "automatic_fallback_allowed": false,
+    "partial_fallback_allowed": false
+  },
+  "tushare": {
+    "access_status": "capability_probe_only",
+    "capability_probe_allowed": true,
+    "formal_provider_allowed": false,
+    "automatic_fallback_allowed": false,
+    "partial_fallback_allowed": false
+  }
+}

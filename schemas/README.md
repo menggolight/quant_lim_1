@@ -8,6 +8,8 @@
 - `daily_bar.v1.json`：沪深市场日线规范记录；价格和数量使用十进制字符串，复权状态显式记录。
 - `trade_calendar.v1.json`：Provider 交易日历记录；工作日近似不能冒充正式日历。
 - `security_master.v1.json`：沪深市场证券基础信息记录；北交所未接入，当前快照不能自证历史 point-in-time 股票池。
+- `provider_access_policy.v1.json`：Provider访问许可的版本化失败关闭策略；当前Choice固定`expired`且禁止网络、诊断session和新的正式离线研究消费，Tushare扩展固定为capability-probe-only。它不保存秘密，也不能授予正式Provider或LIVE权限。
+- `tushare_endpoint_result.v1.json`、`tushare_capability_receipt.v1.json`：约束固定白名单endpoint的小样本能力结果、raw哈希/manifest绑定和整次探针receipt；安全字段固定为`capability_probe_only_not_admitted`及全false，Schema、receipt哈希或接口成功均不能形成MarketDataBatch、Experiment V3、Paper或交易准入。
 
 JSON Schema 负责结构，`research/market_data/validation.py` 在无网络依赖下执行本仓库所需的 Draft 2020-12 约束，包括内部/同目录外部 `$ref`、组合/条件分支、对象与数组上限、唯一性和 RFC3339 日期时间；同时负责请求证券一致性、日期唯一和升序、窗口范围、OHLC、非负成交量/成交额、缺字段和非法数字。`admission.py` 再按数据集重新计算本地准入。
 

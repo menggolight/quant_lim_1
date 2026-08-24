@@ -16,7 +16,11 @@ from pathlib import Path
 from typing import Any, Mapping, Sequence
 
 from research.market_data.contracts import canonical_json_bytes, sha256_bytes
-from research.market_data.providers.base import safe_error_text
+from research.market_data.providers.base import (
+    ProviderError,
+    classify_unexpected_error,
+    safe_error_text,
+)
 from research.market_data.providers.choice import ChoiceProvider
 
 
@@ -296,10 +300,12 @@ def main(argv: Sequence[str] | None = None) -> int:
         }
         exit_code = 0
     except Exception as exc:
+        error = classify_unexpected_error(exc)
         result = {
-            "status": "incomplete",
+            "status": error.status if isinstance(exc, ProviderError) else "incomplete",
+            "error_code": error.code,
             "error_type": type(exc).__name__,
-            "error_message": safe_error_text(exc),
+            "error_message": safe_error_text(error),
             "official_benchmark_identity_authenticated": False,
             "formal_truth_eligible": False,
             "paper_eligible": False,

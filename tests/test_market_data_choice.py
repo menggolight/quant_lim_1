@@ -146,6 +146,14 @@ def trade_calendar_request(*, mode="historical_backfill") -> MarketDataRequest:
 
 class ChoiceProviderTests(unittest.TestCase):
     def setUp(self):
+        for target in (
+            "research.market_data.provider_access.require_choice_network_access",
+            "research.market_data.provider_access.require_choice_diagnostic_session",
+            "research.market_data.provider_access.require_choice_offline_research_consumption",
+        ):
+            patcher = patch(target)
+            patcher.start()
+            self.addCleanup(patcher.stop)
         self.config = load_market_data_config()
 
     def registry(self, provider, root):

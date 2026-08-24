@@ -20,6 +20,7 @@ from decimal import Decimal, InvalidOperation
 from pathlib import Path
 from typing import Any, Callable, Iterable, Mapping, Sequence
 
+from . import provider_access
 from .contracts import MarketDataRequest, canonical_json_bytes, sha256_bytes
 from .providers.base import ProviderPayload, safe_error_text
 from .providers.choice import ChoiceProvider
@@ -1887,6 +1888,9 @@ def collect_choice_quality_growth_batch(
 ) -> ChoiceQualityGrowthBatchRun:
     """Capture one fixed batch while holding an exclusive checkpoint writer lock."""
 
+    provider_access.require_choice_diagnostic_session(
+        "quality_growth_historical_backfill"
+    )
     root = Path(output_root)
     with _exclusive_batch_lock(root):
         return _collect_choice_quality_growth_batch_locked(

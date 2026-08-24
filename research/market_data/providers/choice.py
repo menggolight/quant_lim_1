@@ -14,6 +14,7 @@ from decimal import Decimal, InvalidOperation
 from functools import wraps
 from typing import Any, Callable, Mapping
 
+from .. import provider_access
 from ..contracts import MarketDataRequest, canonical_json_bytes, sha256_bytes
 from .baostock import normalize_a_share_stock_instrument
 from .base import (
@@ -239,6 +240,7 @@ class ChoiceProvider:
         self._diagnostic_client: Any | None = None
 
     def _load_sdk(self) -> Any:
+        provider_access.require_choice_network_access("sdk_import_or_initialization")
         if self._sdk_loader is not None:
             return self._sdk_loader()
         try:
@@ -262,6 +264,8 @@ class ChoiceProvider:
             raise ProviderQueryError(
                 f"Choice SDK operation is outside the read-only allowlist: {operation}"
             )
+        if operation != "stop":
+            provider_access.require_choice_network_access(f"sdk_{operation}")
         function = getattr(client, operation, None)
         if not callable(function):
             raise ProviderQueryError(
@@ -502,6 +506,7 @@ class ChoiceProvider:
         return tuple(records)
 
     def _quality_growth_client(self) -> Any:
+        provider_access.require_choice_network_access("diagnostic_fetch")
         client = self._diagnostic_client
         if client is None:
             raise ProviderQueryError(
@@ -1361,6 +1366,7 @@ class ChoiceProvider:
     def diagnostic_session(self):
         """Reuse one authenticated read-only session for a bounded collector."""
 
+        provider_access.require_choice_diagnostic_session()
         if self._diagnostic_client is not None:
             raise ProviderQueryError("nested Choice diagnostic sessions are not supported")
         sdk = self._load_sdk()
@@ -1419,6 +1425,7 @@ class ChoiceProvider:
         instrument_id: str,
         market: str,
     ) -> ProviderPayload:
+        provider_access.require_choice_network_access("diagnostic_fetch")
         client = self._diagnostic_client
         if client is None:
             raise ProviderQueryError("Choice diagnostic session is not open")
@@ -1441,6 +1448,9 @@ class ChoiceProvider:
             raise classify_unexpected_error(exc) from exc
 
     def fetch(self, request: MarketDataRequest) -> ProviderPayload:
+        provider_access.require_choice_network_access(
+            f"network_fetch_{request.retrieval_mode}"
+        )
         if request.dataset_type not in self.supported_datasets:
             raise UnsupportedDatasetError(
                 f"Choice does not implement dataset {request.dataset_type!r}"

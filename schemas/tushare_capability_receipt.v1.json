@@ -1,0 +1,273 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/tushare_capability_receipt.v1.json",
+  "title": "Tushare capability-only probe receipt",
+  "description": "Self-hashed probe evidence only. All admission, Alpha, Paper, trading, order and LIVE authority remains closed.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "probe_run_id",
+    "status",
+    "scope",
+    "started_at",
+    "completed_at",
+    "provider_id",
+    "sdk_version",
+    "python_version",
+    "credential_status",
+    "config_sha256",
+    "probe_code_sha256",
+    "git_commit",
+    "git_worktree_status",
+    "endpoint_results",
+    "required_probe_summary",
+    "optional_probe_summary",
+    "cross_validation_outcome",
+    "request_count",
+    "rate_limit_events",
+    "raw_evidence_manifest_sha256",
+    "formal_data_admission",
+    "experiment_v3_impact",
+    "daily_signal_authority",
+    "next_session_allowed",
+    "paper_eligibility",
+    "trade_eligibility",
+    "real_money_list_allowed",
+    "automatic_order_submission",
+    "live_supported",
+    "receipt_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "tushare-capability-receipt.v1"},
+    "probe_run_id": {"$ref": "#/$defs/identifier"},
+    "status": {"enum": [
+      "passed", "partial", "failed", "not_configured",
+      "dependency_missing", "incomplete"
+    ]},
+    "scope": {"const": "capability_probe_only_not_admitted"},
+    "started_at": {"type": "string", "format": "date-time"},
+    "completed_at": {"type": "string", "format": "date-time"},
+    "provider_id": {"const": "tushare"},
+    "sdk_version": {
+      "oneOf": [
+        {"type": "string", "minLength": 1, "maxLength": 128},
+        {"type": "null"}
+      ]
+    },
+    "python_version": {"type": "string", "minLength": 1, "maxLength": 128},
+    "credential_status": {"enum": ["configured", "not_configured"]},
+    "config_sha256": {"$ref": "#/$defs/sha256"},
+    "probe_code_sha256": {"$ref": "#/$defs/sha256"},
+    "git_commit": {
+      "oneOf": [
+        {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        {"const": "unknown"}
+      ]
+    },
+    "git_worktree_status": {"enum": ["clean", "dirty", "unknown"]},
+    "endpoint_results": {
+      "type": "array",
+      "minItems": 22,
+      "maxItems": 50,
+      "items": {"$ref": "tushare_endpoint_result.v1.json"}
+    },
+    "required_probe_summary": {"$ref": "#/$defs/probeSummary"},
+    "optional_probe_summary": {"$ref": "#/$defs/probeSummary"},
+    "cross_validation_outcome": {"$ref": "#/$defs/crossValidationOutcome"},
+    "request_count": {"type": "integer", "minimum": 0, "maximum": 50},
+    "rate_limit_events": {"type": "integer", "minimum": 0, "maximum": 50},
+    "raw_evidence_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "formal_data_admission": {"const": false},
+    "experiment_v3_impact": {"const": "none"},
+    "daily_signal_authority": {"const": "none"},
+    "next_session_allowed": {"const": false},
+    "paper_eligibility": {"const": false},
+    "trade_eligibility": {"const": false},
+    "real_money_list_allowed": {"const": false},
+    "automatic_order_submission": {"const": false},
+    "live_supported": {"const": false},
+    "receipt_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nullableSha256": {
+      "oneOf": [
+        {"$ref": "#/$defs/sha256"},
+        {"type": "null"}
+      ]
+    },
+    "crossValidationOutcome": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "attempted",
+        "status",
+        "request_count",
+        "dataset",
+        "providers",
+        "tushare_daily_endpoint_result_sha256",
+        "comparison_payload_sha256",
+        "tushare_raw_path",
+        "tushare_raw_sha256",
+        "baostock_raw_path",
+        "baostock_raw_sha256",
+        "failure_code",
+        "not_attempted_reason",
+        "independent_batches",
+        "records_merged",
+        "missing_values_filled_across_providers",
+        "automatic_difference_threshold_configured",
+        "threshold_status",
+        "integrity_scope",
+        "admission_effect"
+      ],
+      "properties": {
+        "schema_version": {
+          "const": "tushare-baostock-cross-validation-outcome.v1"
+        },
+        "attempted": {"type": "boolean"},
+        "status": {"enum": ["compared", "failed", "not_attempted"]},
+        "request_count": {"type": "integer", "minimum": 0, "maximum": 1},
+        "dataset": {"const": "daily_bar_small_sample"},
+        "providers": {
+          "type": "array",
+          "items": {"enum": ["tushare", "baostock"]},
+          "minItems": 2,
+          "maxItems": 2
+        },
+        "tushare_daily_endpoint_result_sha256": {"$ref": "#/$defs/sha256"},
+        "comparison_payload_sha256": {"$ref": "#/$defs/sha256"},
+        "tushare_raw_path": {
+          "oneOf": [
+            {"type": "string", "pattern": "^raw/daily\\.[0-9]{2}\\.json$"},
+            {"type": "null"}
+          ]
+        },
+        "tushare_raw_sha256": {"$ref": "#/$defs/nullableSha256"},
+        "baostock_raw_path": {
+          "oneOf": [
+            {"const": "raw/cross_validation/baostock_daily.json"},
+            {"type": "null"}
+          ]
+        },
+        "baostock_raw_sha256": {"$ref": "#/$defs/nullableSha256"},
+        "failure_code": {
+          "oneOf": [
+            {"$ref": "#/$defs/identifier"},
+            {"type": "null"}
+          ]
+        },
+        "not_attempted_reason": {
+          "oneOf": [
+            {"enum": ["daily_not_passed", "global_stop", "reserve_unavailable"]},
+            {"type": "null"}
+          ]
+        },
+        "independent_batches": {"const": true},
+        "records_merged": {"const": false},
+        "missing_values_filled_across_providers": {"const": false},
+        "automatic_difference_threshold_configured": {"const": false},
+        "threshold_status": {"const": "not_configured"},
+        "integrity_scope": {
+          "const": "local_consistency_not_external_authentication"
+        },
+        "admission_effect": {"const": "none"}
+      },
+      "allOf": [
+        {
+          "if": {"properties": {"status": {"const": "compared"}}},
+          "then": {
+            "properties": {
+              "attempted": {"const": true},
+              "request_count": {"const": 1},
+              "tushare_raw_path": {"type": "string"},
+              "tushare_raw_sha256": {"$ref": "#/$defs/sha256"},
+              "baostock_raw_path": {"type": "string"},
+              "baostock_raw_sha256": {"$ref": "#/$defs/sha256"},
+              "failure_code": {"type": "null"},
+              "not_attempted_reason": {"type": "null"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"status": {"const": "failed"}}},
+          "then": {
+            "properties": {
+              "attempted": {"const": true},
+              "request_count": {"const": 1},
+              "tushare_raw_path": {"type": "string"},
+              "tushare_raw_sha256": {"$ref": "#/$defs/sha256"},
+              "failure_code": {"$ref": "#/$defs/identifier"},
+              "not_attempted_reason": {"type": "null"}
+            }
+          }
+        },
+        {
+          "if": {"properties": {"status": {"const": "not_attempted"}}},
+          "then": {
+            "properties": {
+              "attempted": {"const": false},
+              "request_count": {"const": 0},
+              "baostock_raw_path": {"type": "null"},
+              "baostock_raw_sha256": {"type": "null"},
+              "failure_code": {"type": "null"},
+              "not_attempted_reason": {
+                "enum": ["daily_not_passed", "global_stop", "reserve_unavailable"]
+              }
+            }
+          }
+        },
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "tushare_raw_path": {"type": "null"},
+                "tushare_raw_sha256": {"type": "null"}
+              }
+            },
+            {
+              "properties": {
+                "tushare_raw_path": {"type": "string"},
+                "tushare_raw_sha256": {"$ref": "#/$defs/sha256"}
+              }
+            }
+          ]
+        },
+        {
+          "oneOf": [
+            {
+              "properties": {
+                "baostock_raw_path": {"type": "null"},
+                "baostock_raw_sha256": {"type": "null"}
+              }
+            },
+            {
+              "properties": {
+                "baostock_raw_path": {"type": "string"},
+                "baostock_raw_sha256": {"$ref": "#/$defs/sha256"}
+              }
+            }
+          ]
+        }
+      ]
+    },
+    "probeSummary": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["planned", "passed", "failed", "not_run", "complete"],
+      "properties": {
+        "planned": {"type": "integer", "minimum": 0, "maximum": 50},
+        "passed": {"type": "integer", "minimum": 0, "maximum": 50},
+        "failed": {"type": "integer", "minimum": 0, "maximum": 50},
+        "not_run": {"type": "integer", "minimum": 0, "maximum": 50},
+        "complete": {"type": "boolean"}
+      }
+    }
+  }
+}

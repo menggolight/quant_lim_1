@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 from types import MappingProxyType
 from typing import Any, Callable
 
+from .. import provider_access
 from ..contracts import canonical_json_bytes
 from ..index_evidence import (
     ALL_INDEX_IDS,
@@ -65,6 +66,8 @@ class ChoiceIndexProvider:
             raise ProviderQueryError(
                 f"Choice index operation is outside the read-only allowlist: {operation}"
             )
+        if operation != "stop":
+            provider_access.require_choice_network_access(f"sdk_{operation}")
         function = getattr(client, operation, None)
         if not callable(function):
             raise ProviderQueryError(f"Choice SDK does not expose {operation}")
@@ -81,6 +84,9 @@ class ChoiceIndexProvider:
         return value
 
     def fetch(self, request: IndexEvidenceRequest) -> IndexSourcePayload:
+        provider_access.require_choice_network_access(
+            f"index_fetch_{request.retrieval_mode}"
+        )
         if request.dataset_type not in self.supported_datasets:
             raise UnsupportedDatasetError(
                 f"Choice index provider does not support {request.dataset_type!r}"

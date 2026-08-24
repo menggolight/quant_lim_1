@@ -7,6 +7,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
+from unittest.mock import patch
 
 from agent.choice_candidate_probe import build_parser, run_probe
 from research.market_data.choice_candidates import (
@@ -157,6 +158,13 @@ class FakeChoiceClient:
 
 
 class ChoiceCandidateTests(unittest.TestCase):
+    def setUp(self):
+        patcher = patch(
+            "research.market_data.provider_access.require_choice_network_access"
+        )
+        patcher.start()
+        self.addCleanup(patcher.stop)
+
     def service(self, directory, client):
         return ChoiceCandidateService(
             Path(directory),

@@ -52,7 +52,26 @@ def main(argv: Sequence[str] | None = None) -> int:
                 sample_dir=args.sample_dir,
                 output_dir=args.output_dir,
             )
-    except (CurrentSampleSnapshotError, ProviderError, OSError, ValueError) as exc:
+    except ProviderError as exc:
+        print(
+            json.dumps(
+                {
+                    "status": exc.status,
+                    "error_code": exc.code,
+                    "error_type": type(exc).__name__,
+                    "error": safe_error_text(exc),
+                    "formal_truth_eligible": False,
+                    "paper_eligible": False,
+                    "trade_eligible": False,
+                    "real_money_candidate": False,
+                    "live_execution_status": "live_not_supported",
+                },
+                ensure_ascii=False,
+                sort_keys=True,
+            )
+        )
+        return 2
+    except (CurrentSampleSnapshotError, OSError, ValueError) as exc:
         parser.error(safe_error_text(exc))
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0

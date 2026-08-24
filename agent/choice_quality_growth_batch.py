@@ -12,7 +12,11 @@ from research.market_data.choice_quality_growth_batch import (
     collect_choice_quality_growth_batch,
     verify_choice_quality_growth_batch,
 )
-from research.market_data.providers.base import safe_error_text
+from research.market_data.providers.base import (
+    ProviderError,
+    classify_unexpected_error,
+    safe_error_text,
+)
 from research.market_data.providers.choice import ChoiceProvider
 
 
@@ -106,12 +110,16 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         return 3 if verification.integrity_verified else 2
     except Exception as exc:
+        error = classify_unexpected_error(exc)
         print(
             json.dumps(
                 {
-                    "status": "incomplete",
+                    "status": (
+                        error.status if isinstance(exc, ProviderError) else "incomplete"
+                    ),
+                    "error_code": error.code,
                     "error_type": type(exc).__name__,
-                    "error_message": safe_error_text(exc),
+                    "error_message": safe_error_text(error),
                     "source_authenticated": False,
                     "integrity_semantics": "content_integrity_not_source_authentication",
                     "formal_truth_eligible": False,

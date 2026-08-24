@@ -27,12 +27,14 @@ Provider 原始响应
 | Provider | 当前代码能力 | 角色 | 外部状态与限制 |
 |---|---|---|---|
 | BaoStock | 沪深市场不复权日线、交易日历、证券基础信息 | 默认主源；完整合格批次可标为 `validated_research_only` | SDK 为可选依赖；是否安装、网络是否可达必须以本机真实探针为准。不是官方真值认证 |
-| Choice | 许可版 `EmQuantAPI` 的沪深 A 股 `qfq` 日线、白名单 `000300.SH` 不复权日线、交易日历，以及隔离的 SW2021/sector/EDB 候选证据 | 仅显式选择的可选只读 Secondary；Registry 不会自动把它加入 fallback 候选 | 厂商 SDK、API 激活和逐接口权限须分别核验；正式研究读取与正式真值转换仍拒绝。许可访问也不是官方真值认证 |
-| Tushare | 指定证券的不复权日线，保持独立批次 | 可选核验源，不阻塞 BaoStock | 只从 `TUSHARE_TOKEN` 读取 Token；缺失时为 `not_configured`。自动差异阈值尚未配置，不得描述为已完成交叉验证 |
+| Choice | 历史代码支持`EmQuantAPI`沪深A股`qfq`日线、白名单`000300.SH`不复权日线、交易日历和隔离候选证据 | 当前访问已到期；新网络、诊断session及新的正式离线研究消费均失败关闭 | 在SDK导入、初始化或登录前固定返回`provider_access_expired`；旧raw/quarantine/validated/诊断证据保留但不自动消费，也不触发其他Provider fallback |
+| Tushare | 现有V1只支持指定证券不复权日线独立核验；扩展接口位于独立capability probe | 可选核验/能力候选，不阻塞BaoStock且不形成正式dataset | 只从`TUSHARE_TOKEN`读取Token；缺失时为`not_configured`。能力receipt固定`capability_probe_only_not_admitted`，自动差异阈值尚未配置 |
 | AKShare | 受控扩展骨架，没有已配置数据集 | 禁用、未准入 | 不提供任意函数执行；Eastmoney 上游或 `*_em` 接口只能是 `diagnostic_only/not_admitted` |
 | Eastmoney Legacy | 既有历史行情和行业榜探针 | 仅 Legacy 诊断；不是默认源、验证源或 fallback | Registry 不把旧缓存适配为 validated batch。东方财富研报公开样本来源与行情诊断是两条独立链路 |
 
-“代码能力”不等于真实接口已经连通。普通单元测试使用注入对象或 Mock，不构成网络证据；真实状态只看 `agent.market_data_probe` 当次输出。
+“代码能力”不等于真实接口已经连通。普通单元测试使用注入对象或Mock，不构成网络证据；正式V1日线状态只看`agent.market_data_probe`当次输出，扩展接口能力只看`agent.tushare_capability_probe --live`生成并重放通过的本机receipt。
+
+Provider网络许可由[版本化访问策略](../configs/provider_access.v1.json)独立控制。`market_data.v1`中的`enabled=true`只表示该适配器仍在历史注册表内，不得覆盖`access_status=expired`；调用者布尔值、环境变量、SDK对象或fallback列表均不能恢复Choice访问。迁移判断见[Choice到期后的Tushare迁移边界](TUSHARE_MIGRATION.md)。
 
 ## 数据集与准入
 
@@ -46,7 +48,7 @@ Provider 原始响应
 
 不复权日线是 V1 规范输入。复权数据必须使用独立 `adjustment` 标记、方法和来源，不能覆盖不复权原始数据。
 
-Choice 诊断榜对股票收益强制使用 `qfq`，对沪深300强制使用 `none`。报告中的名义目标价与事后前复权价格水平没有受控换算桥，因此当前目标价主张只生成明确排除原因，不计算虚假的绝对达成率。
+Choice历史诊断榜对股票收益强制使用`qfq`，对沪深300强制使用`none`。当前访问到期后这些入口只用于保留代码与历史重放审计，不再发起新请求。报告中的名义目标价与事后前复权价格水平没有受控换算桥，因此当前目标价主张只生成明确排除原因，不计算虚假的绝对达成率。
 
 SDK 返回 `10001029 data limit exceeded` 时适配器记录 `failed/quota_exhausted`。诊断采集连续三次遇到该全局配额错误即停止请求并保留已有检查点；由于按证券代码顺序截断会产生系统性选择偏差，该 run 的技能表不输出原始命中率、后验、下界或排名，也不生成研报推荐。
 
@@ -60,7 +62,7 @@ SDK 返回 `10001029 data limit exceeded` 时适配器记录 `failed/quota_exhau
 | `historical_sector_membership` | `sector(code, date, ...)` | 指定日期返回的成分及名称 | 仅 Choice 候选，不证明官方历史 PIT |
 | `edb_publish_dates` | `edbquery` + `edb(..., IsPublishDate=1, ...)` | 指标元数据、观测值和可用的 `PUBLISHDATE` | 缺失发布日期逐条保留 `null`；`first_release_proven=false` |
 
-每个接口独立输出 `passed`、`dependency_missing`、`network_blocked`、`not_configured` 或 `failed`，并绑定 exact request、raw/normalized 双哈希与离线重放。接口成功不把其他接口、账号或正式真值标为成功。Choice Provider 和候选层只允许 `start/stop/csd/tradedates/css/sector/edb/edbquery`；组合、下单和账户函数均不可达。
+历史产物曾按接口独立输出`passed`、`dependency_missing`、`network_blocked`、`not_configured`或`failed`并绑定exact request与双哈希；这些状态只描述当次旧访问。当前所有新在线入口统一先返回`provider_access_expired`。Choice Provider和候选层保留的历史函数白名单不能越过访问策略，组合、下单和账户函数始终不可达。
 
 ## 统一批次契约
 
@@ -111,7 +113,7 @@ python -m pip install -e ".[market-tushare]"
 python -m pip install -e ".[market-akshare]"
 ```
 
-Choice Python SDK 由厂商下载站分发，不存在可由本项目声明的 PyPI extra。下载后保留原目录结构，并在项目使用的 Python 环境中运行厂商的注册脚本：
+Choice Python SDK由厂商下载站分发，不存在可由本项目声明的PyPI extra。下列安装信息仅保留为历史环境说明；当前访问策略禁止新SDK导入/初始化/登录，不应为本项目运行这些步骤：
 
 ```powershell
 $choiceSdk = "<包含 installEmQuantAPI.py 的 python3 目录>"
@@ -143,7 +145,7 @@ python -m agent.market_data_probe `
   --end-date 2026-08-05
 ```
 
-Choice 股票日线必须显式选择 `qfq`，且不会改变 BaoStock 默认主源：
+Choice旧股票日线命令保留为失败关闭示例。它不会导入SDK，当前固定输出`provider_access_expired`，且不会改变BaoStock默认主源或尝试其他Provider：
 
 ```powershell
 python -m agent.market_data_probe `
@@ -155,9 +157,27 @@ python -m agent.market_data_probe `
   --end-date 2026-08-07
 ```
 
-SDK 未注册或厂商已拒绝该 SDK 版本时为 `dependency_missing`；SDK 已注册但 API 未激活、权限过期或设备激活信息失效时为 `not_configured`；厂商网络错误码或网络不可达为 `network_blocked`；其他 SDK/字段/校验错误为 `failed`。即使输出 `passed`，Choice 批次也只是 `validated_secondary_not_primary`。当前已实现确定性 raw replay 和显式诊断读取，但 `read_for_research` 仍拒绝；本地 receipt 与哈希不能把它升级为官方真值。
+访问策略检查优先于SDK存在性、激活和网络分类，因此当前Choice新访问只会得到`provider_access_expired`。历史批次即使曾为`validated_secondary_not_primary`，也不能经新的正式`offline_replay`进入research consumer；独立归档和完整性审计仍可保留字节。本地receipt与哈希不能恢复许可证或升级为官方真值。
 
-Choice Secondary 市场诊断、90 份人工审核和固定 7 文件 bundle 见 [研报审计](../research/broker_report_audit/README.md)。三个隔离候选接口的在线探针：
+Tushare扩展先运行默认离线plan；它不读取Token、不导入SDK、不访问网络：
+
+```powershell
+python -m agent.tushare_capability_probe `
+  --config configs/tushare_capability_probe.v1.json `
+  --plan
+```
+
+真实探针必须显式`--live`，只读取当前进程的`TUSHARE_TOKEN`；输出根严格限制在被Git忽略的`data/tmp/tushare-capability`安全子树，不能指向MarketDataStorage、策略publication、portfolio、配置或其他正式目录。成功也不进入MarketDataStorage：
+
+```powershell
+$env:TUSHARE_TOKEN = "<仅在本机设置>"
+python -m agent.tushare_capability_probe `
+  --config configs/tushare_capability_probe.v1.json `
+  --live `
+  --output-root data/tmp/tushare-capability
+```
+
+Choice Secondary历史市场诊断、90份人工审核和固定7文件bundle见[研报审计](../research/broker_report_audit/README.md)。下列三个旧在线命令当前同样在SDK导入前返回`provider_access_expired`，仅保留接口形状供历史审计：
 
 ```powershell
 python -m agent.choice_candidate_probe --mode online `

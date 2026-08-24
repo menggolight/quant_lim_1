@@ -18,6 +18,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from . import provider_access
 from .contracts import aware_datetime, canonical_json_bytes, sha256_bytes
 from .providers.baostock import normalize_a_share_stock_instrument
 from .providers.base import (
@@ -859,6 +860,9 @@ class ChoiceCandidateService:
         query_type: str,
         exact_request: Mapping[str, Any],
     ) -> ChoiceCandidateEvidence:
+        provider_access.require_choice_network_access(
+            f"candidate_diagnostic_fetch_{query_type}"
+        )
         request = _validate_exact_request(query_type, exact_request)
         client: Any = None
         session_attempted = False

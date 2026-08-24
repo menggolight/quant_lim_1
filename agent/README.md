@@ -7,6 +7,7 @@
 | 模块 | 职责 |
 |---|---|
 | `market_data_probe.py` | 调用 Market Data Registry 做一次真实、只读探针，输出结构化状态和哈希 |
+| `tushare_capability_probe.py` | 默认离线plan、显式`--live`的小样本Tushare能力探针；只写`data/tmp`证据，不形成正式MarketDataBatch或策略权限 |
 | `choice_candidate_probe.py` | 显式捕获或离线重放 Choice SW2021、sector、EDB 候选证据；永不转正式真值 |
 | `factor_evidence_probe.py` | 固定捕获/重放 Choice 23 指数、中证当前 12 指数或上交所交易日证据；输出内容寻址 receipt，始终不自动准入 |
 | `choice_evidence_archive.py` | 在读取秘密前排除敏感路径，把现有 Choice raw/receipt/quarantine/checkpoint 复制为只读内容寻址归档；不删除源文件 |
@@ -34,7 +35,7 @@ python -m agent.market_data_probe `
   --end-date 2026-08-05
 ```
 
-Choice 许可接口的诊断日线仅接沪深 A 股股票（`qfq`）和白名单指数 `000300.SH`（`none`），只在显式指定时调用，不会替换 BaoStock 默认主源：
+Choice历史许可接口代码与证据仍保留，但当前访问策略固定为`expired`。下列旧诊断入口现在会在SDK导入前返回`provider_access_expired`，不会替换BaoStock或自动fallback：
 
 ```powershell
 python -m agent.market_data_probe `
@@ -44,6 +45,24 @@ python -m agent.market_data_probe `
   --adjustment qfq `
   --start-date 2026-08-03 `
   --end-date 2026-08-07
+```
+
+Tushare扩展接口使用独立能力探针。plan不读取Token、不导入SDK、不联网：
+
+```powershell
+python -m agent.tushare_capability_probe `
+  --config configs/tushare_capability_probe.v1.json `
+  --plan
+```
+
+只有显式`--live`才会读取当前进程的`TUSHARE_TOKEN`并执行有界只读调用；产物固定写入`data/tmp/tushare-capability/<probe_run_id>/`且始终`not_admitted`：
+
+```powershell
+$env:TUSHARE_TOKEN = "<仅在本机设置>"
+python -m agent.tushare_capability_probe `
+  --config configs/tushare_capability_probe.v1.json `
+  --live `
+  --output-root data/tmp/tushare-capability
 ```
 
 质量成长历史批次使用另一个固定入口。它把 CSS 按日期和最多50只股票分批，每100项压缩checkpoint，中断后可从已验证artifact恢复；不开放调用者自选板块、字段或回测窗口：
@@ -60,7 +79,7 @@ python -m agent.choice_quality_growth_batch verify `
 
 即使采集完整，当前仍因 Choice 日历未与交易所真值对账、缺PIT行业与首披财务而返回非零阻塞码。`source_authenticated=false`和 `raw_semantics=canonicalized_sdk_projection`表示可重放不等于官方来源认证。
 
-Choice SDK 未注册、未激活/无权限、网络不可达和查询失败分别输出 `dependency_missing`、`not_configured`、`network_blocked` 或 `failed`。账号、验证码和 `userInfo` 不得进入命令、日志或仓库。
+`dependency_missing`、`not_configured`、`network_blocked`和`failed`只描述访问策略到期前的历史故障分类；当前所有Choice新网络入口都先返回`provider_access_expired`。账号、验证码和`userInfo`不得进入命令、日志或仓库。
 
 Factor Lab 的证据探针只有固定 source 和指数白名单，不接受任意代码或 Provider：
 
@@ -85,7 +104,7 @@ python -m agent.choice_evidence_archive `
 
 归档会在打开文件前排除 activation、`userInfo`、credential、token、secret、`.env` 和密钥材料；保存普通证据的逐字节 SHA-256、manifest 和 checkpoint，源文件保持不变。
 
-Choice 的分类、指定日期板块成分和 EDB 发布日期只进入独立候选层：
+Choice的分类、指定日期板块成分和EDB发布日期只进入独立候选层。以下在线命令仅保留历史接口形状，当前统一失败为`provider_access_expired`；对应offline模式只可做旧证据完整性诊断，不能进入新的正式研究消费：
 
 ```powershell
 python -m agent.choice_candidate_probe --mode online `

@@ -9,6 +9,8 @@
 | `strategy_adaptive_exposure.v2.json` | A股1万元自适应仓位V2的P0契约：月净收益10%仅作挑战报告，目标总仓位0%—100%、显式现金意图、风险退出优先和严格样本外边界；P0安全运行时已实现，但未实现Alpha/仓位模型且不具备Paper或交易准入 |
 | `strategy_quality_growth.v1.json` | A股1万元质量成长V1的六因子、PIT数据门、Top2仓位、成本、风险、历史门、Paper与降级诊断真源；当前 `blocked_missing_pit_data` |
 | `market_data.v1.json` | BaoStock 默认主源、Provider allowlist、dataset-specific admission、整批 fallback、三层存储和可选核验政策 |
+| `provider_access.v1.json` | Provider访问许可边界；Choice固定为`expired`并在SDK导入前阻断新访问，历史证据保留但不进入新的正式研究消费；Tushare只允许capability probe |
+| `tushare_capability_probe.v1.json` | Tushare固定endpoint、小样本参数、字段/主键/日期/单位、调用顺序和请求上限；不含Token、SDK函数名或正式准入 |
 | `factor_hypotheses/csi11_relative_momentum.v1.json` | Factor Lab V1 的三候选、公式、双轨指数、标签、Screen/Confirm 窗口与不可变门槛 |
 | `broker_report_audit.v2.json` | 研报审计标准默认配置；研报来源与市场数据 Registry 解耦 |
 | `broker_report_audit.v1.json` | 历史兼容配置；只在调用方显式指定时复现原 Eastmoney 行情语义 |
@@ -20,8 +22,8 @@
 
 - `default_provider=baostock`；Provider 身份不能自证官方真值。
 - `daily_bar`、`trade_calendar` 和 `security_master` 的主源为 BaoStock。
-- Choice 是厂商 SDK 分发的显式可选 Secondary：股票 `qfq` 日线、白名单沪深300 `none` 日线和交易日历走 Registry 诊断读取；SW2021/sector/EDB 走独立候选存储。Registry 不会自动加入 fallback，不与 BaoStock 拼接，也不能升级为正式真值。
-- Tushare 仅为可选日线核验源，缺少 `TUSHARE_TOKEN` 时为 `not_configured`，不影响 BaoStock 主链。
+- Choice代码与历史证据保留，但当前访问策略为`expired`：所有新网络入口在SDK导入前返回`provider_access_expired`，旧validated数据也不能进入新的正式研究消费。它不会触发自动fallback或与其他Provider拼接。
+- Tushare V1仍仅为可选日线核验源；新增接口只走独立capability probe。缺少`TUSHARE_TOKEN`时为`not_configured`，不影响BaoStock主链，也不能形成正式MarketDataBatch。
 - AKShare 是禁用的扩展骨架；没有显式数据集、真实上游和准入声明时不能调用。
 - Eastmoney 行情固定为 `diagnostic_only`，`default_provider=false`，不能作为 fallback。
 - Primary 与 Secondary 只能形成独立完整批次，不允许补行、默认数据或 synthetic 降级。

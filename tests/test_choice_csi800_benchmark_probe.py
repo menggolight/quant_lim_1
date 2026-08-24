@@ -98,6 +98,15 @@ def provider_for(client):
 
 
 class ChoiceCsi800BenchmarkProbeTests(unittest.TestCase):
+    def setUp(self):
+        for target in (
+            "research.market_data.provider_access.require_choice_network_access",
+            "research.market_data.provider_access.require_choice_diagnostic_session",
+        ):
+            patcher = patch(target)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def test_range_methods_keep_alias_fields_none_basis_and_no_fill_fixed(self):
         client = FixedBenchmarkClient()
         provider = provider_for(client)

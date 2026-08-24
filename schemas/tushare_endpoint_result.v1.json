@@ -1,0 +1,313 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/tushare_endpoint_result.v1.json",
+  "title": "Tushare capability probe endpoint result",
+  "description": "One bounded, sanitized capability-only result. This is not Market Data admission or source authentication.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "endpoint",
+    "status",
+    "permission_status",
+    "requested_at",
+    "completed_at",
+    "sanitized_parameters",
+    "request_count",
+    "row_count",
+    "field_names",
+    "required_fields",
+    "missing_required_fields",
+    "candidate_primary_key",
+    "duplicate_key_count",
+    "null_rates",
+    "min_date",
+    "max_date",
+    "sample_sha256",
+    "raw_payload_sha256",
+    "response_shape",
+    "rate_limit_or_error_class",
+    "failure_code",
+    "failure_stage",
+    "pit_critical",
+    "pit_evidence_status",
+    "migration_candidate_role",
+    "notes",
+    "diagnostics"
+  ],
+  "properties": {
+    "schema_version": {"const": "tushare-endpoint-result.v1"},
+    "endpoint": {"enum": [
+      "trade_cal", "stock_basic", "daily", "daily_basic", "adj_factor",
+      "suspend_d", "stk_limit", "namechange", "index_basic", "index_daily",
+      "index_weight", "index_classify", "index_member_all", "income",
+      "income_vip", "balancesheet", "balancesheet_vip", "cashflow",
+      "cashflow_vip", "disclosure_date", "fina_indicator", "dividend"
+    ]},
+    "status": {"enum": [
+      "passed", "not_configured", "dependency_missing", "permission_denied",
+      "rate_limited", "network_blocked", "empty_result", "schema_drift",
+      "invalid_payload", "failed", "not_run_after_global_stop"
+    ]},
+    "permission_status": {"enum": [
+      "observed_available", "denied", "not_configured", "unknown", "not_applicable"
+    ]},
+    "requested_at": {"type": "string", "format": "date-time"},
+    "completed_at": {"type": "string", "format": "date-time"},
+    "sanitized_parameters": {
+      "type": "object",
+      "maxProperties": 8,
+      "propertyNames": {"pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$"},
+      "additionalProperties": {"type": "string", "minLength": 1, "maxLength": 64}
+    },
+    "request_count": {"type": "integer", "minimum": 0, "maximum": 1},
+    "row_count": {"type": "integer", "minimum": 0, "maximum": 10000},
+    "field_names": {"$ref": "#/$defs/fieldArray"},
+    "required_fields": {"$ref": "#/$defs/nonEmptyFieldArray"},
+    "missing_required_fields": {"$ref": "#/$defs/fieldArray"},
+    "candidate_primary_key": {"$ref": "#/$defs/nonEmptyFieldArray"},
+    "duplicate_key_count": {"type": "integer", "minimum": 0, "maximum": 10000},
+    "null_rates": {
+      "type": "object",
+      "maxProperties": 500,
+      "propertyNames": {"$ref": "#/$defs/field"},
+      "additionalProperties": {
+        "type": "string",
+        "pattern": "^(?:0(?:\\.[0-9]+)?|1(?:\\.0+)?)$"
+      }
+    },
+    "min_date": {"$ref": "#/$defs/nullableDate"},
+    "max_date": {"$ref": "#/$defs/nullableDate"},
+    "sample_sha256": {"$ref": "#/$defs/nullableSha256"},
+    "raw_payload_sha256": {"$ref": "#/$defs/nullableSha256"},
+    "response_shape": {"enum": ["dataframe_records", "none"]},
+    "rate_limit_or_error_class": {
+      "oneOf": [
+        {"enum": ["dependency", "configuration", "permission", "rate_limit", "network", "empty", "schema", "payload", "unexpected"]},
+        {"type": "null"}
+      ]
+    },
+    "failure_code": {
+      "oneOf": [
+        {"$ref": "#/$defs/identifier"},
+        {"type": "null"}
+      ]
+    },
+    "failure_stage": {"enum": [
+      "none", "pre_request_initialization", "endpoint_request", "global_stop"
+    ]},
+    "pit_critical": {"type": "boolean"},
+    "pit_evidence_status": {"enum": [
+      "candidate_fields_present_not_admitted", "missing_pit_fields",
+      "not_assessed", "not_applicable"
+    ]},
+    "migration_candidate_role": {"enum": [
+      "phase2_primary_candidate", "phase2_validation_candidate",
+      "diagnostic_only", "blocked", "unknown"
+    ]},
+    "notes": {
+      "type": "array",
+      "maxItems": 20,
+      "items": {"type": "string", "minLength": 1, "maxLength": 500}
+    },
+    "diagnostics": {"$ref": "#/$defs/diagnostics"}
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"failure_stage": {"const": "none"}},
+        "required": ["failure_stage"]
+      },
+      "then": {
+        "properties": {
+          "status": {"const": "passed"},
+          "request_count": {"const": 1},
+          "response_shape": {"const": "dataframe_records"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"failure_stage": {"const": "pre_request_initialization"}},
+        "required": ["failure_stage"]
+      },
+      "then": {
+        "properties": {
+          "status": {"enum": [
+            "not_configured", "dependency_missing", "permission_denied",
+            "rate_limited", "network_blocked", "failed"
+          ]},
+          "request_count": {"const": 0},
+          "row_count": {"const": 0},
+          "response_shape": {"const": "none"}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"failure_stage": {"const": "endpoint_request"}},
+        "required": ["failure_stage"]
+      },
+      "then": {
+        "properties": {
+          "status": {"enum": [
+            "not_configured", "dependency_missing", "permission_denied",
+            "rate_limited", "network_blocked", "empty_result", "schema_drift",
+            "invalid_payload", "failed"
+          ]},
+          "request_count": {"const": 1}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {"failure_stage": {"const": "global_stop"}},
+        "required": ["failure_stage"]
+      },
+      "then": {
+        "properties": {
+          "status": {"const": "not_run_after_global_stop"},
+          "request_count": {"const": 0},
+          "row_count": {"const": 0},
+          "response_shape": {"const": "none"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "field": {
+      "type": "string",
+      "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$"
+    },
+    "fieldArray": {
+      "type": "array",
+      "maxItems": 500,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/field"}
+    },
+    "nonEmptyFieldArray": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 500,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/field"}
+    },
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nullableSha256": {
+      "oneOf": [
+        {"$ref": "#/$defs/sha256"},
+        {"type": "null"}
+      ]
+    },
+    "nullableDate": {
+      "oneOf": [
+        {"type": "string", "format": "date"},
+        {"type": "null"}
+      ]
+    },
+    "nullableRate": {
+      "oneOf": [
+        {"type": "string", "pattern": "^(?:0(?:\\.[0-9]+)?|1(?:\\.0+)?)$"},
+        {"type": "null"}
+      ]
+    },
+    "indexCandidate": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ts_code", "name", "publisher", "category", "market", "is_total_return_candidate"],
+      "properties": {
+        "ts_code": {"type": "string", "minLength": 1, "maxLength": 32},
+        "name": {"type": "string", "minLength": 1, "maxLength": 128},
+        "publisher": {"type": ["string", "null"]},
+        "category": {"type": ["string", "null"]},
+        "market": {"type": ["string", "null"]},
+        "is_total_return_candidate": {"type": "boolean"}
+      }
+    },
+    "weightSnapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["trade_date", "unique_component_count", "duplicate_component_count", "weight_sum", "comparison_to_100"],
+      "properties": {
+        "trade_date": {"type": "string", "format": "date"},
+        "unique_component_count": {"type": "integer", "minimum": 0, "maximum": 10000},
+        "duplicate_component_count": {"type": "integer", "minimum": 0, "maximum": 10000},
+        "weight_sum": {"type": "string", "pattern": "^-?[0-9]+(?:\\.[0-9]+)?$"},
+        "comparison_to_100": {"enum": ["below", "equal", "above"]}
+      }
+    },
+    "industryMembership": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["industry_system", "levels_present", "in_date_coverage", "out_date_coverage", "current_member_count", "historical_member_count"],
+      "properties": {
+        "industry_system": {"const": "SW2021"},
+        "levels_present": {"type": "array", "uniqueItems": true, "items": {"enum": ["L1", "L2", "L3"]}},
+        "in_date_coverage": {"$ref": "#/$defs/nullableRate"},
+        "out_date_coverage": {"$ref": "#/$defs/nullableRate"},
+        "current_member_count": {"type": "integer", "minimum": 0, "maximum": 10000},
+        "historical_member_count": {"type": "integer", "minimum": 0, "maximum": 10000}
+      }
+    },
+    "versionCount": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ts_code", "end_date", "report_type", "version_count"],
+      "properties": {
+        "ts_code": {"type": "string", "minLength": 1, "maxLength": 32},
+        "end_date": {"$ref": "#/$defs/nullableDate"},
+        "report_type": {"type": "string", "minLength": 1, "maxLength": 64},
+        "version_count": {"type": "integer", "minimum": 1, "maximum": 10000}
+      }
+    },
+    "compTypeStructure": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["comp_type", "row_count", "field_names"],
+      "properties": {
+        "comp_type": {"type": "string", "minLength": 1, "maxLength": 64},
+        "row_count": {"type": "integer", "minimum": 1, "maximum": 10000},
+        "field_names": {"$ref": "#/$defs/nonEmptyFieldArray"}
+      }
+    },
+    "financialDiagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["ann_date_coverage", "f_ann_date_coverage", "actual_date_coverage", "version_counts", "earliest_report_period", "latest_report_period", "comp_type_structures", "returned_row_count", "configured_max_rows", "at_configured_row_limit", "revision_distinguishable"],
+      "properties": {
+        "ann_date_coverage": {"$ref": "#/$defs/nullableRate"},
+        "f_ann_date_coverage": {"$ref": "#/$defs/nullableRate"},
+        "actual_date_coverage": {"$ref": "#/$defs/nullableRate"},
+        "version_counts": {"type": "array", "maxItems": 10000, "items": {"$ref": "#/$defs/versionCount"}},
+        "earliest_report_period": {"$ref": "#/$defs/nullableDate"},
+        "latest_report_period": {"$ref": "#/$defs/nullableDate"},
+        "comp_type_structures": {"type": "array", "maxItems": 100, "items": {"$ref": "#/$defs/compTypeStructure"}},
+        "returned_row_count": {"type": "integer", "minimum": 0, "maximum": 10000},
+        "configured_max_rows": {"type": "integer", "minimum": 1, "maximum": 10000},
+        "at_configured_row_limit": {"type": "boolean"},
+        "revision_distinguishable": {"type": ["boolean", "null"]}
+      }
+    },
+    "diagnostics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["kind", "candidate_primary_key_null_count", "index_basic_candidates", "index_weight_snapshots", "industry_membership", "financial"],
+      "properties": {
+        "kind": {"enum": ["generic", "index_basic", "index_weight", "industry_membership", "financial"]},
+        "candidate_primary_key_null_count": {"type": "integer", "minimum": 0, "maximum": 10000},
+        "index_basic_candidates": {"type": "array", "maxItems": 2000, "items": {"$ref": "#/$defs/indexCandidate"}},
+        "index_weight_snapshots": {"type": "array", "maxItems": 1000, "items": {"$ref": "#/$defs/weightSnapshot"}},
+        "industry_membership": {
+          "oneOf": [{"$ref": "#/$defs/industryMembership"}, {"type": "null"}]
+        },
+        "financial": {
+          "oneOf": [{"$ref": "#/$defs/financialDiagnostics"}, {"type": "null"}]
+        }
+      }
+    }
+  }
+}

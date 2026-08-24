@@ -66,6 +66,15 @@ def provider_for(client):
 
 
 class ChoiceHistoricalIndustryProbeTests(unittest.TestCase):
+    def setUp(self):
+        for target in (
+            "research.market_data.provider_access.require_choice_network_access",
+            "research.market_data.provider_access.require_choice_diagnostic_session",
+        ):
+            patcher = patch(target)
+            patcher.start()
+            self.addCleanup(patcher.stop)
+
     def test_provider_uses_the_exact_frozen_read_only_contract(self):
         client = FixedIndustryClient()
         provider = provider_for(client)

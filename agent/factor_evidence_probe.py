@@ -30,7 +30,7 @@ from research.market_data.contracts import (
     canonical_json_bytes,
     sha256_bytes,
 )
-from research.market_data.providers.base import safe_error_text
+from research.market_data.providers.base import classify_unexpected_error, safe_error_text
 
 
 PROBE_VERSION = "factor-evidence-probe-v1"
@@ -1173,6 +1173,7 @@ def main(argv: Sequence[str] | None = None) -> int:
         )
         result = run_probe(query, root)
     except Exception as exc:
+        error = classify_unexpected_error(exc)
         failure_paths: dict[str, Any] = {}
         if query is not None and root is not None:
             try:
@@ -1186,13 +1187,14 @@ def main(argv: Sequence[str] | None = None) -> int:
                 # failure or leak additional filesystem details to stdout.
                 failure_paths = {"checkpoint_status": "persistence_failed"}
         result = {
-            "status": "failed",
+            "status": error.status,
             "probe_version": PROBE_VERSION,
             "mode": args.mode,
             "source": args.source,
             "research_admission_status": "not_admitted_probe_only",
+            "error_code": error.code,
             "error_type": type(exc).__name__,
-            "error": safe_error_text(exc),
+            "error": safe_error_text(error),
             **failure_paths,
         }
     sys.stdout.write(
