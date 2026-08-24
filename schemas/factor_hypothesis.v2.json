@@ -1,0 +1,77 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/factor_hypothesis.v2.json",
+  "title": "LLM research factor hypothesis v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "hypothesis_id",
+    "factor_id",
+    "created_at",
+    "information_cutoff_at",
+    "formula",
+    "formula_sha256",
+    "input_fields",
+    "input_schema_sha256",
+    "prediction_target",
+    "horizon_trading_days",
+    "expected_sign",
+    "universe_policy",
+    "benchmark_policy",
+    "economic_rationale",
+    "falsification_conditions",
+    "status",
+    "paper_eligibility",
+    "trade_eligibility",
+    "real_money_list_allowed",
+    "live_execution_status",
+    "hypothesis_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "factor-hypothesis-v2"},
+    "hypothesis_id": {"$ref": "#/$defs/identifier"},
+    "factor_id": {"$ref": "#/$defs/factorId"},
+    "created_at": {"$ref": "#/$defs/dateTime"},
+    "information_cutoff_at": {"$ref": "#/$defs/dateTime"},
+    "formula": {"type": "string", "minLength": 1},
+    "formula_sha256": {"$ref": "#/$defs/sha256"},
+    "input_fields": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[a-z][a-z0-9_.]{0,127}$"}
+    },
+    "input_schema_sha256": {"$ref": "#/$defs/sha256"},
+    "prediction_target": {"type": "string", "minLength": 1},
+    "horizon_trading_days": {"type": "integer", "minimum": 1},
+    "expected_sign": {"enum": ["positive", "negative"]},
+    "universe_policy": {"type": "string", "minLength": 1},
+    "benchmark_policy": {"type": "string", "minLength": 1},
+    "economic_rationale": {"type": "string", "minLength": 1},
+    "falsification_conditions": {
+      "type": "array",
+      "minItems": 1,
+      "uniqueItems": true,
+      "items": {"type": "string", "minLength": 1}
+    },
+    "status": {"const": "llm_research_candidate_only"},
+    "paper_eligibility": {"const": false},
+    "trade_eligibility": {"const": false},
+    "real_money_list_allowed": {"const": false},
+    "live_execution_status": {"const": "live_not_supported"},
+    "hypothesis_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "factorId": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]{0,63}$"
+    },
+    "dateTime": {"type": "string", "format": "date-time"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

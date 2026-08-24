@@ -6,6 +6,12 @@ import json
 from pathlib import Path
 import unittest
 
+from research.market_data.validation import validate_json_schema
+
+from research.strategy_workspace.experiment_v3_admission import (
+    ExperimentV3AdmissionError,
+    ExperimentV3AdmissionReceiptV1,
+)
 from research.strategy_workspace.exposure_engine_v2 import (
     EXPOSURE_BY_STATE,
     ComparisonOperator,
@@ -20,11 +26,35 @@ from research.strategy_workspace.exposure_engine_v2 import (
     ExposureStateMemoryV2,
     ExposureStateRuleV2,
     ExposureTransitionStatus,
-    decide_exposure,
+    decide_exposure as decide_exposure_formal,
+    decide_exposure_diagnostic as decide_exposure,
 )
 
 
 TZ = timezone(timedelta(hours=8))
+EXPERIMENT_SHA256 = "b" * 64
+EXPOSURE_POLICY_SOURCE_SHA256 = "a" * 64
+CONSTRUCTOR_POLICY_SOURCE_SHA256 = "c" * 64
+
+
+def _admission_receipt():
+    return ExperimentV3AdmissionReceiptV1(
+        receipt_id="experiment-v3-policy-test",
+        issued_at=datetime(2026, 1, 2, tzinfo=TZ),
+        experiment_spec_sha256=EXPERIMENT_SHA256,
+        approved_factor_registry_sha256="d" * 64,
+        approved_factor_registry_frozen_at=datetime(2025, 12, 28, tzinfo=TZ),
+        model_training_receipt_sha256="e" * 64,
+        model_admission_receipt_sha256="f" * 64,
+        model_sha256="2" * 64,
+        model_frozen_at=datetime(2025, 12, 30, tzinfo=TZ),
+        calibration_receipt_sha256="1" * 64,
+        calibration_horizon_sessions=20,
+        exposure_policy_source_sha256=EXPOSURE_POLICY_SOURCE_SHA256,
+        exposure_policy_frozen_at=datetime(2026, 1, 1, tzinfo=TZ),
+        constructor_policy_source_sha256=CONSTRUCTOR_POLICY_SOURCE_SHA256,
+        constructor_policy_frozen_at=datetime(2026, 1, 1, tzinfo=TZ),
+    )
 
 
 def _policy(*, ambiguous: bool = False) -> ExposureHysteresisPolicyV2:
@@ -62,7 +92,9 @@ def _policy(*, ambiguous: bool = False) -> ExposureHysteresisPolicyV2:
         policy_version="test-v1",
         preregistered_at=datetime(2026, 1, 1, tzinfo=TZ),
         rules=tuple(rules),
-        policy_source_sha256="a" * 64,
+        policy_source_sha256=EXPOSURE_POLICY_SOURCE_SHA256,
+        experiment_spec_sha256=EXPERIMENT_SHA256,
+        policy_admission_receipt=_admission_receipt(),
     )
 
 
@@ -132,6 +164,24 @@ class ExposureEngineV2Tests(unittest.TestCase):
                 ExposureState.RISK_ON: 1.0,
             },
         )
+
+    def test_formal_entry_is_blocked_to_risk_off_without_bypassing_state_time(self) -> None:
+        policy = _policy()
+        decision_at = datetime(2026, 8, 18, 16, tzinfo=TZ)
+        inputs = _inputs(decision_at)
+        result = decide_exposure_formal(inputs, policy, _memory(policy))
+        self.assertIs(result.state, ExposureState.RISK_OFF)
+        self.assertEqual(result.target_gross_exposure, 0.0)
+        self.assertIn("FORMAL_EXPERIMENT_V3_ADMISSION_BLOCKED", result.reason_codes)
+
+        same_day_memory = ExposureStateMemoryV2(
+            policy_sha256=policy.policy_sha256,
+            current_state=ExposureState.NEUTRAL,
+            last_decision_at=decision_at - timedelta(hours=1),
+            last_input_snapshot_sha256="9" * 64,
+        )
+        with self.assertRaisesRegex(ExposureEngineError, "later CST strategy date"):
+            decide_exposure_formal(inputs, policy, same_day_memory)
 
     def test_ordinary_change_requires_two_consecutive_sessions(self) -> None:
         policy = _policy()
@@ -307,6 +357,51 @@ class ExposureEngineV2Tests(unittest.TestCase):
                 _inputs(datetime(2026, 8, 18, 16, tzinfo=TZ)), policy, memory
             )
 
+    def test_policy_requires_controlled_receipt_and_exact_experiment_binding(self) -> None:
+        diagnostic = _admission_receipt()
+        self.assertEqual(
+            diagnostic.status,
+            "diagnostic_binding_only_not_formally_admitted",
+        )
+        with self.assertRaisesRegex(ExperimentV3AdmissionError, "blocked_not_implemented"):
+            diagnostic.require_valid(as_of=datetime(2026, 8, 18, tzinfo=TZ))
+        with self.assertRaisesRegex(
+            ExperimentV3AdmissionError, "cannot precede bound frozen artifacts"
+        ):
+            replace(
+                diagnostic,
+                issued_at=diagnostic.model_frozen_at - timedelta(seconds=1),
+            )
+
+        admitted = _policy()
+        self.assertEqual(admitted.experiment_spec_sha256, EXPERIMENT_SHA256)
+        self.assertEqual(
+            admitted.to_dict()["policy_admission_receipt_sha256"],
+            admitted.policy_admission_receipt.receipt_sha256,
+        )
+        with self.assertRaisesRegex(ExposureEngineError, "diagnostic binding mismatch"):
+            ExposureHysteresisPolicyV2(
+                policy_id="wrong-experiment",
+                policy_version="test-v2",
+                preregistered_at=datetime(2026, 1, 1, tzinfo=TZ),
+                rules=admitted.rules,
+                policy_source_sha256=EXPOSURE_POLICY_SOURCE_SHA256,
+                experiment_spec_sha256="9" * 64,
+                policy_admission_receipt=_admission_receipt(),
+            )
+
+        object.__setattr__(
+            admitted.policy_admission_receipt,
+            "approved_factor_registry_sha256",
+            "9" * 64,
+        )
+        with self.assertRaisesRegex(ExposureEngineError, "receipt hash mismatch"):
+            decide_exposure(
+                _inputs(datetime(2026, 8, 18, 16, tzinfo=TZ)),
+                admitted,
+                _memory(admitted),
+            )
+
     def test_exact_six_categories_and_policy_bound_memory_are_required(self) -> None:
         complete = _inputs(datetime(2026, 8, 18, 16, tzinfo=TZ))
         with self.assertRaises(ExposureEngineError):
@@ -337,9 +432,14 @@ class ExposureEngineV2Tests(unittest.TestCase):
 
     def test_new_schemas_are_valid_json(self) -> None:
         root = Path(__file__).resolve().parents[1] / "schemas"
+        validate_json_schema(
+            _admission_receipt().to_dict(),
+            root / "experiment_v3_admission_receipt.v1.json",
+        )
         for name in (
+            "experiment_v3_admission_receipt.v1.json",
             "exposure_input_snapshot.v1.json",
-            "exposure_hysteresis_policy.v1.json",
+            "exposure_hysteresis_policy.v2.json",
             "exposure_state_memory.v1.json",
             "exposure_decision.v2.json",
         ):

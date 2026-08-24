@@ -10,7 +10,7 @@ from __future__ import annotations
 import json
 import os
 import re
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, replace
 from datetime import date, datetime, time, timedelta, timezone
 from decimal import Decimal, InvalidOperation, ROUND_DOWN
 from pathlib import Path
@@ -18,6 +18,10 @@ from statistics import median
 from types import MappingProxyType
 from typing import Any, Mapping, Protocol, Sequence, runtime_checkable
 
+from research.factor_discovery.governance import (
+    ApprovedFactorRegistryV1,
+    FactorGovernanceError,
+)
 from research.strategy_workspace.adaptive_exposure import (
     DEFAULT_ADAPTIVE_EXPOSURE_POLICY_PATH,
     FROZEN_ADAPTIVE_EXPOSURE_POLICY_SHA256,
@@ -32,6 +36,18 @@ from research.strategy_workspace.alpha_engine_v2 import (
     run_alpha_engine,
 )
 from research.strategy_workspace.contracts import canonical_json_bytes, canonical_sha256
+from research.strategy_workspace.daily_signal_publication import (
+    DailySignalAdmissionReceiptV1,
+    DailySignalAuthority,
+    DailySignalPublicationReceiptV1,
+    _publish_daily_signal_bundle_from_daily_pipeline,
+)
+from research.strategy_workspace.experiment_v3_admission import (
+    ExperimentV3AdmissionError,
+    ExperimentV3AdmissionReceiptV1,
+    verify_experiment_v3_admission_receipt,
+    verify_experiment_v3_diagnostic_binding,
+)
 from research.strategy_workspace.exposure_engine_v2 import (
     ACCOUNT_DRAWDOWN_RISK_OFF_TRIGGER,
     EXPOSURE_DECISION_SCHEMA_VERSION,
@@ -49,6 +65,7 @@ from research.strategy_workspace.exposure_engine_v2 import (
 )
 from research.strategy_workspace.next_session_signal import (
     NextSessionConsumption,
+    NextSessionChannel,
     NextSessionSignalConflict,
     NextSessionSignalError,
     NextSessionSignal,
@@ -871,6 +888,8 @@ class DailyPipelineRunV1:
     daily_decision: DailyStrategyDecisionV2
     artifacts: "DailyDecisionArtifacts"
     evidence_artifacts: "DailyEvidenceArtifacts"
+    daily_signal_admission_receipt: DailySignalAdmissionReceiptV1 | None
+    daily_signal_publication_receipt: DailySignalPublicationReceiptV1 | None
     signal_path: Path | None
 
 
@@ -884,6 +903,8 @@ class DailyPipelineBlockedRunV1:
     failure_receipt_path: Path
     exposure_inputs: ExposureInputSnapshotV2 | None = None
     exposure_decision: ExposureDecisionV2 | None = None
+    daily_signal_admission_receipt: DailySignalAdmissionReceiptV1 | None = None
+    daily_signal_publication_receipt: DailySignalPublicationReceiptV1 | None = None
     signal_path: None = None
 
 
@@ -905,6 +926,10 @@ class DailyEvidenceArtifacts:
     exposure_state_path: Path
     portfolio_construction_path: Path | None
     portfolio_intent_path: Path
+    approved_factor_registry_path: Path
+    experiment_v3_admission_receipt_path: Path
+    experiment_v3_evidence_path: Path
+    experiment_v3_evidence_sha256: str
 
 
 def render_daily_decision_markdown(decision: DailyStrategyDecisionV2) -> str:
@@ -1688,22 +1713,226 @@ def _requested_intent(
     return PortfolioIntentType.ALPHA_REBALANCE, target, False
 
 
+def _validate_experiment_v3_governance(
+    *,
+    decision_at: datetime,
+    approved_factor_registry: ApprovedFactorRegistryV1,
+    experiment_v3_admission_receipt: ExperimentV3AdmissionReceiptV1,
+    alpha_model: FrozenAlphaModelV2,
+    exposure_policy: ExposureHysteresisPolicyV2,
+    constructor_policy: PortfolioConstructorPolicy,
+) -> dict[str, Any]:
+    """Validate one shared Experiment V3 evidence graph before a decision.
+
+    Each artifact validates some local invariants on construction.  This gate
+    additionally proves that the exact registry, model, two policies and the
+    caller-supplied receipt belong to the same experiment evidence graph.
+    Hash equality is treated only as content binding, never source proof.
+    """
+
+    if not isinstance(approved_factor_registry, ApprovedFactorRegistryV1):
+        raise DailyPipelineError(
+            "approved_factor_registry must be ApprovedFactorRegistryV1"
+        )
+    if type(experiment_v3_admission_receipt) is not ExperimentV3AdmissionReceiptV1:
+        raise DailyPipelineError(
+            "experiment_v3_admission_receipt must use the exact controlled V3 type"
+        )
+    if not isinstance(alpha_model, FrozenAlphaModelV2):
+        raise DailyPipelineError("alpha_model must be FrozenAlphaModelV2")
+    if not isinstance(exposure_policy, ExposureHysteresisPolicyV2):
+        raise DailyPipelineError("exposure_policy must be frozen and typed")
+    if not isinstance(constructor_policy, PortfolioConstructorPolicy):
+        raise DailyPipelineError("constructor_policy must be frozen and typed")
+
+    try:
+        approved_factor_registry.require_valid(as_of=decision_at)
+        alpha_model.calibration_artifact.require_valid()
+        alpha_model.model_training_receipt.require_valid(as_of=decision_at)
+        alpha_model.model_admission_receipt.require_valid(as_of=decision_at)
+        verify_experiment_v3_diagnostic_binding(
+            experiment_v3_admission_receipt,
+            as_of=decision_at
+        )
+        for policy_receipt in (
+            exposure_policy.policy_admission_receipt,
+            constructor_policy.policy_admission_receipt,
+        ):
+            verify_experiment_v3_diagnostic_binding(
+                policy_receipt,
+                as_of=decision_at,
+            )
+    except (
+        AlphaEngineError,
+        ExperimentV3AdmissionError,
+        FactorGovernanceError,
+        TypeError,
+        ValueError,
+    ) as exc:
+        raise DailyPipelineError(
+            f"Experiment V3 governance artifact rejected: {type(exc).__name__}"
+        ) from exc
+
+    expected_feature_ids = tuple(
+        sorted(
+            set(alpha_model.financial_submodel.feature_ids)
+            | set(alpha_model.non_financial_submodel.feature_ids)
+        )
+    )
+    bindings = {
+        "experiment_spec_sha256": alpha_model.experiment_spec_sha256,
+        "approved_factor_registry_sha256": (
+            approved_factor_registry.registry_sha256
+        ),
+        "experiment_v3_admission_receipt_sha256": (
+            experiment_v3_admission_receipt.receipt_sha256
+        ),
+        "model_training_receipt_sha256": (
+            alpha_model.model_training_receipt_sha256
+        ),
+        "model_admission_receipt_sha256": (
+            alpha_model.model_admission_receipt_sha256
+        ),
+        "model_sha256": alpha_model.model_sha256,
+        "calibration_receipt_sha256": alpha_model.calibration_receipt_sha256,
+        "calibration_horizon_sessions": alpha_model.prediction_horizon_sessions,
+        "exposure_policy_source_sha256": exposure_policy.policy_source_sha256,
+        "constructor_policy_source_sha256": (
+            constructor_policy.policy_source_sha256
+        ),
+    }
+    mismatches = []
+    if canonical_sha256(alpha_model.to_content_dict()) != alpha_model.model_sha256:
+        mismatches.append("alpha_model_sha256")
+    if (
+        canonical_sha256(exposure_policy.to_content_dict())
+        != exposure_policy.policy_sha256
+    ):
+        mismatches.append("exposure_policy_sha256")
+    if (
+        canonical_sha256(constructor_policy.to_content_dict())
+        != constructor_policy.policy_sha256
+    ):
+        mismatches.append("constructor_policy_sha256")
+    if alpha_model.approved_factor_registry_sha256 != approved_factor_registry.registry_sha256:
+        mismatches.append("model_factor_registry")
+    if experiment_v3_admission_receipt.model_sha256 != alpha_model.model_sha256:
+        mismatches.append("receipt_model_sha256")
+    if approved_factor_registry.approved_factor_ids != expected_feature_ids:
+        mismatches.append("registry_feature_set")
+    if exposure_policy.experiment_spec_sha256 != alpha_model.experiment_spec_sha256:
+        mismatches.append("exposure_experiment_spec")
+    if constructor_policy.experiment_spec_sha256 != alpha_model.experiment_spec_sha256:
+        mismatches.append("constructor_experiment_spec")
+    for name, policy_receipt in (
+        ("exposure", exposure_policy.policy_admission_receipt),
+        ("constructor", constructor_policy.policy_admission_receipt),
+    ):
+        if policy_receipt.to_dict() != experiment_v3_admission_receipt.to_dict():
+            mismatches.append(f"{name}_experiment_receipt")
+    if mismatches:
+        raise DailyPipelineError(
+            "Experiment V3 governance binding mismatch: "
+            + ",".join(sorted(mismatches))
+        )
+    return bindings
+
+
+def _unverified_experiment_v3_commitment(
+    *,
+    approved_factor_registry: Any,
+    experiment_v3_admission_receipt: Any,
+    alpha_model: Any,
+    exposure_policy: Any,
+    constructor_policy: Any,
+) -> dict[str, Any]:
+    """Deterministically commit supplied governance objects on blocked runs."""
+
+    def artifact_hash(
+        value: Any,
+        *,
+        expected_type: type[Any],
+        claimed_name: str,
+        content_method: str,
+        scope: str,
+    ) -> dict[str, str]:
+        if not isinstance(value, expected_type):
+            unavailable = canonical_sha256(
+                {"scope": scope, "python_type": type(value).__name__}
+            )
+            return {"claimed_sha256": unavailable, "content_sha256": unavailable}
+        claimed = getattr(value, claimed_name, None)
+        if not isinstance(claimed, str) or re.fullmatch(r"[0-9a-f]{64}", claimed) is None:
+            claimed = canonical_sha256(
+                {"scope": f"{scope}-invalid-claim", "python_type": type(claimed).__name__}
+            )
+        try:
+            content = getattr(value, content_method)()
+            content_hash = canonical_sha256(content)
+        except (AttributeError, TypeError, ValueError):
+            content_hash = canonical_sha256(
+                {"scope": f"{scope}-unreadable-content", "python_type": type(value).__name__}
+            )
+        return {"claimed_sha256": claimed, "content_sha256": content_hash}
+
+    return {
+        "scope": "unverified-experiment-v3-governance-commitment.v1",
+        "approved_factor_registry": artifact_hash(
+            approved_factor_registry,
+            expected_type=ApprovedFactorRegistryV1,
+            claimed_name="registry_sha256",
+            content_method="to_content_dict",
+            scope="unavailable-approved-factor-registry.v1",
+        ),
+        "experiment_v3_admission_receipt": artifact_hash(
+            experiment_v3_admission_receipt,
+            expected_type=ExperimentV3AdmissionReceiptV1,
+            claimed_name="receipt_sha256",
+            content_method="to_content_dict",
+            scope="unavailable-experiment-v3-admission-receipt.v1",
+        ),
+        "alpha_model": artifact_hash(
+            alpha_model,
+            expected_type=FrozenAlphaModelV2,
+            claimed_name="model_sha256",
+            content_method="to_content_dict",
+            scope="unavailable-alpha-model.v1",
+        ),
+        "exposure_policy": artifact_hash(
+            exposure_policy,
+            expected_type=ExposureHysteresisPolicyV2,
+            claimed_name="policy_sha256",
+            content_method="to_content_dict",
+            scope="unavailable-exposure-policy.v1",
+        ),
+        "constructor_policy": artifact_hash(
+            constructor_policy,
+            expected_type=PortfolioConstructorPolicy,
+            claimed_name="policy_sha256",
+            content_method="to_content_dict",
+            scope="unavailable-constructor-policy.v1",
+        ),
+    }
+
+
 def _combined_policy_sha256(
     *,
     adaptive_policy_sha256: str,
     exposure_policy: ExposureHysteresisPolicyV2,
     constructor_policy: PortfolioConstructorPolicy,
     execution_rule_bundle_hash: str,
+    experiment_v3_governance: Mapping[str, Any],
 ) -> str:
     return canonical_sha256(
         {
-            "scope": "daily-signal-policy-bundle.v1",
+            "scope": "daily-signal-policy-bundle.v2",
             "adaptive_exposure_policy_sha256": _sha256(
                 adaptive_policy_sha256, "adaptive_policy_sha256"
             ),
             "exposure_policy_sha256": exposure_policy.policy_sha256,
             "constructor_policy_sha256": constructor_policy.policy_sha256,
             "execution_rule_bundle_sha256": execution_rule_bundle_hash,
+            "experiment_v3_governance": dict(experiment_v3_governance),
             "locked_test_guard": {
                 "status": "experiment_v3_not_frozen",
                 "forbidden_start": LOCKED_TEST_START,
@@ -1770,6 +1999,396 @@ _COMMON_CANCEL_CONDITIONS = (
     "风险减仓 SELL 不因价格偏离而取消",
     "未完成人工确认时不得记录成交",
 )
+
+
+def _account_publication_payload(
+    account: AccountSnapshot,
+    *,
+    account_state_sha256: str,
+) -> dict[str, Any]:
+    return {
+        "scope": "daily-strategy-account-snapshot.v1",
+        "strategy_id": account.strategy_id,
+        "snapshot_id": account.snapshot_id,
+        "as_of": account.as_of,
+        "cash": account.cash,
+        "positions": {
+            key: position.quantity
+            for key, position in sorted(account.positions.items())
+        },
+        "sellable_positions": {
+            key: position.sellable_quantity
+            for key, position in sorted(account.positions.items())
+        },
+        "account_state_sha256": account_state_sha256,
+        "account_fingerprint": account_fingerprint(account),
+        "strategy_only": True,
+    }
+
+
+def _execution_rule_publication_payload(
+    fees: FeeSchedule,
+    instrument_rules: Mapping[str, InstrumentRule],
+    *,
+    execution_rule_bundle_hash: str,
+) -> dict[str, Any]:
+    return {
+        "scope": "daily-canonical-execution-rule-bundle.v1",
+        "fee_schedule": {
+            "commission_rate": fees.commission_rate,
+            "minimum_commission": fees.minimum_commission,
+            "exchange_fee_rate": fees.exchange_fee_rate,
+        },
+        "instrument_rules": [
+            _instrument_rule_dict(rule)
+            for _, rule in sorted(instrument_rules.items())
+        ],
+        "whole_lot_policy": "floor_to_instrument_lot.v1",
+        "execution_rule_bundle_sha256": execution_rule_bundle_hash,
+        "source_authentication": "hash_consistency_only_registry_acl_is_writer_boundary",
+    }
+
+
+def _publish_daily_signal_evidence(
+    *,
+    output_directory: Path,
+    ranking: AlphaRankingV2,
+    alpha_model: FrozenAlphaModelV2,
+    approved_factor_registry: ApprovedFactorRegistryV1,
+    exposure: ExposureDecisionV2,
+    exposure_policy: ExposureHysteresisPolicyV2,
+    construction: PortfolioConstructionResult,
+    intent: PortfolioIntent,
+    constructor_policy: PortfolioConstructorPolicy,
+    experiment_v3_admission_receipt: ExperimentV3AdmissionReceiptV1,
+    account: AccountSnapshot,
+    calendar_receipt: OfficialCalendarReceipt,
+    calendar_registry: OfficialCalendarRegistry,
+    fees: FeeSchedule,
+    instrument_rules: Mapping[str, InstrumentRule],
+    execution_rule_bundle_hash: str,
+    daily_decision: DailyStrategyDecisionV2,
+) -> tuple[DailySignalAdmissionReceiptV1, DailySignalPublicationReceiptV1]:
+    has_buy = any(
+        item.action is ConstructionActionType.BUY for item in construction.actions
+    )
+    risk_type = intent.intent_type in {
+        PortfolioIntentType.RISK_OFF,
+        PortfolioIntentType.DEFENSIVE_REDUCTION,
+        PortfolioIntentType.NO_ALPHA_CASH,
+        PortfolioIntentType.ACCOUNT_DRAWDOWN_EXIT,
+    }
+    authority = (
+        DailySignalAuthority.RISK_REDUCTION_ONLY
+        if risk_type and not has_buy
+        else DailySignalAuthority.BLOCKED
+    )
+    authority_content = {
+        "schema_version": "daily-signal-authority-receipt.v1",
+        "strategy_id": ADAPTIVE_EXPOSURE_V2_STRATEGY_ID,
+        "strategy_date": daily_decision.strategy_date,
+        "execution_date": daily_decision.execution_date,
+        "frozen_at": intent.frozen_at,
+        "authority": authority.value,
+        "intent_type": intent.intent_type.value,
+        "construction_sha256": construction.construction_sha256,
+        "formal_v3_loader_status": "blocked_not_implemented",
+        "buy_allowed": False,
+        "automatic_submission": False,
+        "paper_eligibility": False,
+        "trade_eligibility": False,
+        "live_supported": False,
+    }
+    authority_hash = canonical_sha256(authority_content)
+    authority_payload = {
+        **authority_content,
+        "authority_receipt_sha256": authority_hash,
+    }
+    authority_path = (
+        output_directory
+        / f"{daily_decision.strategy_date.isoformat()}.daily-signal-authority.json"
+    )
+    _write_create_only(
+        authority_path,
+        canonical_json_bytes(authority_payload) + b"\n",
+    )
+    failure_content = (
+        {
+            "scope": "daily-alpha-publication-blocked.v1",
+            "strategy_date": daily_decision.strategy_date,
+            "construction_sha256": construction.construction_sha256,
+            "failed_stage": "DAILY_SIGNAL_ADMISSION",
+            "failure_codes": ["formal_experiment_v3_loader_blocked"],
+            "buy_allowed": False,
+        }
+        if authority is DailySignalAuthority.BLOCKED
+        else {
+            "schema_version": "daily-signal-publication-failure-receipt.v1",
+            "strategy_id": ADAPTIVE_EXPOSURE_V2_STRATEGY_ID,
+            "strategy_date": daily_decision.strategy_date,
+            "failed_stage": None,
+            "failure_codes": [],
+            "authority_receipt_sha256": authority_hash,
+            "orders_allowed": True,
+            "buy_allowed": False,
+        }
+    )
+    failure_hash = canonical_sha256(failure_content)
+    if (
+        authority is DailySignalAuthority.BLOCKED
+        and daily_decision.failure_receipt_sha256 != failure_hash
+    ):
+        raise DailyPipelineIntegrityError(
+            "blocked Daily decision and persisted failure receipt differ"
+        )
+    failure_payload = {
+        **failure_content,
+        "failure_receipt_sha256": failure_hash,
+    }
+    _write_create_only(
+        output_directory
+        / f"{daily_decision.strategy_date.isoformat()}.daily-signal-publication-failure.json",
+        canonical_json_bytes(failure_payload) + b"\n",
+    )
+    admission = DailySignalAdmissionReceiptV1(
+        strategy_date=daily_decision.strategy_date,
+        execution_date=daily_decision.execution_date,
+        frozen_at=intent.frozen_at,
+        authority=authority,
+        intent_type=intent.intent_type.value,
+        alpha_ranking_sha256=ranking.ranking_sha256,
+        model_sha256=ranking.model_sha256,
+        approved_factor_registry_sha256=approved_factor_registry.registry_sha256,
+        model_admission_receipt_sha256=(
+            experiment_v3_admission_receipt.model_admission_receipt_sha256
+        ),
+        exposure_decision_sha256=exposure.decision_sha256,
+        exposure_state_sha256=exposure.state_sha256,
+        exposure_state=exposure.state.value,
+        exposure_target_gross=Decimal(str(exposure.target_gross_exposure)),
+        construction_sha256=construction.construction_sha256,
+        intent_sha256=intent.intent_sha256,
+        exposure_policy_sha256=exposure_policy.policy_sha256,
+        constructor_policy_sha256=constructor_policy.policy_sha256,
+        combined_policy_sha256=daily_decision.policy_sha256,
+        account_state_sha256=construction.account_state_sha256,
+        account_fingerprint=account_fingerprint(account),
+        calendar_receipt_sha256=calendar_receipt.receipt_sha256,
+        calendar_registry_sha256=calendar_registry.registry_sha256,
+        execution_rule_bundle_sha256=execution_rule_bundle_hash,
+        daily_decision_sha256=daily_decision.decision_sha256,
+        experiment_admission_receipt_sha256=(
+            experiment_v3_admission_receipt.receipt_sha256
+        ),
+        authority_receipt_sha256=authority_hash,
+        failure_receipt_sha256=(
+            failure_hash if authority is DailySignalAuthority.BLOCKED else None
+        ),
+    )
+    full_artifacts = {
+            "alpha-ranking": ranking.to_dict(),
+            "alpha-model": alpha_model.to_dict(),
+            "approved-factor-registry": approved_factor_registry.to_dict(),
+            "exposure-decision": exposure.to_dict(),
+            "exposure-state": exposure.next_state_memory.to_dict(),
+            "portfolio-construction": construction.to_dict(),
+            "portfolio-intent": intent.to_dict(),
+            "exposure-policy": exposure_policy.to_dict(),
+            "constructor-policy": constructor_policy.to_dict(),
+            "experiment-v3-admission": experiment_v3_admission_receipt.to_dict(),
+            "account-snapshot": _account_publication_payload(
+                account,
+                account_state_sha256=construction.account_state_sha256,
+            ),
+            "calendar-receipt": calendar_receipt.to_dict(),
+            "calendar-registry": calendar_registry.to_dict(),
+            "execution-rule-bundle": _execution_rule_publication_payload(
+                fees,
+                instrument_rules,
+                execution_rule_bundle_hash=execution_rule_bundle_hash,
+            ),
+            "daily-decision": daily_decision.to_dict(),
+            "authority-receipt": authority_payload,
+            "failure-receipt": failure_payload,
+        }
+    artifacts_for_publication = (
+        full_artifacts
+        if authority is DailySignalAuthority.RISK_REDUCTION_ONLY
+        else {
+            "daily-decision": daily_decision.to_dict(),
+            "authority-receipt": authority_payload,
+            "failure-receipt": failure_payload,
+            "received-input-commitments": {
+                "scope": "blocked-daily-received-input-commitments.v1",
+                "strategy_date": daily_decision.strategy_date,
+                "alpha_ranking_sha256": ranking.ranking_sha256,
+                "model_sha256": ranking.model_sha256,
+                "approved_factor_registry_sha256": (
+                    approved_factor_registry.registry_sha256
+                ),
+                "exposure_decision_sha256": exposure.decision_sha256,
+                "exposure_state_sha256": exposure.state_sha256,
+                "construction_sha256": construction.construction_sha256,
+                "intent_sha256": intent.intent_sha256,
+                "combined_policy_sha256": daily_decision.policy_sha256,
+                "account_fingerprint": account_fingerprint(account),
+                "calendar_receipt_sha256": calendar_receipt.receipt_sha256,
+                "calendar_registry_sha256": calendar_registry.registry_sha256,
+                "execution_rule_bundle_sha256": execution_rule_bundle_hash,
+                "next_session_allowed": False,
+            },
+        }
+    )
+    publication = _publish_daily_signal_bundle_from_daily_pipeline(
+        admission=admission,
+        artifacts=artifacts_for_publication,
+    )
+    return admission, publication
+
+
+def _publish_blocked_daily_signal_evidence(
+    *,
+    output_directory: Path,
+    decision: DailyStrategyDecisionV2,
+    intent: PortfolioIntent,
+    failure_payload: Mapping[str, Any],
+    experiment_v3_governance: Mapping[str, Any],
+    account: Any,
+    calendar_receipt: Any,
+    calendar_registry: Any,
+    exposure_policy: Any,
+    constructor_policy: Any,
+    exposure_decision: ExposureDecisionV2 | None,
+) -> tuple[DailySignalAdmissionReceiptV1, DailySignalPublicationReceiptV1]:
+    def commitment(value: Any, field_name: str) -> str:
+        text = str(value)
+        if len(text) == 64 and all(character in "0123456789abcdef" for character in text):
+            return text
+        return canonical_sha256(
+            {"scope": f"blocked-unavailable-{field_name}.v1", "python_type": type(value).__name__}
+        )
+
+    authority_content = {
+        "schema_version": "daily-signal-authority-receipt.v1",
+        "strategy_id": ADAPTIVE_EXPOSURE_V2_STRATEGY_ID,
+        "strategy_date": decision.strategy_date,
+        "execution_date": decision.execution_date,
+        "frozen_at": intent.frozen_at,
+        "authority": DailySignalAuthority.BLOCKED.value,
+        "intent_type": intent.intent_type.value,
+        "failure_receipt_sha256": decision.failure_receipt_sha256,
+        "formal_v3_loader_status": "blocked_not_implemented",
+        "buy_allowed": False,
+        "automatic_submission": False,
+        "paper_eligibility": False,
+        "trade_eligibility": False,
+        "live_supported": False,
+    }
+    authority_hash = canonical_sha256(authority_content)
+    authority_payload = {
+        **authority_content,
+        "authority_receipt_sha256": authority_hash,
+    }
+    _write_create_only(
+        output_directory / f"{decision.strategy_date.isoformat()}.daily-signal-authority.json",
+        canonical_json_bytes(authority_payload) + b"\n",
+    )
+    account_state_hash = canonical_sha256(
+        {
+            "scope": "blocked-account-commitment.v1",
+            "account_fingerprint": (
+                account_fingerprint(account)
+                if isinstance(account, AccountSnapshot)
+                else commitment(account, "account")
+            ),
+        }
+    )
+    account_hash = (
+        account_fingerprint(account)
+        if isinstance(account, AccountSnapshot)
+        else commitment(account, "account-fingerprint")
+    )
+    exposure_decision_hash = (
+        exposure_decision.decision_sha256
+        if exposure_decision is not None
+        else commitment(None, "exposure-decision")
+    )
+    exposure_state_hash = (
+        exposure_decision.state_sha256
+        if exposure_decision is not None
+        else commitment(None, "exposure-state")
+    )
+    commitments = {
+        "scope": "blocked-daily-received-input-commitments.v1",
+        "strategy_date": decision.strategy_date,
+        "experiment_v3_governance": dict(experiment_v3_governance),
+        "exposure_decision_sha256": exposure_decision_hash,
+        "exposure_state_sha256": exposure_state_hash,
+        "account_fingerprint": account_hash,
+        "calendar_receipt_sha256": (
+            calendar_receipt.receipt_sha256
+            if isinstance(calendar_receipt, OfficialCalendarReceipt)
+            else commitment(calendar_receipt, "calendar-receipt")
+        ),
+        "calendar_registry_sha256": (
+            calendar_registry.registry_sha256
+            if isinstance(calendar_registry, OfficialCalendarRegistry)
+            else commitment(calendar_registry, "calendar-registry")
+        ),
+        "next_session_allowed": False,
+    }
+    admission = DailySignalAdmissionReceiptV1(
+        strategy_date=decision.strategy_date,
+        execution_date=decision.execution_date,
+        frozen_at=intent.frozen_at,
+        authority=DailySignalAuthority.BLOCKED,
+        intent_type=intent.intent_type.value,
+        alpha_ranking_sha256=commitment(None, "alpha-ranking"),
+        model_sha256=decision.model_sha256,
+        approved_factor_registry_sha256=commitment(
+            experiment_v3_governance.get("approved_factor_registry"),
+            "approved-factor-registry",
+        ),
+        model_admission_receipt_sha256=commitment(
+            experiment_v3_governance.get("alpha_model"),
+            "model-admission-receipt",
+        ),
+        exposure_decision_sha256=exposure_decision_hash,
+        exposure_state_sha256=exposure_state_hash,
+        exposure_state=decision.market_regime,
+        exposure_target_gross=ZERO,
+        construction_sha256=intent.signal_sha256,
+        intent_sha256=intent.intent_sha256,
+        exposure_policy_sha256=commitment(
+            getattr(exposure_policy, "policy_sha256", None), "exposure-policy"
+        ),
+        constructor_policy_sha256=commitment(
+            getattr(constructor_policy, "policy_sha256", None), "constructor-policy"
+        ),
+        combined_policy_sha256=decision.policy_sha256,
+        account_state_sha256=account_state_hash,
+        account_fingerprint=account_hash,
+        calendar_receipt_sha256=commitments["calendar_receipt_sha256"],
+        calendar_registry_sha256=commitments["calendar_registry_sha256"],
+        execution_rule_bundle_sha256=commitment(None, "execution-rule-bundle"),
+        daily_decision_sha256=decision.decision_sha256,
+        experiment_admission_receipt_sha256=commitment(
+            experiment_v3_governance.get("experiment_v3_admission_receipt"),
+            "experiment-v3-admission-receipt",
+        ),
+        authority_receipt_sha256=authority_hash,
+        failure_receipt_sha256=decision.failure_receipt_sha256,
+    )
+    publication = _publish_daily_signal_bundle_from_daily_pipeline(
+        admission=admission,
+        artifacts={
+            "daily-decision": decision.to_dict(),
+            "authority-receipt": authority_payload,
+            "failure-receipt": dict(failure_payload),
+            "received-input-commitments": commitments,
+        },
+    )
+    return admission, publication
 
 
 def _theoretical_target_quantities(
@@ -2020,6 +2639,9 @@ def _write_daily_evidence(
     exposure: ExposureDecisionV2,
     construction: PortfolioConstructionResult | None,
     intent: PortfolioIntent,
+    approved_factor_registry: ApprovedFactorRegistryV1,
+    experiment_v3_admission_receipt: ExperimentV3AdmissionReceiptV1,
+    experiment_v3_governance: Mapping[str, Any],
 ) -> DailyEvidenceArtifacts:
     output = Path(output_directory)
     stem = strategy_date.isoformat()
@@ -2042,6 +2664,52 @@ def _write_daily_evidence(
     if construction is not None:
         construction_path = output / f"{stem}.portfolio-construction.json"
         paths_payloads.append((construction_path, construction.to_dict()))
+    approved_factor_registry_path = (
+        output / f"{stem}.approved-factor-registry.json"
+    )
+    experiment_v3_admission_receipt_path = (
+        output / f"{stem}.experiment-v3-admission-receipt.json"
+    )
+    experiment_v3_evidence_path = (
+        output / f"{stem}.experiment-v3-governance-evidence.json"
+    )
+    experiment_v3_evidence_content = {
+        "scope": "daily-experiment-v3-governance-evidence.v1",
+        "strategy_date": strategy_date,
+        "experiment_v3_governance": dict(experiment_v3_governance),
+        "approved_factor_registry_sha256": (
+            approved_factor_registry.registry_sha256
+        ),
+        "experiment_v3_admission_receipt_sha256": (
+            experiment_v3_admission_receipt.receipt_sha256
+        ),
+        "source_authentication": (
+            "external_controlled_loader_required_hash_is_not_source_proof"
+        ),
+        "paper_eligibility": False,
+        "trade_eligibility": False,
+        "real_money_list_allowed": False,
+        "live_supported": False,
+    }
+    experiment_v3_evidence_sha256 = canonical_sha256(
+        experiment_v3_evidence_content
+    )
+    paths_payloads.extend(
+        (
+            (approved_factor_registry_path, approved_factor_registry.to_dict()),
+            (
+                experiment_v3_admission_receipt_path,
+                experiment_v3_admission_receipt.to_dict(),
+            ),
+            (
+                experiment_v3_evidence_path,
+                {
+                    **experiment_v3_evidence_content,
+                    "evidence_sha256": experiment_v3_evidence_sha256,
+                },
+            ),
+        )
+    )
     for path, payload in paths_payloads:
         _write_create_only(path, canonical_json_bytes(payload) + b"\n")
     return DailyEvidenceArtifacts(
@@ -2053,6 +2721,12 @@ def _write_daily_evidence(
         portfolio_construction_path=construction_path,
         exposure_state_path=paths_payloads[5][0],
         portfolio_intent_path=paths_payloads[6][0],
+        approved_factor_registry_path=approved_factor_registry_path,
+        experiment_v3_admission_receipt_path=(
+            experiment_v3_admission_receipt_path
+        ),
+        experiment_v3_evidence_path=experiment_v3_evidence_path,
+        experiment_v3_evidence_sha256=experiment_v3_evidence_sha256,
     )
 
 
@@ -2136,6 +2810,8 @@ def _write_pipeline_failure_decision(
     data_status: str,
     failure_code: str,
     failure_exception_type: str,
+    approved_factor_registry: ApprovedFactorRegistryV1,
+    experiment_v3_admission_receipt: ExperimentV3AdmissionReceiptV1,
     alpha_model: Any,
     exposure_policy: Any,
     exposure_memory: Any,
@@ -2215,9 +2891,16 @@ def _write_pipeline_failure_decision(
             }
         )
     )
+    experiment_v3_governance = _unverified_experiment_v3_commitment(
+        approved_factor_registry=approved_factor_registry,
+        experiment_v3_admission_receipt=experiment_v3_admission_receipt,
+        alpha_model=alpha_model,
+        exposure_policy=exposure_policy,
+        constructor_policy=constructor_policy,
+    )
     policy_sha256 = canonical_sha256(
         {
-            "scope": "blocked-daily-policy-bundle.v1",
+            "scope": "blocked-daily-policy-bundle.v2",
             "adaptive_policy_sha256": safe_adaptive_policy_sha256,
             "exposure_policy_sha256": (
                 exposure_policy.policy_sha256
@@ -2239,8 +2922,16 @@ def _write_pipeline_failure_decision(
                     }
                 )
             ),
+            "experiment_v3_governance": experiment_v3_governance,
             "execution_rule_bundle_status": "unavailable_due_to_pipeline_failure",
             "live_supported": False,
+        }
+    )
+    data_sha256 = canonical_sha256(
+        {
+            "scope": "blocked-daily-data-bundle.v2",
+            "failure_receipt_sha256": failure_receipt_sha256,
+            "experiment_v3_governance": experiment_v3_governance,
         }
     )
     failure_exposure = _synthetic_failure_exposure(
@@ -2281,7 +2972,7 @@ def _write_pipeline_failure_decision(
                 "zero_orders": True,
             }
         ),
-        data_sha256=failure_receipt_sha256,
+        data_sha256=data_sha256,
         model_sha256=model_sha256,
         risk_state_sha256=risk_state_sha256,
     )
@@ -2343,7 +3034,7 @@ def _write_pipeline_failure_decision(
             normalized_failure_code,
             "zero_orders_is_a_valid_daily_decision",
         ),
-        data_sha256=failure_receipt_sha256,
+        data_sha256=data_sha256,
         model_sha256=model_sha256,
         policy_sha256=policy_sha256,
         intent_sha256=intent.intent_sha256,
@@ -2376,6 +3067,19 @@ def _write_pipeline_failure_decision(
         exposure_decision=failure_exposure_decision,
         failure_receipt=failure_payload,
     )
+    daily_admission, daily_publication = _publish_blocked_daily_signal_evidence(
+        output_directory=Path(output_directory),
+        decision=decision,
+        intent=intent,
+        failure_payload=failure_payload,
+        experiment_v3_governance=experiment_v3_governance,
+        account=account,
+        calendar_receipt=calendar_receipt,
+        calendar_registry=calendar_registry,
+        exposure_policy=exposure_policy,
+        constructor_policy=constructor_policy,
+        exposure_decision=failure_exposure_decision,
+    )
     return DailyPipelineBlockedRunV1(
         portfolio_intent=intent,
         daily_decision=decision,
@@ -2383,6 +3087,8 @@ def _write_pipeline_failure_decision(
         failure_receipt_path=failure_path,
         exposure_inputs=failure_exposure_inputs,
         exposure_decision=failure_exposure_decision,
+        daily_signal_admission_receipt=daily_admission,
+        daily_signal_publication_receipt=daily_publication,
     )
 
 
@@ -2390,6 +3096,8 @@ def _run_after_close_daily_pipeline_impl(
     *,
     strategy_date: date,
     data_updater: DailyDataUpdaterV2,
+    approved_factor_registry: ApprovedFactorRegistryV1,
+    experiment_v3_admission_receipt: ExperimentV3AdmissionReceiptV1,
     alpha_model: FrozenAlphaModelV2,
     exposure_policy: ExposureHysteresisPolicyV2,
     exposure_memory: ExposureStateMemoryV2,
@@ -2431,6 +3139,8 @@ def _run_after_close_daily_pipeline_impl(
             data_status="DATA_UPDATE_FAILED",
             failure_code="data_updater_missing",
             failure_exception_type="MissingUpdateMethod",
+            approved_factor_registry=approved_factor_registry,
+            experiment_v3_admission_receipt=experiment_v3_admission_receipt,
             alpha_model=alpha_model,
             exposure_policy=exposure_policy,
             exposure_memory=exposure_memory,
@@ -2450,6 +3160,8 @@ def _run_after_close_daily_pipeline_impl(
             data_status="DATA_UPDATE_FAILED",
             failure_code="data_update_failed",
             failure_exception_type=type(exc).__name__,
+            approved_factor_registry=approved_factor_registry,
+            experiment_v3_admission_receipt=experiment_v3_admission_receipt,
             alpha_model=alpha_model,
             exposure_policy=exposure_policy,
             exposure_memory=exposure_memory,
@@ -2467,6 +3179,8 @@ def _run_after_close_daily_pipeline_impl(
             data_status="DATA_UPDATE_FAILED",
             failure_code="unsupported_data_update_envelope",
             failure_exception_type=type(frozen_data).__name__,
+            approved_factor_registry=approved_factor_registry,
+            experiment_v3_admission_receipt=experiment_v3_admission_receipt,
             alpha_model=alpha_model,
             exposure_policy=exposure_policy,
             exposure_memory=exposure_memory,
@@ -2497,6 +3211,14 @@ def _run_after_close_daily_pipeline_impl(
         raise DailyPipelineError("exposure_memory must be typed")
     if not isinstance(constructor_policy, PortfolioConstructorPolicy):
         raise DailyPipelineError("constructor_policy must be frozen and typed")
+    experiment_v3_governance = _validate_experiment_v3_governance(
+        decision_at=snapshot.decision_at,
+        approved_factor_registry=approved_factor_registry,
+        experiment_v3_admission_receipt=experiment_v3_admission_receipt,
+        alpha_model=alpha_model,
+        exposure_policy=exposure_policy,
+        constructor_policy=constructor_policy,
+    )
     if not isinstance(calendar_receipt, OfficialCalendarReceipt):
         raise DailyPipelineError("calendar_receipt must be structured and typed")
     if not isinstance(calendar_registry, OfficialCalendarRegistry):
@@ -2573,7 +3295,12 @@ def _run_after_close_daily_pipeline_impl(
         instrument_rules=frozen_data.instrument_rules,
     )
 
-    ranking = run_alpha_engine(snapshot, alpha_model)
+    ranking = run_alpha_engine(
+        snapshot,
+        alpha_model,
+        approved_factor_registry=approved_factor_registry,
+        experiment_v3_admission_receipt=experiment_v3_admission_receipt,
+    )
     alpha_metric = _alpha_distribution_metric(ranking)
     instruments = _portfolio_instruments(
         ranking=ranking,
@@ -2607,6 +3334,7 @@ def _run_after_close_daily_pipeline_impl(
             "data_update_sha256": frozen_data.data_update_sha256,
             "alpha_input_snapshot_sha256": snapshot.input_snapshot_sha256,
             "exposure_input_snapshot_sha256": exposure_inputs.input_snapshot_sha256,
+            "experiment_v3_governance": experiment_v3_governance,
         }
     )
     policy_sha256 = _combined_policy_sha256(
@@ -2614,6 +3342,7 @@ def _run_after_close_daily_pipeline_impl(
         exposure_policy=exposure_policy,
         constructor_policy=constructor_policy,
         execution_rule_bundle_hash=rule_bundle_hash,
+        experiment_v3_governance=experiment_v3_governance,
     )
 
     requested_type, target_exposure, data_failure = _requested_intent(
@@ -2672,27 +3401,8 @@ def _run_after_close_daily_pipeline_impl(
             model_sha256=ranking.model_sha256,
             risk_state_sha256=exposure.state_sha256,
         )
-        if intent.intent_type is PortfolioIntentType.ALPHA_REBALANCE:
-            signal = create_alpha_next_session_signal(
-                intent=intent,
-                construction=construction,
-                policy=constructor_policy,
-                receipt=calendar_receipt,
-                registry=calendar_registry,
-                fees=fees,
-                instrument_rules=frozen_data.instrument_rules,
-            )
-        else:
-            signal = create_risk_next_session_signal(
-                intent=intent,
-                construction=construction,
-                policy=constructor_policy,
-                receipt=calendar_receipt,
-                registry=calendar_registry,
-                fees=fees,
-                instrument_rules=frozen_data.instrument_rules,
-            )
-        written_signal_path = Path(signal_path)
+        signal = None
+        written_signal_path = None
         decision = _daily_from_construction(
             construction=construction,
             instruments=instruments,
@@ -2705,6 +3415,39 @@ def _run_after_close_daily_pipeline_impl(
             policy_sha256=policy_sha256,
             constructor_policy=constructor_policy,
         )
+        if intent.intent_type is PortfolioIntentType.ALPHA_REBALANCE:
+            blocker_content = {
+                "scope": "daily-alpha-publication-blocked.v1",
+                "strategy_date": strategy_date,
+                "construction_sha256": construction.construction_sha256,
+                "failed_stage": "DAILY_SIGNAL_ADMISSION",
+                "failure_codes": ["formal_experiment_v3_loader_blocked"],
+                "buy_allowed": False,
+            }
+            blocker_hash = canonical_sha256(blocker_content)
+            decision = replace(
+                decision,
+                decision_status="BLOCKED",
+                data_status="MODEL_ADMISSION_BLOCKED",
+                target_gross_exposure=ZERO,
+                feasible_gross_exposure=ZERO,
+                target_stock_weights={},
+                feasible_stock_weights={},
+                target_lot_quantities={},
+                feasible_lot_quantities={},
+                buy_orders=(),
+                sell_orders=(),
+                hold_positions=(),
+                cash_weight=(account.cash / current_nav).quantize(PCT),
+                expected_cost=ZERO,
+                no_trade_reasons=(
+                    "formal_experiment_v3_loader_blocked",
+                    "zero_orders_is_a_valid_daily_decision",
+                ),
+                failed_stage="DAILY_SIGNAL_ADMISSION",
+                failure_codes=("formal_experiment_v3_loader_blocked",),
+                failure_receipt_sha256=blocker_hash,
+            )
 
     artifacts = write_daily_decision(output_directory, decision)
     evidence = _write_daily_evidence(
@@ -2716,6 +3459,9 @@ def _run_after_close_daily_pipeline_impl(
         exposure=exposure,
         construction=construction,
         intent=intent,
+        approved_factor_registry=approved_factor_registry,
+        experiment_v3_admission_receipt=experiment_v3_admission_receipt,
+        experiment_v3_governance=experiment_v3_governance,
     )
     _register_exposure_state_artifacts(
         strategy_date=strategy_date,
@@ -2723,8 +3469,53 @@ def _run_after_close_daily_pipeline_impl(
         exposure_inputs=exposure_inputs,
         exposure_decision=exposure,
     )
-    if signal is not None:
-        written_signal_path = write_new_next_session_signal(signal_path, signal)
+    daily_admission: DailySignalAdmissionReceiptV1 | None = None
+    daily_publication: DailySignalPublicationReceiptV1 | None = None
+    if construction is not None:
+        daily_admission, daily_publication = _publish_daily_signal_evidence(
+            output_directory=output,
+            ranking=ranking,
+            alpha_model=alpha_model,
+            approved_factor_registry=approved_factor_registry,
+            exposure=exposure,
+            exposure_policy=exposure_policy,
+            construction=construction,
+            intent=intent,
+            constructor_policy=constructor_policy,
+            experiment_v3_admission_receipt=experiment_v3_admission_receipt,
+            account=account,
+            calendar_receipt=calendar_receipt,
+            calendar_registry=calendar_registry,
+            fees=fees,
+            instrument_rules=frozen_data.instrument_rules,
+            execution_rule_bundle_hash=rule_bundle_hash,
+            daily_decision=decision,
+        )
+    if (
+        construction is not None
+        and daily_publication is not None
+        and daily_publication.next_session_allowed
+    ):
+        signal = create_risk_next_session_signal(
+            intent=intent,
+            construction=construction,
+            policy=constructor_policy,
+            experiment_v3_admission_receipt=experiment_v3_admission_receipt,
+            daily_signal_publication_receipt=daily_publication,
+            receipt=calendar_receipt,
+            registry=calendar_registry,
+            fees=fees,
+            instrument_rules=frozen_data.instrument_rules,
+        )
+        written_signal_path = write_new_next_session_signal(
+            signal_path,
+            signal,
+            registry=calendar_registry,
+            experiment_v3_admission_receipt=(
+                experiment_v3_admission_receipt
+            ),
+            daily_signal_publication_receipt=daily_publication,
+        )
     return DailyPipelineRunV1(
         frozen_data=frozen_data,
         alpha_ranking=ranking,
@@ -2736,6 +3527,8 @@ def _run_after_close_daily_pipeline_impl(
         daily_decision=decision,
         artifacts=artifacts,
         evidence_artifacts=evidence,
+        daily_signal_admission_receipt=daily_admission,
+        daily_signal_publication_receipt=daily_publication,
         signal_path=written_signal_path,
     )
 
@@ -2744,6 +3537,8 @@ def run_after_close_daily_pipeline(
     *,
     strategy_date: date,
     data_updater: DailyDataUpdaterV2,
+    approved_factor_registry: ApprovedFactorRegistryV1,
+    experiment_v3_admission_receipt: ExperimentV3AdmissionReceiptV1,
     alpha_model: FrozenAlphaModelV2,
     exposure_policy: ExposureHysteresisPolicyV2,
     exposure_memory: ExposureStateMemoryV2,
@@ -2780,6 +3575,8 @@ def run_after_close_daily_pipeline(
         return _run_after_close_daily_pipeline_impl(
             strategy_date=strategy_date,
             data_updater=data_updater,
+            approved_factor_registry=approved_factor_registry,
+            experiment_v3_admission_receipt=experiment_v3_admission_receipt,
             alpha_model=alpha_model,
             exposure_policy=exposure_policy,
             exposure_memory=exposure_memory,
@@ -2809,6 +3606,8 @@ def run_after_close_daily_pipeline(
             data_status="DATA_FAIL_CLOSED",
             failure_code=f"pipeline_validation_{type(exc).__name__}",
             failure_exception_type=type(exc).__name__,
+            approved_factor_registry=approved_factor_registry,
+            experiment_v3_admission_receipt=experiment_v3_admission_receipt,
             alpha_model=alpha_model,
             exposure_policy=exposure_policy,
             exposure_memory=exposure_memory,
@@ -2826,6 +3625,8 @@ def run_pre_open_review(
     consumption_path: str | Path,
     *,
     calendar_registry: OfficialCalendarRegistry,
+    experiment_v3_admission_receipt: ExperimentV3AdmissionReceiptV1,
+    daily_signal_publication_receipt: DailySignalPublicationReceiptV1 | None = None,
     account: AccountSnapshot,
     quotes: Mapping[str, MarketQuote],
     fees: FeeSchedule,
@@ -2838,6 +3639,8 @@ def run_pre_open_review(
         signal_path,
         consumption_path,
         registry=calendar_registry,
+        experiment_v3_admission_receipt=experiment_v3_admission_receipt,
+        daily_signal_publication_receipt=daily_signal_publication_receipt,
         account=account,
         quotes=quotes,
         fees=fees,
@@ -3006,6 +3809,9 @@ def record_manual_fills(
     signal: NextSessionSignal,
     consumption: NextSessionConsumption,
     intent: PortfolioIntent,
+    experiment_v3_admission_receipt: ExperimentV3AdmissionReceiptV1,
+    daily_signal_publication_receipt: DailySignalPublicationReceiptV1 | None = None,
+    calendar_registry: OfficialCalendarRegistry,
     fees: FeeSchedule,
     instrument_rules: Mapping[str, InstrumentRule],
     confirmations: Sequence[ManualFillConfirmationV1],
@@ -3016,6 +3822,13 @@ def record_manual_fills(
         reloaded_consumption = read_next_session_consumption(
             consumption_path,
             signal=signal,
+            experiment_v3_admission_receipt=(
+                experiment_v3_admission_receipt
+            ),
+            daily_signal_publication_receipt=(
+                daily_signal_publication_receipt
+            ),
+            registry=calendar_registry,
         )
     except NextSessionSignalError as exc:
         raise DailyPipelineError(
@@ -3201,6 +4014,8 @@ def append_close_paper_ledger_v2(
     trading_date: date,
     execution_intent: PortfolioIntent,
     closing_intent: PortfolioIntent,
+    next_session_signal: NextSessionSignal,
+    experiment_v3_admission_receipt: ExperimentV3AdmissionReceiptV1,
     fill_bundle: ManualFillBundleV1,
     execution_cost_bundle: CanonicalExecutionCostBundleV1,
     close_mark_bundle: ControlledCloseMarkBundleV1,
@@ -3208,6 +4023,54 @@ def append_close_paper_ledger_v2(
 ) -> VerifiedPaperLedgerV2:
     """Append stage 12 to Paper Ledger V2 from manual evidence only."""
 
+    if not isinstance(
+        experiment_v3_admission_receipt,
+        ExperimentV3AdmissionReceiptV1,
+    ):
+        raise DailyPipelineError(
+            "ledger close requires a typed Experiment V3 admission receipt"
+        )
+    if (
+        not isinstance(next_session_signal, NextSessionSignal)
+        or canonical_sha256(next_session_signal.to_content_dict())
+        != next_session_signal.signal_sha256
+        or next_session_signal.experiment_admission_receipt_sha256
+        != experiment_v3_admission_receipt.receipt_sha256
+    ):
+        raise DailyPipelineError(
+            "ledger close signal does not bind the supplied Experiment V3 receipt"
+        )
+    try:
+        close_as_of = datetime.combine(
+            trading_date,
+            OFFICIAL_CLOSE_TIME,
+            CHINA_STANDARD_TIME,
+        )
+        if next_session_signal.channel is NextSessionChannel.RISK_REDUCTION:
+            verify_experiment_v3_diagnostic_binding(
+                experiment_v3_admission_receipt,
+                as_of=close_as_of
+            )
+            if (
+                experiment_v3_admission_receipt.experiment_spec_sha256
+                != next_session_signal.experiment_spec_sha256
+                or experiment_v3_admission_receipt.approved_factor_registry_sha256
+                != next_session_signal.approved_factor_registry_sha256
+                or experiment_v3_admission_receipt.model_sha256
+                != next_session_signal.model_sha256
+            ):
+                raise ExperimentV3AdmissionError(
+                    "risk close receipt differs from the frozen signal"
+                )
+        else:
+            verify_experiment_v3_admission_receipt(
+                experiment_v3_admission_receipt,
+                as_of=close_as_of,
+            )
+    except ExperimentV3AdmissionError as exc:
+        raise DailyPipelineError(
+            "ledger close rejected the Experiment V3 admission receipt"
+        ) from exc
     if not isinstance(fill_bundle, ManualFillBundleV1):
         raise DailyPipelineError("fill_bundle must be ManualFillBundleV1")
     persisted_fill_path = canonical_manual_fill_bundle_path(
@@ -3224,6 +4087,10 @@ def append_close_paper_ledger_v2(
         )
     if fill_bundle.execution_date != trading_date:
         raise DailyPipelineError("manual fill bundle date differs from ledger close date")
+    if fill_bundle.signal_sha256 != next_session_signal.signal_sha256:
+        raise DailyPipelineError(
+            "manual fill bundle does not bind the next-session signal"
+        )
     if (
         fill_bundle.intent_id != execution_intent.intent_id
         or fill_bundle.intent_sha256 != execution_intent.intent_sha256

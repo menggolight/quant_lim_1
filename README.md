@@ -17,7 +17,11 @@ A股中证800动态PIT股票池
 
 主入口是 `research.strategy_workspace`，完整契约和命令见[策略工作区说明](docs/STRATEGY_WORKSPACE.md)。冻结账户成本为佣金 `0.00018`、单笔最低 `5` 元、卖出税 `0.0005`、双边过户费 `0.00001`、基础单边滑点 10 bps；压力情景为20 bps和双倍佣金。
 
-[自适应仓位 V2](docs/ADAPTIVE_EXPOSURE_V2.md) 是独立、非默认的日频信号生产系统：P0.1 七项执行问题已经修复并冻结，Alpha、Exposure、Portfolio Constructor、Next-session Adapter 与 12 阶段 Daily Pipeline 的代码契约已经实现。它每天可产生允许零订单的不可变 BUY/SELL/HOLD/CASH 决策；预期数据/验证失败也生成零订单 `BLOCKED` 日报。紧邻 D+1 的人工复核按 signal 全局CAS只允许一次，账户回撤由已验证账本派生，池外旧持仓保持exit-only覆盖，Paper Ledger使用canonical成本与receipt-bound收盘mark重算完整成本；通知当前仅为本地 outbox。外部受控 PIT、生产官方日历/证券规则/行情 registry、Experiment V3、正式冻结模型和预注册阈值尚未接入，2024—2025 Locked Test 未运行、未解释；`paper_eligibility=false`、`trade_eligibility=false`、`real_money_list_allowed=false`、`live_supported=false`。质量成长 V1 的默认入口、Top2/20%现金规则和既有账本语义保持不变。
+[自适应仓位 V2](docs/ADAPTIVE_EXPOSURE_V2.md) 是独立、非默认的日频信号生产系统：P0.1执行内核保持冻结，本轮补齐Factor Discovery、train-only模型/校准、Exposure/Constructor Policy V2、Next-session Signal V2和逐日发布证据。`ExperimentV3AdmissionReceiptV1` 当前只能表达 `diagnostic_binding_only_not_formally_admitted` 的结构绑定，正式loader固定为 `blocked_not_implemented`；生产代码没有issuer token或issuer helper。正式Alpha因此固定 `DATA_FAIL_CLOSED` 且不能产生BUY，诊断打分也不能升级为正式信号。
+
+LLM 在 [`research/factor_discovery/`](research/factor_discovery/README.md) 中只能提出 `llm_research_candidate_only` 的因子假设，不能自报验证通过或直接进入模型。Daily Pipeline仍每天写决策，但固定本地发布registry只授予 `BLOCKED` 或 `RISK_REDUCTION_ONLY`：前者写4项最小证据且不可进入D+1，后者写17项完整证据并只允许四类风险退出首次紧邻D+1。所有artifact先做canonical JSON roundtrip，日期槽create-only，`COMMITTED`最后写入；不完整槽失败关闭并要求人工恢复。该单机文件系统ACL只是本地writer权限边界，不是外部来源认证。外部受控PIT、官方日历/证券规则/行情registry和正式Experiment V3仍未接入；2024—2025 Locked Test未运行、未解释，所有Paper、交易、真实资金和LIVE准入继续关闭。质量成长V1默认入口、Top2/20%现金规则和既有账本语义保持不变。
+
+2026-08-24最终红队又关闭三项发布阻断：正式Daily decision、Exposure decision和Alpha ranking在发布边界执行冻结JSON Schema校验；authority/status/data-status/failure/safety及Exposure state/target到Intent、Construction、Daily的条件图必须一致；Next-session从固定registry加载后独立重复整图校验。Experiment诊断receipt、Daily admission/publication/loaded对象和Next-session Signal的信任边界均要求exact type并直接调用基类校验，调用方子类不能覆写验证或序列化方法绕过失败关闭。
 
 当前真实状态是 `blocked_missing_pit_data`，不是“策略已跑完”。2026-08-19 Choice 只读链已真实完成当前800成分、当前一级行业、历史行业日期回显、中证800价格/全收益别名及60只股票价量采集。降级样本完整覆盖2026-02-24至2026-08-18的121个共同交易日，60只均生成六个技术诊断因子；但它使用当前成分与当前行业，不是历史PIT，且相对收益使用价格指数而非正式全收益序列。当前只有单截面，没有排名、历史回测、Paper证书或股票清单。
 
@@ -45,7 +49,8 @@ python -m research.strategy_workspace quality-status `
 | 模块 | 当前边界 |
 |---|---|
 | Strategy Workspace | A股质量成长六因子、Experiment v2、Choice数据门、PIT截面、线性检验、100万元Top Decile/1万元Top2成本账本和append-only Paper账本内核已实现；当前60只非PIT价量诊断已真实运行，正式质量成长PIT数据与正式回测仍未跑，Stage B因 `blocked_missing_controlled_paper_signal_adapter` 和 `blocked_missing_daily_paper_risk_marks` 保持阻塞 |
-| 自适应仓位 V2（非默认） | P0.1执行内核、五模块、不可变日报、本地outbox、紧邻D+1一次性人工复核、人工成交证据与独立日频账本已实现；外部受控PIT、生产官方registry、正式冻结模型/阈值、Experiment V3、Locked Test与Paper准入均未接入或未运行 |
+| 因子发现治理 | LLM仅能形成候选假设；独立Validation receipt与approved-factor registry负责从候选到冻结研究因子的显式升级。它们不运行Locked Test、不生成Alpha或订单，也不授予任何准入 |
+| 自适应仓位 V2（非默认） | P0.1执行内核、五模块、不可变日报、固定Daily publication registry、D+1人工复核与日频账本已实现；发布前及Next加载后均复核正式Schema与跨artifact条件图，信任边界拒绝契约子类。正式Alpha因V3 loader阻断而 `DATA_FAIL_CLOSED`，当前只有零订单 `BLOCKED` 或无BUY的 `RISK_REDUCTION_ONLY` 可发布；所有准入仍关闭 |
 | 市场数据 V2 | Provider Registry、BaoStock 日线/交易日历/证券基础信息、raw/quarantine/validated、离线回放和结构化探针；真实连通状态以当次探针为准 |
 | 中证行业 Factor Lab V1 | 引擎、Provider、固定 `RM20/RM60/RM120`、预注册 Screen/Confirm、主观假设卡和每周诊断报告已实现；尚无真实统计通过或研究准入结论 |
 | DeepVan 采集 | 整理人工有权读取的可见文本或 OCR 内容，不绕过登录、权限或付费限制 |
@@ -61,6 +66,7 @@ python -m research.strategy_workspace quality-status `
 - 不把单元测试、Mock、SDK 调用成功或 SHA-256 写成真实接口已连通或官方来源认证。
 - 不把当前行业分类、缺少首次披露时间的财务数据或历史回填冒充严格 point-in-time 数据。
 - 不把启发式排序、空审计表、合成 Paper 数据或通过测试称为 Alpha、正式排名或可交易策略。
+- 不让 LLM 候选因子自行升级为批准因子；候选必须经过独立、预注册、只使用 Validation 分区的 typed receipt 才能进入 approved registry。
 - 不为“挖到因子”自动海选公式、改门槛、换 holdout 或让主观观点修改客观因子分数。
 - 不用默认价格、合成行情或不同 Provider 的半批拼接掩盖外部失败。
 - 不把密码、验证码、账户标识、Token、Cookie 或其他绑定秘密写入仓库、日志、测试夹具和聊天；协作与修改遵守 [AGENTS.md](AGENTS.md)。
@@ -152,6 +158,7 @@ python -m research.broker_report_audit audit `
 - [项目交接状态](docs/STATUS.md)
 - [项目决策记录](docs/DECISIONS.md)
 - [自适应仓位 V2](docs/ADAPTIVE_EXPOSURE_V2.md)
+- [因子发现治理](research/factor_discovery/README.md)
 - [市场数据 V2](docs/MARKET_DATA.md)
 - [中证行业因子挖掘器 V1](docs/FACTOR_LAB.md)
 - [项目架构与数据契约](docs/ARCHITECTURE.md)

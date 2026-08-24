@@ -6,29 +6,67 @@ from decimal import Decimal
 
 from trading.models import PortfolioIntentType
 
+from research.strategy_workspace.experiment_v3_admission import (
+    ExperimentV3AdmissionReceiptV1,
+)
 from research.strategy_workspace.portfolio_constructor_v2 import (
     ConstructionActionType,
     ConstructorCostPolicy,
     CurrentPosition,
+    PortfolioConstructionError,
     PortfolioConstructorPolicy,
     PortfolioInstrument,
-    construct_portfolio,
+    construct_portfolio as construct_portfolio_formal,
+    construct_portfolio_diagnostic as construct_portfolio,
 )
 
 
 D = Decimal
 TZ = timezone(timedelta(hours=8))
 DECISION = datetime(2026, 8, 21, 15, 5, tzinfo=TZ)
+EXPERIMENT_SHA256 = "b" * 64
+EXPOSURE_POLICY_SOURCE_SHA256 = "a" * 64
+CONSTRUCTOR_POLICY_SOURCE_SHA256 = "c" * 64
 
 
-def policy(*, no_trade: str = "0.001") -> PortfolioConstructorPolicy:
+def admission_receipt():
+    return ExperimentV3AdmissionReceiptV1(
+        receipt_id="constructor-policy-test",
+        issued_at=DECISION - timedelta(hours=12),
+        experiment_spec_sha256=EXPERIMENT_SHA256,
+        approved_factor_registry_sha256="d" * 64,
+        approved_factor_registry_frozen_at=DECISION - timedelta(days=10),
+        model_training_receipt_sha256="e" * 64,
+        model_admission_receipt_sha256="f" * 64,
+        model_sha256="2" * 64,
+        model_frozen_at=DECISION - timedelta(days=3),
+        calibration_receipt_sha256="1" * 64,
+        calibration_horizon_sessions=20,
+        exposure_policy_source_sha256=EXPOSURE_POLICY_SOURCE_SHA256,
+        exposure_policy_frozen_at=DECISION - timedelta(days=2),
+        constructor_policy_source_sha256=CONSTRUCTOR_POLICY_SOURCE_SHA256,
+        constructor_policy_frozen_at=DECISION - timedelta(days=1),
+    )
+
+
+def policy(
+    *,
+    no_trade: str = "0.001",
+    entry_return: str = "0.000001",
+    hold_return: str = "0",
+) -> PortfolioConstructorPolicy:
     return PortfolioConstructorPolicy(
         policy_id=f"constructor-test-{no_trade.replace('.', '-')}",
         frozen_at=DECISION - timedelta(days=1),
+        policy_source_sha256=CONSTRUCTOR_POLICY_SOURCE_SHA256,
+        experiment_spec_sha256=EXPERIMENT_SHA256,
+        policy_admission_receipt=admission_receipt(),
         max_positions=3,
         max_position_weight=D("0.40"),
         entry_percentile_min=D("0.80"),
         hold_percentile_min=D("0.60"),
+        entry_predicted_return_min=D(entry_return),
+        hold_predicted_return_min=D(hold_return),
         no_trade_threshold=D(no_trade),
         maximum_execution_price_deviation=D("0.02"),
         maximum_quote_age_seconds=300,
@@ -74,6 +112,45 @@ class PortfolioConstructorV2Tests(unittest.TestCase):
             policy=selected_policy or policy(no_trade="0"),
             input_snapshot_sha256="1" * 64,
             model_sha256="2" * 64,
+        )
+
+    def test_formal_blocked_alpha_never_buys_but_pure_reduction_still_sells(self) -> None:
+        rows = (instrument("000001.SZ", "0.10", "0.99"),)
+        blocked_alpha = construct_portfolio_formal(
+            decision_at=DECISION,
+            requested_intent_type=PortfolioIntentType.ALPHA_REBALANCE,
+            target_gross_exposure=D("1"),
+            current_cash=D("10000"),
+            current_positions=(),
+            instruments=rows,
+            policy=policy(no_trade="0"),
+            input_snapshot_sha256="1" * 64,
+            model_sha256="2" * 64,
+        )
+        self.assertIs(blocked_alpha.intent_type, PortfolioIntentType.NO_ALPHA_CASH)
+        self.assertFalse(
+            any(item.action is ConstructionActionType.BUY for item in blocked_alpha.actions)
+        )
+        self.assertIn(
+            "formal_experiment_v3_admission_blocked", blocked_alpha.reason_codes
+        )
+
+        reduction = construct_portfolio_formal(
+            decision_at=DECISION,
+            requested_intent_type=PortfolioIntentType.DEFENSIVE_REDUCTION,
+            target_gross_exposure=D("0.30"),
+            current_cash=D("5000"),
+            current_positions=(CurrentPosition("000001.SZ", 500),),
+            instruments=rows,
+            policy=policy(no_trade="0"),
+            input_snapshot_sha256="1" * 64,
+            model_sha256="2" * 64,
+        )
+        self.assertTrue(
+            any(item.action is ConstructionActionType.SELL for item in reduction.actions)
+        )
+        self.assertFalse(
+            any(item.action is ConstructionActionType.BUY for item in reduction.actions)
         )
 
     def test_max_three_cap_whole_lots_and_deterministic_cash_residual(self) -> None:
@@ -228,6 +305,119 @@ class PortfolioConstructorV2Tests(unittest.TestCase):
         self.assertEqual(result.feasible_quantities, {})
         self.assertTrue(any(item.action is ConstructionActionType.SELL for item in result.actions))
         self.assertIn("no_eligible_alpha_cash", result.reason_codes)
+
+    def test_non_positive_or_below_entry_predictions_become_cash_and_never_buy(self) -> None:
+        for predicted in ("-0.01", "0", "0.004"):
+            with self.subTest(predicted=predicted):
+                result = self.construct(
+                    instruments=(
+                        instrument("000001.SZ", predicted, "0.99"),
+                        instrument("000002.SZ", "-0.001", "1.00"),
+                    ),
+                    target="0.60",
+                    selected_policy=policy(
+                        no_trade="0",
+                        entry_return="0.005",
+                        hold_return="0",
+                    ),
+                )
+                self.assertIs(
+                    result.intent_type, PortfolioIntentType.NO_ALPHA_CASH
+                )
+                self.assertEqual(result.target_gross_exposure, 0)
+                self.assertFalse(
+                    any(
+                        item.action is ConstructionActionType.BUY
+                        for item in result.actions
+                    )
+                )
+                self.assertIn(
+                    "no_entry_qualified_alpha_cash", result.reason_codes
+                )
+
+    def test_below_hold_incumbent_must_exit_even_when_rotation_fails_no_trade_gate(self) -> None:
+        result = self.construct(
+            instruments=(
+                instrument("000001.SZ", "0.005", "0.70"),
+                instrument("000002.SZ", "0.03", "0.99"),
+            ),
+            positions=(CurrentPosition("000001.SZ", 100),),
+            cash="9000",
+            target="0.60",
+            selected_policy=policy(
+                no_trade="0.50",
+                entry_return="0.01",
+                hold_return="0.01",
+            ),
+        )
+
+        sells = [
+            item for item in result.actions if item.action is ConstructionActionType.SELL
+        ]
+        self.assertEqual([item.instrument_id for item in sells], ["000001.SZ"])
+        self.assertIn("mandatory_alpha_exit", sells[0].reason_codes)
+        self.assertFalse(
+            any(item.action is ConstructionActionType.BUY for item in result.actions)
+        )
+        self.assertIn(
+            "mandatory_exit_bypasses_alpha_no_trade_threshold",
+            result.reason_codes,
+        )
+
+    def test_out_of_pool_incumbent_is_mandatory_exit_not_unbounded_hold(self) -> None:
+        outside = PortfolioInstrument(
+            instrument_id="000001.SZ",
+            predicted_return=None,
+            percentile=None,
+            eligibility=False,
+            exclusion_codes=("not_in_current_alpha_universe",),
+            reference_price=D("10"),
+            lot_size=100,
+        )
+        result = self.construct(
+            instruments=(outside, instrument("000002.SZ", "0.03", "0.99")),
+            positions=(CurrentPosition("000001.SZ", 100),),
+            cash="9000",
+            target="0.60",
+            selected_policy=policy(no_trade="0.50", entry_return="0.01"),
+        )
+
+        sell = next(
+            item for item in result.actions if item.action is ConstructionActionType.SELL
+        )
+        self.assertEqual(sell.instrument_id, "000001.SZ")
+        self.assertIn("mandatory_alpha_exit", sell.reason_codes)
+        self.assertNotIn("000001.SZ", result.feasible_quantities)
+        outside_codes = next(
+            item.codes
+            for item in result.exclusions
+            if item.instrument_id == "000001.SZ"
+        )
+        self.assertIn("mandatory_exit_out_of_pool", outside_codes)
+
+    def test_constructor_policy_rejects_receipt_or_source_drift(self) -> None:
+        receipt = admission_receipt()
+        with self.assertRaisesRegex(
+            PortfolioConstructionError, "diagnostic binding mismatch"
+        ):
+            PortfolioConstructorPolicy(
+                policy_id="source-drift",
+                frozen_at=DECISION - timedelta(days=1),
+                policy_source_sha256="9" * 64,
+                experiment_spec_sha256=EXPERIMENT_SHA256,
+                policy_admission_receipt=receipt,
+                max_positions=3,
+                max_position_weight=D("0.40"),
+                entry_percentile_min=D("0.80"),
+                hold_percentile_min=D("0.60"),
+                entry_predicted_return_min=D("0.01"),
+                hold_predicted_return_min=D("0"),
+                no_trade_threshold=D("0"),
+                maximum_execution_price_deviation=D("0.02"),
+                maximum_quote_age_seconds=300,
+                maximum_account_age_seconds=600,
+                costs=policy(no_trade="0").costs,
+            )
 
     def test_ineligible_missing_scores_remain_null_and_never_enter_alpha(self) -> None:
         excluded = instrument("000001.SZ", None, None, eligible=False)

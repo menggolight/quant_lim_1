@@ -1,0 +1,40 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/daily_signal_publication_receipt.v1.json",
+  "title": "Fixed-registry Daily signal publication receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "registry_id", "strategy_date", "execution_date",
+    "published_at", "authority", "admission_receipt_sha256",
+    "daily_decision_sha256", "artifact_sha256s", "next_session_allowed",
+    "immutable_create_only", "automatic_submission", "paper_eligibility",
+    "trade_eligibility", "live_supported", "publication_receipt_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "daily-signal-publication-receipt.v1"},
+    "registry_id": {"const": "adaptive-exposure-v2-daily-publication-registry.v1"},
+    "strategy_date": {"type": "string", "format": "date"},
+    "execution_date": {"type": ["string", "null"], "format": "date"},
+    "published_at": {"type": "string", "format": "date-time"},
+    "authority": {"enum": ["BLOCKED", "RISK_REDUCTION_ONLY"]},
+    "admission_receipt_sha256": {"$ref": "#/$defs/sha256"},
+    "daily_decision_sha256": {"$ref": "#/$defs/sha256"},
+    "artifact_sha256s": {
+      "type": "object",
+      "minProperties": 4,
+      "maxProperties": 17,
+      "additionalProperties": {"$ref": "#/$defs/sha256"}
+    },
+    "next_session_allowed": {"type": "boolean"},
+    "immutable_create_only": {"const": true},
+    "automatic_submission": {"const": false},
+    "paper_eligibility": {"const": false},
+    "trade_eligibility": {"const": false},
+    "live_supported": {"const": false},
+    "publication_receipt_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

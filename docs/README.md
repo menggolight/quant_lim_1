@@ -5,7 +5,7 @@
 ## 当前入口
 
 - [量化策略工作区](STRATEGY_WORKSPACE.md)：唯一默认策略主线；A股质量成长六因子、Choice PIT门、Experiment v2、Top Decile/Top2账本、两阶段Paper与当前阻塞状态。
-- [自适应仓位 V2](ADAPTIVE_EXPOSURE_V2.md)：独立、非默认的日终信号系统；P0.1执行内核、五模块、12阶段编排、不可变日报、D+1人工复核与日频Paper对账代码已实现。外部受控PIT、生产官方registry、正式模型/阈值、Experiment V3与Locked Test仍未接入或未运行，所有准入保持关闭。
+- [自适应仓位 V2](ADAPTIVE_EXPOSURE_V2.md)：独立、非默认的日终信号系统；P0.1执行内核、五模块、12阶段编排、固定Daily publication registry、D+1人工复核与日频Paper对账已实现。2026-08-24红队补齐正式Daily/Exposure/Alpha Schema校验、authority/failure/safety与Exposure条件图绑定、Next二次复核及exact-type防子类覆写。formal loader仍阻断，正式Alpha固定 `DATA_FAIL_CLOSED`，当前只发布 `BLOCKED` 或无BUY的 `RISK_REDUCTION_ONLY`，全部准入保持关闭。
 - [市场数据 V2](MARKET_DATA.md)：Strategy Workspace 的证据适配层；说明 Provider、时点、校验、准入、真实探针和离线回放。
 - [中证行业因子挖掘器 V1](FACTOR_LAB.md)：冻结兼容文档；旧候选、双轨指数和历史统计产物不再独立发展策略主线。
 - [项目架构与数据契约](ARCHITECTURE.md)：目录职责、依赖方向、时点、证据层和执行边界。
@@ -20,6 +20,7 @@
 
 - [采集与编排](../agent/README.md)
 - [研究层](../research/README.md)
+- [因子发现治理](../research/factor_discovery/README.md)：LLM候选、独立Validation receipt、批准因子与确定性registry的四层边界。
 - [Strategy Workspace代码边界](../research/strategy_workspace/README.md)
 - [研报审计](../research/broker_report_audit/README.md)
 - [数据目录](../data/README.md)

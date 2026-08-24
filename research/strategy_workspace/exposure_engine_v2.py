@@ -18,10 +18,16 @@ import re
 from typing import Any, Iterable
 
 from .contracts import canonical_sha256
+from .experiment_v3_admission import (
+    ExperimentV3AdmissionError,
+    ExperimentV3AdmissionReceiptV1,
+    verify_experiment_v3_admission_receipt,
+    verify_experiment_v3_diagnostic_binding,
+)
 
 
 EXPOSURE_INPUT_SCHEMA_VERSION = "exposure-input-snapshot.v1"
-EXPOSURE_POLICY_SCHEMA_VERSION = "exposure-hysteresis-policy.v1"
+EXPOSURE_POLICY_SCHEMA_VERSION = "exposure-hysteresis-policy.v2"
 EXPOSURE_DECISION_SCHEMA_VERSION = "exposure-decision.v2"
 EXPOSURE_STATE_MEMORY_SCHEMA_VERSION = "exposure-state-memory.v1"
 ACCOUNT_DRAWDOWN_RISK_OFF_TRIGGER = 0.12
@@ -306,6 +312,8 @@ class ExposureHysteresisPolicyV2:
     preregistered_at: datetime
     rules: tuple[ExposureStateRuleV2, ...]
     policy_source_sha256: str
+    experiment_spec_sha256: str
+    policy_admission_receipt: ExperimentV3AdmissionReceiptV1
     fallback_behavior: str = "HOLD_CURRENT"
     artifact_status: str = "preregistered_frozen"
     schema_version: str = EXPOSURE_POLICY_SCHEMA_VERSION
@@ -320,6 +328,31 @@ class ExposureHysteresisPolicyV2:
         object.__setattr__(self, "policy_version", _identifier(self.policy_version, "policy_version"))
         _aware(self.preregistered_at, "preregistered_at")
         _sha(self.policy_source_sha256, "policy_source_sha256")
+        _sha(self.experiment_spec_sha256, "experiment_spec_sha256")
+        if type(self.policy_admission_receipt) is not ExperimentV3AdmissionReceiptV1:
+            raise ExposureEngineError(
+                "exposure policy requires the exact V3 diagnostic receipt type"
+            )
+        try:
+            verify_experiment_v3_diagnostic_binding(
+                self.policy_admission_receipt,
+                as_of=self.policy_admission_receipt.issued_at
+            )
+        except ExperimentV3AdmissionError as exc:
+            raise ExposureEngineError(
+                f"exposure policy diagnostic binding rejected: {exc}"
+            ) from exc
+        if (
+            self.policy_admission_receipt.experiment_spec_sha256
+            != self.experiment_spec_sha256
+            or self.policy_admission_receipt.exposure_policy_source_sha256
+            != self.policy_source_sha256
+            or self.policy_admission_receipt.exposure_policy_frozen_at
+            != self.preregistered_at
+        ):
+            raise ExposureEngineError(
+                "exposure policy diagnostic binding mismatch"
+            )
         rules = tuple(self.rules)
         if not rules or any(not isinstance(item, ExposureStateRuleV2) for item in rules):
             raise ExposureEngineError("policy requires typed hysteresis rules")
@@ -340,6 +373,10 @@ class ExposureHysteresisPolicyV2:
             "preregistered_at": self.preregistered_at.isoformat(),
             "fallback_behavior": self.fallback_behavior,
             "policy_source_sha256": self.policy_source_sha256,
+            "experiment_spec_sha256": self.experiment_spec_sha256,
+            "policy_admission_receipt_sha256": (
+                self.policy_admission_receipt.receipt_sha256
+            ),
             "rules": [item.to_dict() for item in self.rules],
         }
 
@@ -521,10 +558,12 @@ def _immediate_risk_off(
     )
 
 
-def decide_exposure(
+def _decide_exposure(
     inputs: ExposureInputSnapshotV2,
     policy: ExposureHysteresisPolicyV2,
     memory: ExposureStateMemoryV2,
+    *,
+    diagnostic_only: bool,
 ) -> ExposureDecisionV2:
     """Apply hard risk overrides, otherwise one pre-registered hysteresis step."""
 
@@ -564,6 +603,35 @@ def decide_exposure(
         ):
             raise ExposureEngineError(
                 "pending exposure memory is unreachable under the frozen policy"
+            )
+    try:
+        verify_experiment_v3_diagnostic_binding(
+            policy.policy_admission_receipt,
+            as_of=inputs.decision_at
+        )
+    except ExperimentV3AdmissionError as exc:
+        if diagnostic_only:
+            raise ExposureEngineError(
+                f"exposure diagnostic binding rejected: {exc}"
+            ) from exc
+    if not diagnostic_only:
+        try:
+            verify_experiment_v3_admission_receipt(
+                policy.policy_admission_receipt,
+                as_of=inputs.decision_at,
+                experiment_spec_sha256=policy.experiment_spec_sha256,
+                exposure_policy_source_sha256=policy.policy_source_sha256,
+                exposure_policy_frozen_at=policy.preregistered_at,
+            )
+        except ExperimentV3AdmissionError:
+            # Missing formal Alpha/Experiment admission must never preserve or
+            # increase exposure. It does not block the P0.1 pure-risk exit path,
+            # and all state-CAS/time invariants above still apply.
+            return _immediate_risk_off(
+                inputs=inputs,
+                policy=policy,
+                memory=memory,
+                reasons=("FORMAL_EXPERIMENT_V3_ADMISSION_BLOCKED",),
             )
 
     immediate_reasons: list[str] = []
@@ -712,6 +780,26 @@ def decide_exposure(
     )
 
 
+def decide_exposure(
+    inputs: ExposureInputSnapshotV2,
+    policy: ExposureHysteresisPolicyV2,
+    memory: ExposureStateMemoryV2,
+) -> ExposureDecisionV2:
+    """Formal entry; blocked admission always yields a RISK_OFF decision."""
+
+    return _decide_exposure(inputs, policy, memory, diagnostic_only=False)
+
+
+def decide_exposure_diagnostic(
+    inputs: ExposureInputSnapshotV2,
+    policy: ExposureHysteresisPolicyV2,
+    memory: ExposureStateMemoryV2,
+) -> ExposureDecisionV2:
+    """Research-only hysteresis replay; never formal signal admission."""
+
+    return _decide_exposure(inputs, policy, memory, diagnostic_only=True)
+
+
 decide_exposure_v2 = decide_exposure
 
 
@@ -737,5 +825,6 @@ __all__ = [
     "ExposureStateRuleV2",
     "ExposureTransitionStatus",
     "decide_exposure",
+    "decide_exposure_diagnostic",
     "decide_exposure_v2",
 ]

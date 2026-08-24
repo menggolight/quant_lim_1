@@ -6,11 +6,15 @@
 
 `a-share-small-account-adaptive-exposure-v2` 是与本页 V1 主线并存的独立策略版本，规格见[自适应仓位 V2](ADAPTIVE_EXPOSURE_V2.md)，模块索引见[策略工作区代码说明](../research/strategy_workspace/README.md)。P0.1 的七项执行问题已经修复并冻结：暂停/数据失败禁止 BUY、Gate 独立覆盖全部退出持仓、四类减仓支持首次 D+1、日亏损不阻断纯减仓、Paper 账户 fingerprint CAS、canonical 费用/证券规则 bundle，以及整批预检先于 `SUBMITTING`。
 
-V2 现已实现 Alpha Engine、Exposure Engine、Portfolio Constructor、Next-session Adapter 和 12 阶段 Daily Pipeline 的代码契约；每天可冻结包含 BUY/SELL/HOLD/CASH、目标/可实现/当前/实际仓位、整手、成本、取消条件、原因与哈希的 JSON/Markdown 决策，且允许零订单。预期数据/验证失败也写 `daily-strategy-decision.v2` 的 `BLOCKED` 分支。D 日 Alpha 只能通过结构化日历 receipt 指向的紧邻 D+1 使用一次，消费按 signal 全局CAS，盘前只返回人工指令；Exposure状态续接上一官方日不可变产物，账户回撤由已验证账本派生，池外旧持仓保持exit-only覆盖。通知当前仅写本地 outbox，不会外发。
+V2 现已实现 Alpha Engine、Exposure Engine、Portfolio Constructor、Next-session Adapter 和12阶段Daily Pipeline代码契约；每天可冻结包含BUY/SELL/HOLD/CASH、目标/可实现/当前/实际仓位、整手、成本、取消条件、原因与哈希的JSON/Markdown决策，且允许零订单。Factor Discovery四层治理把LLM候选、独立Validation receipt、批准条目和确定性registry分开；`frozen-alpha-model.v2`绑定train-only训练、同目标同期限校准、模型准入与Experiment V3结构绑定，Exposure/Constructor使用V2 policy并处理正收益门与池外强制退出。
 
-这不改变 V1 的默认入口、Top2/20%最低现金、Experiment v2 或既有账本哈希。V2 的外部受控 PIT updater、生产官方日历/证券规则/行情 registry、Experiment V3、正式 train-only 模型及预注册阈值尚未接入；2024—2025 Locked Test 未运行、未解释。当前哈希只证明内容一致，不证明官方来源。其工程实现不能提升准入，`paper_eligibility=false`、`trade_eligibility=false`、`real_money_list_allowed=false`、`live_supported=false`。
+正式Experiment V3 loader仍固定为 `blocked_not_implemented`，生产代码没有issuer token/helper，receipt只提供 `diagnostic_binding_only_not_formally_admitted` 的结构绑定。因此正式Alpha固定输出 `DATA_FAIL_CLOSED`，不能产生BUY；诊断打分也没有发布权限。Daily固定本地registry的authority仅有 `BLOCKED` 与 `RISK_REDUCTION_ONLY`：阻断日写4项最小证据且不能进入D+1；四类风险退出写17项完整证据，可在首次紧邻D+1单次人工复核。风险退出不会被正式Alpha阻断冒充为普通买入，当前不存在Alpha发布authority。
 
-## 当前真实状态（2026-08-21）
+每项发布artifact先做canonical JSON roundtrip，按策略日create-only占槽，全部写完后最后写`COMMITTED`；部分写入会毒化该日期槽并失败关闭，必须人工恢复。Next-session从该固定registry重读精确字节，调用方对象或哈希不能替代。该registry与既有Exposure/consumption registry都是单机文件系统CAS，其ACL只是本地writer权限边界，不是外部来源认证或多机一致性证明。上述变化不改变V1默认入口、Top2/20%最低现金、Experiment v2或既有账本哈希；外部受控PIT、生产官方registry与正式Experiment V3仍未接入，2024—2025 Locked Test未运行、未解释，所有准入继续关闭。
+
+2026-08-24最终红队关闭三项阻断：一是Daily publication现在对正式Daily decision、Exposure decision和Alpha ranking执行对应冻结JSON Schema，而不只检查自哈希；二是authority、decision/data status、failure receipt、安全旗标及Exposure固定state/target到Intent、Construction、Daily的可达条件图必须同时成立，Next-session加载固定字节后再独立复核一次；三是Experiment诊断receipt、Daily admission/publication/loader结果和Next-session Signal均要求exact contract type并绕过动态分派调用基类校验，恶意子类不能覆写`to_dict`或验证方法。
+
+## 当前真实状态（2026-08-24）
 
 | 层级 | 状态 | 结论 |
 |---|---|---|
@@ -19,7 +23,7 @@ V2 现已实现 Alpha Engine、Exposure Engine、Portfolio Constructor、Next-se
 | 正式 PIT 数据 | `blocked_missing_pit_data` | 尚未取得完整中证800历史成分、全收益基准、PIT行业/市值/交易状态及首披财务受控批次 |
 | 历史统计 | 未运行 | 没有正式质量成长回测结果，不得声称有效或盈利 |
 | 降级诊断 | 60只六因子截面已运行 | 当前中证800成分与16列Choice快照已经独立验证并绑定；Choice真实采集完整覆盖60只股票与中证800价格指数的121个共同交易日，并生成2026-08-18单截面。样本采用当前行业等覆盖轮转，不代表中证800行业权重；没有排名、回测或买入名单，状态仍为 `diagnostic_current_universe_not_pit` |
-| Adaptive Exposure V2 日频信号 | 代码契约已实现、外部输入未接入 | 五模块与12阶段编排可生成不可变日报、本地通知outbox、D+1人工复核、人工成交bundle和日频账本；正式PIT、官方registry、冻结模型/阈值与Experiment V3仍缺，Locked Test未运行 |
+| Adaptive Exposure V2 日频信号 | 正式Alpha阻断；风险减仓通道保留 | 五模块、固定Daily publication registry、正式Schema与跨artifact条件图双重复核、exact-type信任边界、人工成交bundle和日频账本已实现；formal loader为 `blocked_not_implemented`。当前只发布 `BLOCKED` 或 `RISK_REDUCTION_ONLY`，后者仅支持四类风险退出首次D+1；正式PIT、官方registry及Experiment V3仍缺，Locked Test未运行 |
 | Paper / 真实资金 | 不准入 | V1 append-only账本与V2日频账本均只提供内部对账证据；没有完成外部来源准入、正式Experiment V3与足够前向观察，`paper_eligibility=false`、`trade_eligibility=false`、`real_money_list_allowed=false` |
 | LIVE | `live_not_supported` | 配置、白名单、Token 或枚举均不能解锁 |
 

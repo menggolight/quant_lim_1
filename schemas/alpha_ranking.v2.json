@@ -10,7 +10,7 @@
   ],
   "properties": {
     "schema_version": {"const": "alpha-ranking.v2"},
-    "status": {"enum": ["OK", "NO_ALPHA_CASH", "DATA_FAIL_CLOSED"]},
+    "status": {"enum": ["OK", "NO_ALPHA_CASH", "DATA_FAIL_CLOSED", "DIAGNOSTIC_ONLY_NOT_ADMITTED"]},
     "decision_at": {"type": "string", "format": "date-time"},
     "eligible_count": {"type": "integer", "minimum": 0},
     "rows": {"type": "array", "minItems": 1, "items": {"$ref": "#/$defs/row"}},

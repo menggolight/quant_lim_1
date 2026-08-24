@@ -2,7 +2,7 @@
 
 `a-share-small-account-adaptive-exposure-v2` 是独立于质量成长 V1 的新策略版本，不是仓库默认策略。它把 Alpha、总仓位、组合构建和执行风控拆开，并把“允许长期持有现金”提升为显式组合意图。
 
-当前已经完成 P0.1 执行修复并冻结执行内核，同时实现日终信号生产、下一官方交易日盘前人工复核和日频 Paper 决策的代码契约。这里的“完成”只表示实现和专项验证，不表示生产数据、模型或阈值已经接入：外部受控 PIT 数据、官方日历/证券规则 registry、正式 train-only 冻结模型与预注册阈值产物仍缺。Experiment V3 尚未正式冻结，2024—2025 Locked Test 未运行、未解释。`paper_eligibility=false`、`trade_eligibility=false`、`real_money_list_allowed=false`、`live_supported=false`；任何 LIVE 入口仍永久返回 `live_not_supported`。
+P0.1执行问题已经修复并冻结执行内核；日终信号生产、下一官方交易日盘前人工复核、日频Paper决策、Factor Discovery治理、`frozen-alpha-model.v2`、Exposure/Constructor Policy V2、Next-session Signal V2与固定Daily publication registry的工程契约已经实现。正式Experiment V3 loader仍固定为 `blocked_not_implemented`，生产代码没有issuer token或issuer helper，`ExperimentV3AdmissionReceiptV1`只能提供 `diagnostic_binding_only_not_formally_admitted` 的结构绑定。正式Alpha因此固定 `DATA_FAIL_CLOSED` 且不能产生BUY；Daily仍每天生成决策，但当前只能发布零订单 `BLOCKED` 或无BUY的 `RISK_REDUCTION_ONLY`。四类风险退出继续保留首次紧邻D+1人工执行路径，不会被正式Alpha阻断，也不能冒充普通Alpha买入。外部受控PIT、官方日历/证券规则registry与正式Experiment V3仍缺；typed receipt、自哈希、Schema与本地文件权限不能代替来源认证。2024—2025 Locked Test未运行、未解释，Paper、交易、真实资金与LIVE准入全部保持关闭。
 
 ## 目标的正确含义
 
@@ -78,7 +78,7 @@
 
 跨session风险退出还必须携带完整的内部受控日历payload。Planner与Gate使用和日频账本相同的规范化算法重算日历哈希，并要求前一session与执行session在payload内严格相邻；计划还绑定Planner实际使用的规范化执行报价包哈希，Gate从收到的报价payload重算并复核价格、时点、停牌、买卖封锁和价差。两类哈希都只证明内容一致：没有官方registry时，不能证明日历未遗漏真实交易日，也不能证明报价来自官方来源。
 
-普通 `ALPHA_REBALANCE` 的 D 日收盘结果现在必须通过独立的 [next_session_signal.py](../research/strategy_workspace/next_session_signal.py) 冻结，且只能在结构化日历 receipt 指定的紧邻 D+1 消费一次。Alpha 与风险退出使用不同 factory；`NO_ALPHA_CASH` 与其他风险减仓都走风险通道，不能伪装为普通 Alpha 买入。Signal 文件采用 create-only、同字节幂等语义；消费 CAS 以完整 `signal_sha256` 在固定策略级 registry 全局唯一登记，调用者选择的 signal/report 路径没有另开消费槽的权限，复制、改名、路径别名以及 `CANCELED` 后重试都不能获得第二次执行机会。人工成交 bundle 同样以 `consumption_sha256` 形成唯一 create-only 槽，收盘账本必须重读其精确 canonical 字节。盘前会重新核对策略账户 fingerprint、执行报价和 canonical 费用/证券规则 bundle；BUY 超出冻结最大价格偏离或不再满足当日整手规则即取消。该适配器只返回人工执行指令，不提交订单。固定 registry 的文件系统 ACL 是当前单机 writer 信任边界；Stage 11 没有原始 D+1 account/quote payload，不能仅凭哈希反推并重新认证其来源。生产多机 CAS、官方日历/证券规则/账户/行情 registry 均未接入；调用测试夹具、自建 allowlist 或直接写 registry 不能被描述成正式准入，SHA-256 也只证明内容一致。
+Next-session不再把D日调用方对象或Signal文件自身当发布权威；它必须从固定Daily publication registry重读该策略日的admission、publication和全部artifact精确字节。当前formal loader阻断且publication枚举没有Alpha authority，因此普通 `ALPHA_REBALANCE` 不能创建D+1 Signal；`NO_ALPHA_CASH`与另外三类风险减仓只能凭17项 `RISK_REDUCTION_ONLY` bundle进入结构化日历receipt指定的第一次紧邻D+1，不能伪装成普通Alpha买入。Signal消费仍以完整`signal_sha256`在固定策略级registry全局CAS；复制、改名、路径别名以及`CANCELED`后重试都不能获得第二次执行机会。人工成交bundle同样以`consumption_sha256`形成唯一create-only槽，收盘账本必须重读其精确canonical字节。盘前会重新核对策略账户fingerprint、执行报价和canonical费用/证券规则bundle；BUY价格偏离取消逻辑保留为未来formal Alpha authority实现后的契约，当前不可达且不能作为已准入能力。所有适配器都只返回人工指令，不提交订单。Daily publication、Signal consumption和manual-fill registry的文件系统ACL只是当前单机writer权限边界；Stage 11没有原始D+1 account/quote payload，不能仅凭hash反推来源。生产多机CAS与官方registry均未接入，测试夹具、自建allowlist或直接写内部目录不能被描述为正式准入。
 
 订单风险方向为 `RISK_INCREASING`、`RISK_NEUTRAL`、`RISK_REDUCING` 或 `FORCED_EXIT`。方向由受控计划器从 intent 和账户状态推导，不能信任调用者自报。
 
@@ -97,28 +97,41 @@
 
 Gate 不再只信任订单自带预计费用。Planner、Gate、Approval 与 PaperBroker 绑定同一个 canonical `FeeSchedule + InstrumentRule` bundle；Gate 从受控结构重算 bundle hash、逐单费用、tick 和整手约束，PaperBroker 在整批预检中再次核对，并在任何订单进入 `SUBMITTING` 前失败关闭。该绑定修复的是内部一致性，不能证明费率或证券元数据来自官方来源；生产 registry 和账户真实费率人工复核仍是外部阻塞项。
 
+## 因子与 Experiment V3 治理边界
+
+[`research/factor_discovery`](../research/factor_discovery/README.md) 把因子治理拆为四层：
+
+1. `FactorHypothesisV2` 永久标记为 `llm_research_candidate_only`。LLM只能冻结公式、输入、预测对象、期限、方向、基准、信息截止时点和反证条件，不能自报验证或批准。
+2. `FactorValidationReceiptV1` 绑定候选、公式、实现、输入Schema、预注册验证规格、验证数据和验证代码；分区固定为 `validation_only_not_locked_test`。
+3. `ApprovedFactorV1` 只能引用typed validation receipt，候选对象不能直接升级。
+4. `ApprovedFactorRegistryV1` 对批准条目规范排序、自哈希，并拒绝重复ID、重复公式/receipt、未来时点和字段矛盾。
+
+Alpha、Exposure与Constructor的诊断对象可以用同一 `ExperimentV3AdmissionReceiptV1` 结构绑定实验规格、approved-factor registry、模型训练、模型准入、校准以及两份policy source。该receipt固定为 `diagnostic_binding_only_not_formally_admitted` 和 `formal_loader_status=blocked_not_implemented`；生产代码故意不提供issuer token或issuer helper，`require_valid()`在loader阻断时始终失败。它只能检查内部结构，不能认证外部artifact，也不能宣称Experiment V3已经正式冻结。
+
 ## 五个信号生产模块
 
-1. [alpha_engine_v2.py](../research/strategy_workspace/alpha_engine_v2.py) 只消费 typed、自哈希的受控 PIT 截面，独立重算六个质量成长慢因子与六个预注册价量快因子，再调用 train-only 冻结线性模型。它输出全股票池的预测、质量/时机分数、排名、行业、资格与完整排除码，不生成订单。批次级未来数据或公共来源污染会令全截面 `DATA_FAIL_CLOSED`；单股缺失 PIT 字段则保留该行，所有分数为 `null`，绝不补 0。代码与 Schema 已实现，但生产受控 PIT adapter 和正式冻结模型 artifact 尚未接入。
-2. [exposure_engine_v2.py](../research/strategy_workspace/exposure_engine_v2.py) 只接受中证800全收益趋势、市场宽度、已实现波动、市场回撤、Alpha 预测分布和账户回撤六类输入。六类 `OK` 指标必须属于决策时刻换算后的同一 CST 策略日；未来或陈旧 session 都失败关闭。状态固定映射 `RISK_OFF=0`、`DEFENSIVE=0.30`、`NEUTRAL=0.60`、`RISK_ON=1.00`；普通变化依赖预注册迟滞，不能在同一 CST 策略日重复推进，也不能用不可达 pending 次数伪造确认。正式流水线只从固定策略级 registry 续接前一官方 session 的不可变 inputs/decision/state，切换 report 目录不能重置记忆；失败日若 policy 可验证，会持久化绑定 failure receipt 的 `IMMEDIATE_RISK_OFF` 状态供次日安全续接。账户回撤从已验证 Paper Ledger V2 峰值、D 日策略账户和受控收盘价内部派生；数据 updater 不能自报该值。无账本的首次空仓 bootstrap 只接受冻结政策中 `initial_cash=10000` 的账户，不能把任意缩水余额重置成新峰值。数据失败、歧义规则或账户回撤达到12%立即转为 `RISK_OFF`。引擎不内置生产阈值，正式迟滞 policy artifact 尚未冻结接入。
-3. [portfolio_constructor_v2.py](../research/strategy_workspace/portfolio_constructor_v2.py) 合并 Alpha 与目标总仓位，最多3只、单只不超过40%，候选不足和整手不可负担均留现金。它先保留仍在 hold band 的原持仓，再考虑 entry band 新候选；普通 Alpha 只有在预期改善严格大于完整预计成本加显式 no-trade threshold 时才交易，风险减仓不受该 Alpha 门阻断。输出始终分离理论目标、整手可实现和当前状态，并给出 `BUY`、`SELL`、`HOLD`、`CASH`、整手数量、费用与原因。所有 band、成本、时效和价格偏离阈值都来自预注册、哈希绑定的 policy 对象，没有生产默认值。
-4. [next_session_signal.py](../research/strategy_workspace/next_session_signal.py) 把 D 日 `PortfolioIntent`、构造结果、数据/模型/政策/意图哈希、结构化日历 receipt 和 canonical 执行规则 bundle 冻结到紧邻 D+1。日历必须通过受控 exact-receipt allowlist；bool、来源字符串或自报哈希不能解锁。D+1 仅一次复核账户、报价、规则、费用、整手和 BUY 价格偏离，结果只是人工指令。风险退出有独立通道，不能冒充 Alpha；任何路径都不自动提交。
-5. [daily_pipeline.py](../operations/daily_pipeline.py) 把上述模块与日频 Paper 账本编排为明确的收盘、盘前、人工成交和收盘记账边界。调用者必须提供冻结数据 updater、模型、Exposure policy、Constructor policy、官方日历 registry 候选、账户与 canonical 规则；非首日状态必须来自上一官方日不可变产物，非空账户回撤必须由已验证账本派生。股票池变更时，策略旧持仓用独立受控 D 收盘价和规则进入 exit-only 行，绝不因离开 Alpha 池而丢失退出覆盖。流水线不会替调用者选择生产阈值，也无外部消息发送或券商写权限。
+1. [alpha_engine_v2.py](../research/strategy_workspace/alpha_engine_v2.py) 的诊断入口只消费typed受控PIT截面、完整匹配的approved-factor registry和 `frozen-alpha-model.v2`。模型同时绑定train-only训练receipt、候选模型准入receipt、同一目标/期限的金融与非金融仿射校准及runtime源码manifest；旧V1模型、裸自哈希模型、候选因子或任一语义/时序/hash漂移均失败关闭。诊断输出明确标为 `DIAGNOSTIC_ONLY_NOT_ADMITTED`，不生成订单。正式 `run_alpha_engine` 还必须通过当前尚不存在的formal loader，因此现在始终返回全池 `DATA_FAIL_CLOSED`，不能产生BUY。单股缺失PIT字段在未来正式准入后的评分契约中仍须保留排除行并使用 `null`，绝不补0；无合格股票的 `NO_ALPHA_CASH` 正式语义也要等loader与Experiment V3冻结后才可到达。
+2. [exposure_engine_v2.py](../research/strategy_workspace/exposure_engine_v2.py) 只接受中证800全收益趋势、市场宽度、已实现波动、市场回撤、Alpha 预测分布和账户回撤六类输入。六类 `OK` 指标必须属于决策时刻换算后的同一 CST 策略日；未来或陈旧 session 都失败关闭。状态固定映射 `RISK_OFF=0`、`DEFENSIVE=0.30`、`NEUTRAL=0.60`、`RISK_ON=1.00`；普通变化依赖 `exposure-hysteresis-policy.v2` 的预注册迟滞及共享admission receipt，不能在同一 CST 策略日重复推进，也不能用不可达 pending 次数伪造确认。正式流水线只从固定策略级 registry 续接前一官方 session 的不可变 inputs/decision/state，切换 report 目录不能重置记忆；失败日若 policy 可验证，会持久化绑定 failure receipt 的 `IMMEDIATE_RISK_OFF` 状态供次日安全续接。账户回撤从已验证 Paper Ledger V2 峰值、D 日策略账户和受控收盘价内部派生；数据 updater 不能自报该值。无账本的首次空仓 bootstrap 只接受冻结政策中 `initial_cash=10000` 的账户，不能把任意缩水余额重置成新峰值。数据失败、歧义规则或账户回撤达到12%立即转为 `RISK_OFF`。正式迟滞policy artifact仍未由外部loader接入。
+3. [portfolio_constructor_v2.py](../research/strategy_workspace/portfolio_constructor_v2.py) 合并 Alpha 与目标总仓位，最多3只、单只不超过40%，候选不足和整手不可负担均留现金。`portfolio-constructor-policy.v2` 除percentile entry/hold band外，还要求严格为正的 `entry_predicted_return_min` 及不高于它的 `hold_predicted_return_min`；没有正收益entry候选时不能仅凭相对排名买入。池外现有持仓固定 `MANDATORY_EXIT`，不能因不在当前Alpha截面而静默HOLD。普通 Alpha 只有在预期改善严格大于完整预计成本加显式 no-trade threshold 时才交易，风险减仓不受该 Alpha 门阻断。所有阈值来自预注册、receipt绑定的policy对象，没有生产默认值。
+4. [next_session_signal.py](../research/strategy_workspace/next_session_signal.py) 生成 `next-session-signal.v2`，但D日调用方对象不是D+1权威。创建、落盘、重载和消费都必须从固定Daily publication registry重读完整canonical字节；调用方可选传入的publication receipt只能精确匹配，不能替换registry。Next加载后还会独立重跑完整Daily publication contract，不把loader的第一次校验当成充分信任。当前registry没有Alpha authority，只有17项完整artifact且authority为 `RISK_REDUCTION_ONLY` 的四类风险退出可以生成并消费Signal；`BLOCKED`不能进入D+1。D+1仍只复核账户、报价、规则、费用和整手并返回单次人工指令，任何路径都不自动提交。
+5. [daily_pipeline.py](../operations/daily_pipeline.py) 每天生成不可变decision并发布到固定本地registry。authority只允许 `BLOCKED` 或 `RISK_REDUCTION_ONLY`，故当前不存在Alpha发布权限。`BLOCKED` bundle恰好含daily decision、authority receipt、failure receipt和received-input commitments四项；risk bundle恰好含17项完整artifact。所有artifact先做canonical JSON roundtrip；随后实际执行Daily/Exposure/Alpha正式Schema，绑定authority、status、failure、安全旗标、Alpha eligible语义及`ExposureDecision -> Intent -> Construction -> Daily`可达条件图，才可持久化。日期槽create-only、`COMMITTED`最后写；不完整槽失败关闭并要求人工恢复。该固定registry的单机ACL只是writer权限边界，不是外部来源认证、多机共识或准入证明。
+
+2026-08-24最终红队还要求信任边界拒绝契约子类。Experiment V3诊断receipt、Daily admission/publication/loaded对象与Next-session Signal均使用exact-type检查；关键结构校验直接调用基类实现，不允许调用方通过覆写`require_structural_valid()`或`to_dict()`改变正式失败关闭、risk authority或持久化字节。该限制是本地工程防绕过，不是来源认证或正式准入。
 
 ## 每日 12 阶段职责
 
 | 阶段 | 责任与失败边界 |
 |---|---|
 | 1. 更新数据 | `DailyDataUpdaterV2.update_and_freeze` 返回不可变 `frozen-daily-data.v2` D 收盘 envelope；只允许四类市场 Exposure 指标，账户回撤和 Alpha 分布由流水线派生；流水线本身不抓取或认证外部源。 |
-| 2. 数据门 | 校验 PIT 时点、完整性、哈希、账户时效、日历 receipt 与 execution-rule bundle；失败关闭且禁止 BUY。 |
-| 3. Alpha 排名 | 生成全股票池排名和完整排除原因；无合格股票输出 `NO_ALPHA_CASH`，不为产生交易而降门槛。 |
+| 2. 数据门 | 校验 PIT 时点、完整性、哈希、账户时效、日历 receipt、execution-rule bundle及同一Experiment V3证据图；任一typed治理证据缺失或漂移都失败关闭且禁止 BUY。 |
+| 3. Alpha 排名 | 正式入口先要求formal V3 admission；当前loader阻断，因此输出全池 `DATA_FAIL_CLOSED`，不能产生BUY。诊断入口可验证模型、排名和完整排除原因，但固定为not admitted；未来正式准入后，无合格股票才进入 `NO_ALPHA_CASH`，不得为产生交易而降门槛。 |
 | 4. Exposure 状态 | 读取恰好六类输入并应用冻结迟滞状态；数据失败与账户回撤可以立即降为 `RISK_OFF`。 |
-| 5. 目标组合 | 输出理论目标、整手可实现组合、当前组合、成本比较及 BUY/SELL/HOLD/CASH。 |
+| 5. 目标组合 | 应用V2 percentile与正预测收益门、池外 `MANDATORY_EXIT`、整手和成本门，输出理论目标、整手可实现组合、当前组合及 BUY/SELL/HOLD/CASH。 |
 | 6. PortfolioIntent | 把组合结果转成显式 Alpha、现金或风险意图，并绑定数据、模型、风险状态和构造哈希。 |
-| 7. 不可变 daily decision | 写入 `daily-strategy-decision.v2`；同一日期同内容重放字节一致，不同内容发生 immutable collision。数据更新或预期验证失败也写零订单 `BLOCKED` decision 与 failure receipt；不可变碰撞仍直接报警，不被吞掉。 |
-| 8. Markdown/JSON 计划 | 生成供人工复核的标准 JSON 和 Markdown，同时写出各阶段证据 JSON；它们不是下单文件。 |
+| 7. 不可变 daily decision | 写入 `daily-strategy-decision.v2`；正式Alpha受阻时仍写零订单 `BLOCKED` decision与failure receipt，风险意图只能是无BUY的四类减仓。相同日期相同内容重放必须一致，不同内容或不完整槽直接失败。 |
+| 8. Markdown/JSON与固定发布 | 生成标准JSON/Markdown；对Daily/Exposure/Alpha正式Schema、authority/failure/safety、Alpha eligible语义和Exposure条件图校验后，才把4项 `BLOCKED` 或17项 `RISK_REDUCTION_ONLY` bundle写入固定registry；日期槽create-only，`COMMITTED`最后写。 |
 | 9. 通知 | 只写本地 `local-notification-outbox.v1` 文件作为待投递证据；当前没有邮件、飞书、短信或其他外部发送器，不能声称已经通知成功。 |
-| 10. D+1 盘前复核 | 单次消费冻结 signal，重新核对账户 fingerprint、执行报价、规则 bundle、费用、整手及 BUY 偏离上限；只输出人工指令。 |
+| 10. D+1 盘前复核 | 从固定publication registry重读精确字节，拒绝非exact-type receipt/Signal并独立重跑完整publication contract，再单次复核账户fingerprint、报价、规则、费用和整手；当前只允许 `RISK_REDUCTION_ONLY`，正式Alpha/BUY不可进入。 |
 | 11. 人工成交记录 | 操作员必须逐项覆盖所有 `READY_FOR_MANUAL_EXECUTION` 指令，记录 FILLED/PARTIAL/UNFILLED 和证据哈希；代码重读中央 consumption、逐项绑定冻结 action/数量/整手/参考价/偏离，并以 `consumption_sha256` 单次CAS写人工成交 bundle，不替人确认成交。 |
 | 12. 收盘 Paper Ledger V2 | 只从中央 immutable 人工成交 bundle、canonical 执行成本 bundle、receipt-bound typed close-mark bundle 与 closing intent 追加日频账本，逐项重算佣金、印花税、过户费、滑点及成本后现金、持仓、NAV、回撤和实际仓位。 |
 
@@ -148,17 +161,17 @@ P0 不提供 latch reset、自动换新账本或恢复入场的标准编排。�
 | 2026 冻结前 | `retrospective_consumed`，不得伪装新鲜样本外 |
 | V2 规格冻结后的下一受控交易日 | 前向观察起点 |
 
-Alpha、Exposure 和组合构造的生产代码契约已实现，但正式 Experiment V3、train-only 模型参数、迟滞/entry/hold/no-trade 阈值及受控 PIT 输入尚未冻结接入。流水线对 2024—2025 日期显式拒绝，当前没有读取或解释 Locked Test 收益，也不能据此调参。任何核心参数变化必须形成新策略版本。
+Alpha、Exposure和组合构造的V2治理契约已实现，但生产代码没有formal issuer/helper，诊断receipt也不是controlled loader。正式Experiment V3、train-only模型参数、迟滞/entry/hold/正收益/no-trade阈值及受控PIT输入尚未由外部流程冻结接入。流水线对2024—2025日期显式拒绝；本轮没有运行、读取或解释Locked Test，也不能据此调参。任何核心参数变化必须形成新策略版本。
 
 ## 当前完成与阻塞
 
-当前实现完成项包括：P0.1 七项执行修复并冻结；五个信号生产模块；版本化政策、Schema 与不可变 daily decision；显式 PortfolioIntent；目标/可实现/当前/实际仓位分离；D→紧邻D+1一次性人工适配；本地通知 outbox；人工成交证据；独立日频 Paper 对账；以及确定性、未来数据、缺字段、零 Alpha、hold/no-trade、成本、D+1一次性、价格偏离和准入边界的专项测试。这些是工程能力，不是一次生产日跑或统计有效性证明。
+当前实现面包括：P0.1七项执行修复并冻结；Factor候选/验证/approved registry治理；V2模型/政策与诊断绑定；正式Alpha fail-closed；固定Daily publication两档authority、正式Schema与跨artifact条件图校验；Next独立二次复核；Experiment/Daily/Next exact-type边界；不可变daily decision；四种仓位事实分离；风险退出D→紧邻D+1一次性人工适配；本地outbox、人工成交证据及日频Paper对账。这些是工程能力，不是正式Experiment V3、生产日跑、外部来源认证或统计有效性证明。
 
 仍阻塞：
 
 - 完整外部受控 Choice 单源 PIT 历史成分、中证800全收益序列、行业/市值/交易状态和首披财务；
 - 可由生产流水线读取并独立认证的数据 updater、官方交易日历 receipt registry、证券规则/费率 registry 与执行行情 registry；
-- Experiment V3 正式冻结，以及与之绑定的 train-only Alpha 模型、Exposure 迟滞 policy、Constructor entry/hold/no-trade/偏离阈值；
+- 正式外部controlled loader与Experiment V3冻结产物，以及由它认证的train-only Alpha模型、Exposure迟滞policy、Constructor entry/hold/正收益/no-trade/偏离阈值；
 - PBO/DSR、唯一一次 2024—2025 Locked Test 和任何对该区间的结果解释；
 - 外部通知发送器、足够的前向 Paper 观察期、latch reset/新账本生命周期治理；
 - 任何 Paper、交易或真实资金候选。

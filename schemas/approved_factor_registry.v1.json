@@ -1,0 +1,107 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/approved_factor_registry.v1.json",
+  "title": "Approved research factor registry v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "registry_id",
+    "frozen_at",
+    "experiment_spec_sha256",
+    "prediction_target",
+    "horizon_trading_days",
+    "universe_policy",
+    "benchmark_policy",
+    "factors",
+    "registry_status",
+    "trust_boundary",
+    "paper_eligibility",
+    "trade_eligibility",
+    "real_money_list_allowed",
+    "live_execution_status",
+    "registry_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "approved-factor-registry.v1"},
+    "registry_id": {"$ref": "#/$defs/identifier"},
+    "frozen_at": {"$ref": "#/$defs/dateTime"},
+    "experiment_spec_sha256": {"$ref": "#/$defs/sha256"},
+    "prediction_target": {"type": "string", "minLength": 1},
+    "horizon_trading_days": {"type": "integer", "minimum": 1},
+    "universe_policy": {"type": "string", "minLength": 1},
+    "benchmark_policy": {"type": "string", "minLength": 1},
+    "factors": {
+      "type": "array",
+      "minItems": 1,
+      "items": {"$ref": "#/$defs/approvedFactor"}
+    },
+    "registry_status": {"const": "approved_for_frozen_research_only"},
+    "trust_boundary": {"const": "controlled_validation_receipts_only"},
+    "paper_eligibility": {"const": false},
+    "trade_eligibility": {"const": false},
+    "real_money_list_allowed": {"const": false},
+    "live_execution_status": {"const": "live_not_supported"},
+    "registry_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "factorId": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]{0,63}$"
+    },
+    "dateTime": {"type": "string", "format": "date-time"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "approvedFactor": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "factor_id",
+        "hypothesis_id",
+        "hypothesis_sha256",
+        "experiment_spec_sha256",
+        "prediction_target",
+        "horizon_trading_days",
+        "universe_policy",
+        "benchmark_policy",
+        "formula_sha256",
+        "implementation_code_sha256",
+        "input_schema_sha256",
+        "validation_receipt",
+        "approved_at",
+        "approval_status",
+        "paper_eligibility",
+        "trade_eligibility",
+        "real_money_list_allowed",
+        "live_execution_status",
+        "approved_factor_sha256"
+      ],
+      "properties": {
+        "factor_id": {"$ref": "#/$defs/factorId"},
+        "hypothesis_id": {"$ref": "#/$defs/identifier"},
+        "hypothesis_sha256": {"$ref": "#/$defs/sha256"},
+        "experiment_spec_sha256": {"$ref": "#/$defs/sha256"},
+        "prediction_target": {"type": "string", "minLength": 1},
+        "horizon_trading_days": {"type": "integer", "minimum": 1},
+        "universe_policy": {"type": "string", "minLength": 1},
+        "benchmark_policy": {"type": "string", "minLength": 1},
+        "formula_sha256": {"$ref": "#/$defs/sha256"},
+        "implementation_code_sha256": {"$ref": "#/$defs/sha256"},
+        "input_schema_sha256": {"$ref": "#/$defs/sha256"},
+        "validation_receipt": {
+          "$ref": "factor_validation_receipt.v1.json"
+        },
+        "approved_at": {"$ref": "#/$defs/dateTime"},
+        "approval_status": {"const": "approved_for_frozen_research_only"},
+        "paper_eligibility": {"const": false},
+        "trade_eligibility": {"const": false},
+        "real_money_list_allowed": {"const": false},
+        "live_execution_status": {"const": "live_not_supported"},
+        "approved_factor_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    }
+  }
+}

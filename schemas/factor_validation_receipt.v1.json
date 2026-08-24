@@ -1,0 +1,71 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/factor_validation_receipt.v1.json",
+  "title": "Independent factor validation receipt v1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "receipt_id",
+    "validator_id",
+    "factor_id",
+    "hypothesis_id",
+    "hypothesis_sha256",
+    "experiment_spec_sha256",
+    "prediction_target",
+    "horizon_trading_days",
+    "universe_policy",
+    "benchmark_policy",
+    "hypothesis_created_at",
+    "formula_sha256",
+    "implementation_code_sha256",
+    "input_schema_sha256",
+    "validation_spec_sha256",
+    "validation_dataset_sha256",
+    "validation_code_sha256",
+    "information_cutoff_at",
+    "validation_started_at",
+    "validation_completed_at",
+    "validation_partition",
+    "result",
+    "receipt_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "factor-validation-receipt.v1"},
+    "receipt_id": {"$ref": "#/$defs/identifier"},
+    "validator_id": {"$ref": "#/$defs/identifier"},
+    "factor_id": {"$ref": "#/$defs/factorId"},
+    "hypothesis_id": {"$ref": "#/$defs/identifier"},
+    "hypothesis_sha256": {"$ref": "#/$defs/sha256"},
+    "experiment_spec_sha256": {"$ref": "#/$defs/sha256"},
+    "prediction_target": {"type": "string", "minLength": 1},
+    "horizon_trading_days": {"type": "integer", "minimum": 1},
+    "universe_policy": {"type": "string", "minLength": 1},
+    "benchmark_policy": {"type": "string", "minLength": 1},
+    "hypothesis_created_at": {"$ref": "#/$defs/dateTime"},
+    "formula_sha256": {"$ref": "#/$defs/sha256"},
+    "implementation_code_sha256": {"$ref": "#/$defs/sha256"},
+    "input_schema_sha256": {"$ref": "#/$defs/sha256"},
+    "validation_spec_sha256": {"$ref": "#/$defs/sha256"},
+    "validation_dataset_sha256": {"$ref": "#/$defs/sha256"},
+    "validation_code_sha256": {"$ref": "#/$defs/sha256"},
+    "information_cutoff_at": {"$ref": "#/$defs/dateTime"},
+    "validation_started_at": {"$ref": "#/$defs/dateTime"},
+    "validation_completed_at": {"$ref": "#/$defs/dateTime"},
+    "validation_partition": {"const": "validation_only_not_locked_test"},
+    "result": {"const": "passed_pre_registered_independent_validation"},
+    "receipt_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "factorId": {
+      "type": "string",
+      "pattern": "^[A-Z][A-Z0-9_]{0,63}$"
+    },
+    "dateTime": {"type": "string", "format": "date-time"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

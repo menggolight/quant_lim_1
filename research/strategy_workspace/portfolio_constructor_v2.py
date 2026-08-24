@@ -28,10 +28,16 @@ from typing import Any, Mapping, Sequence
 from trading.models import PortfolioIntentType
 
 from .contracts import canonical_sha256
+from .experiment_v3_admission import (
+    ExperimentV3AdmissionError,
+    ExperimentV3AdmissionReceiptV1,
+    verify_experiment_v3_admission_receipt,
+    verify_experiment_v3_diagnostic_binding,
+)
 
 
 STRATEGY_ID = "a-share-small-account-adaptive-exposure-v2"
-POLICY_SCHEMA_VERSION = "portfolio-constructor-policy.v1"
+POLICY_SCHEMA_VERSION = "portfolio-constructor-policy.v2"
 RESULT_SCHEMA_VERSION = "portfolio-construction-result.v2"
 POLICY_STATUS = "frozen_pre_registered"
 ZERO = Decimal("0")
@@ -164,20 +170,56 @@ class PortfolioConstructorPolicy:
 
     policy_id: str
     frozen_at: datetime
+    policy_source_sha256: str
+    experiment_spec_sha256: str
+    policy_admission_receipt: ExperimentV3AdmissionReceiptV1
     max_positions: int
     max_position_weight: Decimal
     entry_percentile_min: Decimal
     hold_percentile_min: Decimal
+    entry_predicted_return_min: Decimal
+    hold_predicted_return_min: Decimal
     no_trade_threshold: Decimal
     maximum_execution_price_deviation: Decimal
     maximum_quote_age_seconds: int
     maximum_account_age_seconds: int
     costs: ConstructorCostPolicy
+    out_of_pool_position_policy: str = "MANDATORY_EXIT"
     policy_sha256: str = field(init=False)
 
     def __post_init__(self) -> None:
         policy_id = _identifier(self.policy_id, "policy_id")
         frozen_at = _aware(self.frozen_at, "frozen_at")
+        policy_source_sha256 = _sha256(
+            self.policy_source_sha256, "policy_source_sha256"
+        )
+        experiment_spec_sha256 = _sha256(
+            self.experiment_spec_sha256, "experiment_spec_sha256"
+        )
+        if type(self.policy_admission_receipt) is not ExperimentV3AdmissionReceiptV1:
+            raise PortfolioConstructionError(
+                "constructor policy requires the exact V3 diagnostic receipt type"
+            )
+        try:
+            verify_experiment_v3_diagnostic_binding(
+                self.policy_admission_receipt,
+                as_of=self.policy_admission_receipt.issued_at
+            )
+        except ExperimentV3AdmissionError as exc:
+            raise PortfolioConstructionError(
+                f"constructor policy diagnostic binding rejected: {exc}"
+            ) from exc
+        if (
+            self.policy_admission_receipt.experiment_spec_sha256
+            != experiment_spec_sha256
+            or self.policy_admission_receipt.constructor_policy_source_sha256
+            != policy_source_sha256
+            or self.policy_admission_receipt.constructor_policy_frozen_at
+            != frozen_at
+        ):
+            raise PortfolioConstructionError(
+                "constructor policy diagnostic binding mismatch"
+            )
         if type(self.max_positions) is not int or not 1 <= self.max_positions <= 3:
             raise PortfolioConstructionError("max_positions must be between 1 and 3")
         max_weight = _decimal(self.max_position_weight, "max_position_weight")
@@ -190,6 +232,20 @@ class PortfolioConstructorPolicy:
         if not ZERO <= hold <= entry <= ONE:
             raise PortfolioConstructionError(
                 "hold_percentile_min must be <= entry_percentile_min within [0,1]"
+            )
+        entry_return = _decimal(
+            self.entry_predicted_return_min, "entry_predicted_return_min"
+        )
+        hold_return = _decimal(
+            self.hold_predicted_return_min, "hold_predicted_return_min"
+        )
+        if entry_return <= ZERO:
+            raise PortfolioConstructionError(
+                "entry_predicted_return_min must be positive"
+            )
+        if hold_return > entry_return:
+            raise PortfolioConstructionError(
+                "hold_predicted_return_min must not exceed entry_predicted_return_min"
             )
         no_trade = _decimal(self.no_trade_threshold, "no_trade_threshold")
         deviation = _decimal(
@@ -209,11 +265,19 @@ class PortfolioConstructorPolicy:
                 raise PortfolioConstructionError(f"{field_name} must be a positive integer")
         if not isinstance(self.costs, ConstructorCostPolicy):
             raise PortfolioConstructionError("costs must be ConstructorCostPolicy")
+        if self.out_of_pool_position_policy != "MANDATORY_EXIT":
+            raise PortfolioConstructionError(
+                "out_of_pool_position_policy must be MANDATORY_EXIT"
+            )
         object.__setattr__(self, "policy_id", policy_id)
         object.__setattr__(self, "frozen_at", frozen_at)
+        object.__setattr__(self, "policy_source_sha256", policy_source_sha256)
+        object.__setattr__(self, "experiment_spec_sha256", experiment_spec_sha256)
         object.__setattr__(self, "max_position_weight", max_weight)
         object.__setattr__(self, "entry_percentile_min", entry)
         object.__setattr__(self, "hold_percentile_min", hold)
+        object.__setattr__(self, "entry_predicted_return_min", entry_return)
+        object.__setattr__(self, "hold_predicted_return_min", hold_return)
         object.__setattr__(self, "no_trade_threshold", no_trade)
         object.__setattr__(self, "maximum_execution_price_deviation", deviation)
         object.__setattr__(self, "policy_sha256", canonical_sha256(self.to_content_dict()))
@@ -224,13 +288,21 @@ class PortfolioConstructorPolicy:
             "status": POLICY_STATUS,
             "policy_id": self.policy_id,
             "frozen_at": self.frozen_at,
+            "policy_source_sha256": self.policy_source_sha256,
+            "experiment_spec_sha256": self.experiment_spec_sha256,
+            "policy_admission_receipt_sha256": (
+                self.policy_admission_receipt.receipt_sha256
+            ),
             "selection_method": "incumbent_hold_band_then_ranked_entry_band",
+            "out_of_pool_position_policy": self.out_of_pool_position_policy,
             "weighting_method": "equal_weight_capped_then_whole_lot_floor",
             "improvement_rule": "strictly_greater_than_complete_cost_plus_threshold",
             "max_positions": self.max_positions,
             "max_position_weight": self.max_position_weight,
             "entry_percentile_min": self.entry_percentile_min,
             "hold_percentile_min": self.hold_percentile_min,
+            "entry_predicted_return_min": self.entry_predicted_return_min,
+            "hold_predicted_return_min": self.hold_predicted_return_min,
             "no_trade_threshold": self.no_trade_threshold,
             "maximum_execution_price_deviation": (
                 self.maximum_execution_price_deviation
@@ -604,7 +676,7 @@ def _account_state_sha256(cash: Decimal, quantities: Mapping[str, int]) -> str:
     )
 
 
-def construct_portfolio(
+def _construct_portfolio(
     *,
     decision_at: datetime,
     requested_intent_type: PortfolioIntentType,
@@ -615,6 +687,7 @@ def construct_portfolio(
     policy: PortfolioConstructorPolicy,
     input_snapshot_sha256: str,
     model_sha256: str,
+    diagnostic_only: bool,
 ) -> PortfolioConstructionResult:
     """Build one deterministic, research-only portfolio decision."""
 
@@ -623,6 +696,8 @@ def construct_portfolio(
         raise PortfolioConstructionError("policy must be PortfolioConstructorPolicy")
     if policy.frozen_at > decision_at:
         raise PortfolioConstructionError("constructor policy must be frozen before decision_at")
+    if canonical_sha256(policy.to_content_dict()) != policy.policy_sha256:
+        raise PortfolioConstructionError("constructor policy hash mismatch")
     if not isinstance(requested_intent_type, PortfolioIntentType):
         raise PortfolioConstructionError("requested_intent_type must be PortfolioIntentType")
     if requested_intent_type not in {PortfolioIntentType.ALPHA_REBALANCE, *_REDUCTION_TYPES}:
@@ -637,6 +712,33 @@ def construct_portfolio(
         raise PortfolioConstructionError("current_cash must not be negative")
     input_hash = _sha256(input_snapshot_sha256, "input_snapshot_sha256")
     model_hash = _sha256(model_sha256, "model_sha256")
+    diagnostic_binding_valid = True
+    try:
+        verify_experiment_v3_diagnostic_binding(
+            policy.policy_admission_receipt,
+            as_of=decision_at,
+        )
+    except ExperimentV3AdmissionError:
+        diagnostic_binding_valid = False
+    if policy.policy_admission_receipt.model_sha256 != model_hash:
+        diagnostic_binding_valid = False
+    if diagnostic_only and not diagnostic_binding_valid:
+        raise PortfolioConstructionError(
+            "constructor diagnostic binding does not match runtime model"
+        )
+    formal_admission_ready = diagnostic_only
+    if not diagnostic_only:
+        try:
+            verify_experiment_v3_admission_receipt(
+                policy.policy_admission_receipt,
+                as_of=decision_at,
+                experiment_spec_sha256=policy.experiment_spec_sha256,
+                model_sha256=model_hash,
+                constructor_policy_source_sha256=policy.policy_source_sha256,
+                constructor_policy_frozen_at=policy.frozen_at,
+            )
+        except ExperimentV3AdmissionError:
+            formal_admission_ready = False
 
     instrument_rows = tuple(instruments)
     if not instrument_rows:
@@ -685,41 +787,96 @@ def construct_portfolio(
     )
     effective_intent = requested_intent_type
     selected: list[str] = []
+    mandatory_exit_ids: set[str] = set()
+    no_entry_qualified_alpha = False
 
-    if requested_intent_type is PortfolioIntentType.ALPHA_REBALANCE:
+    if requested_intent_type is PortfolioIntentType.ALPHA_REBALANCE and not formal_admission_ready:
+        # A blocked formal loader cannot create an Alpha BUY. Fail closed to
+        # cash while preserving the pure SELL exit path for existing holdings.
+        effective_intent = PortfolioIntentType.NO_ALPHA_CASH
+        requested_target = ZERO
+        no_entry_qualified_alpha = True
+        mandatory_exit_ids.update(current)
+        for instrument_id in current:
+            exclusions[instrument_id].add("formal_experiment_v3_admission_blocked")
+    elif requested_intent_type is PortfolioIntentType.ALPHA_REBALANCE:
+        entry_qualified = [
+            item
+            for item in ranked
+            if item.eligibility
+            and item.predicted_return is not None
+            and item.predicted_return >= policy.entry_predicted_return_min
+            and item.percentile is not None
+            and item.percentile >= policy.entry_percentile_min
+        ]
+        for item in ranked:
+            if not item.eligibility:
+                continue
+            if (
+                item.predicted_return is None
+                or item.predicted_return < policy.entry_predicted_return_min
+            ):
+                exclusions[item.instrument_id].add(
+                    "below_entry_predicted_return"
+                )
+            if (
+                item.percentile is None
+                or item.percentile < policy.entry_percentile_min
+            ):
+                exclusions[item.instrument_id].add("below_entry_band")
+
+        # A positive, entry-qualified cross-section is a prerequisite for an
+        # Alpha allocation.  A merely less-negative ranking is not Alpha and
+        # therefore cannot manufacture a BUY.
+        if not entry_qualified:
+            no_entry_qualified_alpha = True
+            effective_intent = PortfolioIntentType.NO_ALPHA_CASH
+            requested_target = ZERO
+
         incumbents = [
             item
             for item in ranked
             if item.instrument_id in current
             and item.eligibility
+            and item.predicted_return is not None
+            and item.predicted_return >= policy.hold_predicted_return_min
+            and item.percentile is not None
             and item.percentile >= policy.hold_percentile_min
         ]
+        incumbents_set = {item.instrument_id for item in incumbents}
         for item in ranked:
-            if item.instrument_id in current and item not in incumbents:
-                exclusions[item.instrument_id].add("incumbent_below_hold_band")
-        selected.extend(item.instrument_id for item in incumbents[: policy.max_positions])
-        entrants = [
-            item
-            for item in ranked
-            if item.instrument_id not in current
-            and item.eligibility
-            and item.percentile >= policy.entry_percentile_min
-        ]
-        for item in ranked:
-            if (
-                item.instrument_id not in current
-                and item.eligibility
-                and item.percentile < policy.entry_percentile_min
-            ):
-                exclusions[item.instrument_id].add("below_entry_band")
-        for item in entrants:
-            if len(selected) >= policy.max_positions:
-                exclusions[item.instrument_id].add("max_positions_reached")
+            if item.instrument_id not in current or item.instrument_id in incumbents_set:
                 continue
-            selected.append(item.instrument_id)
-        if not selected:
-            effective_intent = PortfolioIntentType.NO_ALPHA_CASH
-            requested_target = ZERO
+            mandatory_exit_ids.add(item.instrument_id)
+            if not item.eligibility:
+                exclusions[item.instrument_id].add("mandatory_exit_ineligible")
+            if "not_in_current_alpha_universe" in item.exclusion_codes:
+                exclusions[item.instrument_id].add("mandatory_exit_out_of_pool")
+            if (
+                item.predicted_return is None
+                or item.predicted_return < policy.hold_predicted_return_min
+            ):
+                exclusions[item.instrument_id].add(
+                    "incumbent_below_hold_predicted_return"
+                )
+            if (
+                item.percentile is None
+                or item.percentile < policy.hold_percentile_min
+            ):
+                exclusions[item.instrument_id].add("incumbent_below_hold_band")
+
+        if effective_intent is PortfolioIntentType.ALPHA_REBALANCE:
+            selected.extend(
+                item.instrument_id for item in incumbents[: policy.max_positions]
+            )
+            entrants = [
+                item for item in entry_qualified if item.instrument_id not in current
+            ]
+            for item in entrants:
+                if len(selected) >= policy.max_positions:
+                    exclusions[item.instrument_id].add("max_positions_reached")
+                    continue
+                selected.append(item.instrument_id)
     else:
         # Risk/cash reductions never rotate into a new name.  Ranked current
         # positions are retained only to the extent permitted by the lower
@@ -821,6 +978,8 @@ def construct_portfolio(
         for item in set(proposed_quantities) | set(current)
     )
     reasons: set[str] = set()
+    if diagnostic_only:
+        reasons.add("diagnostic_only_not_formally_admitted")
 
     if effective_intent is PortfolioIntentType.ALPHA_REBALANCE:
         alpha_trade_allowed = bool(
@@ -836,20 +995,35 @@ def construct_portfolio(
             reasons.add("expected_improvement_not_above_cost_and_threshold")
     else:
         alpha_trade_allowed = False
+        if not formal_admission_ready:
+            reasons.add("formal_experiment_v3_admission_blocked")
         if proposed_has_trade:
             reasons.add("reduction_bypasses_alpha_no_trade_threshold")
         else:
             reasons.add("already_at_reduction_target")
         if effective_intent is PortfolioIntentType.NO_ALPHA_CASH:
             reasons.add("no_eligible_alpha_cash")
+            if no_entry_qualified_alpha:
+                reasons.add("no_entry_qualified_alpha_cash")
 
     if effective_intent is PortfolioIntentType.ALPHA_REBALANCE and not alpha_trade_allowed:
-        final_quantities = dict(current)
-        final_weights = dict(current_weights)
-        final_gross = current_gross
-        final_cash = cash
-        final_cost = ZERO
-        final_costs: dict[str, Decimal] = {}
+        # Hold-band and out-of-pool exits are risk-removal invariants, not
+        # discretionary Alpha rotations.  They bypass the improvement gate,
+        # while pricing/rule completeness above remains fail-closed.
+        final_quantities = {
+            instrument_id: quantity
+            for instrument_id, quantity in current.items()
+            if instrument_id not in mandatory_exit_ids
+        }
+        (
+            final_weights,
+            final_gross,
+            final_cash,
+            final_cost,
+            final_costs,
+        ) = _metrics(final_quantities, current, by_instrument, cash, policy)
+        if mandatory_exit_ids:
+            reasons.add("mandatory_exit_bypasses_alpha_no_trade_threshold")
     else:
         final_quantities = {
             item: quantity for item, quantity in proposed_quantities.items() if quantity > 0
@@ -871,7 +1045,13 @@ def construct_portfolio(
         elif delta < 0:
             action_type = ConstructionActionType.SELL
             action_reasons = (
-                "explicit_reduction" if effective_intent in _REDUCTION_TYPES else "alpha_rebalance",
+                "mandatory_alpha_exit"
+                if instrument_id in mandatory_exit_ids
+                else (
+                    "explicit_reduction"
+                    if effective_intent in _REDUCTION_TYPES
+                    else "alpha_rebalance"
+                ),
             )
         elif target_quantity > 0:
             action_type = ConstructionActionType.HOLD
@@ -943,6 +1123,7 @@ def construct_portfolio(
             "input_snapshot_sha256": input_hash,
             "model_sha256": model_hash,
             "constructor_policy_sha256": policy.policy_sha256,
+            "diagnostic_only": diagnostic_only,
         }
     )
     return PortfolioConstructionResult(
@@ -981,6 +1162,62 @@ def construct_portfolio(
     )
 
 
+def construct_portfolio(
+    *,
+    decision_at: datetime,
+    requested_intent_type: PortfolioIntentType,
+    target_gross_exposure: Decimal,
+    current_cash: Decimal,
+    current_positions: Sequence[CurrentPosition],
+    instruments: Sequence[PortfolioInstrument],
+    policy: PortfolioConstructorPolicy,
+    input_snapshot_sha256: str,
+    model_sha256: str,
+) -> PortfolioConstructionResult:
+    """Formal entry; blocked admission permits SELL/HOLD/CASH only."""
+
+    return _construct_portfolio(
+        decision_at=decision_at,
+        requested_intent_type=requested_intent_type,
+        target_gross_exposure=target_gross_exposure,
+        current_cash=current_cash,
+        current_positions=current_positions,
+        instruments=instruments,
+        policy=policy,
+        input_snapshot_sha256=input_snapshot_sha256,
+        model_sha256=model_sha256,
+        diagnostic_only=False,
+    )
+
+
+def construct_portfolio_diagnostic(
+    *,
+    decision_at: datetime,
+    requested_intent_type: PortfolioIntentType,
+    target_gross_exposure: Decimal,
+    current_cash: Decimal,
+    current_positions: Sequence[CurrentPosition],
+    instruments: Sequence[PortfolioInstrument],
+    policy: PortfolioConstructorPolicy,
+    input_snapshot_sha256: str,
+    model_sha256: str,
+) -> PortfolioConstructionResult:
+    """Research replay that is explicitly not eligible for signal publication."""
+
+    return _construct_portfolio(
+        decision_at=decision_at,
+        requested_intent_type=requested_intent_type,
+        target_gross_exposure=target_gross_exposure,
+        current_cash=current_cash,
+        current_positions=current_positions,
+        instruments=instruments,
+        policy=policy,
+        input_snapshot_sha256=input_snapshot_sha256,
+        model_sha256=model_sha256,
+        diagnostic_only=True,
+    )
+
+
 __all__ = [
     "ConstructionAction",
     "ConstructionActionType",
@@ -995,4 +1232,5 @@ __all__ = [
     "RESULT_SCHEMA_VERSION",
     "STRATEGY_ID",
     "construct_portfolio",
+    "construct_portfolio_diagnostic",
 ]

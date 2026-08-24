@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/next_session_signal.v2.json",
+  "title": "Experiment V3-bound frozen D-close next-session manual signal",
+  "description": "Create-only and byte-idempotent. The embedded constructor policy carries only its admission-receipt hash; runtime creation, persistence, reload and consumption require an independently supplied controlled typed ExperimentV3AdmissionReceiptV1. This artifact grants no automatic execution authority.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "signal_id", "strategy_id", "channel",
+    "strategy_date", "execution_date", "frozen_at", "portfolio_intent",
+    "construction", "constructor_policy", "data_snapshot_sha256",
+    "model_sha256", "policy_sha256", "experiment_spec_sha256",
+    "experiment_admission_receipt_sha256",
+    "daily_signal_publication_receipt_sha256",
+    "approved_factor_registry_sha256", "model_training_receipt_sha256",
+    "model_admission_receipt_sha256", "calibration_receipt_sha256",
+    "calibration_horizon_sessions", "intent_sha256",
+    "expected_account_state_sha256", "calendar_receipt",
+    "calendar_receipt_sha256", "calendar_registry_sha256",
+    "execution_rule_bundle_sha256", "execution_rule_trust_statement",
+    "frozen_reference_prices", "maximum_execution_price_deviation",
+    "one_shot", "manual_execution_required", "automatic_submission",
+    "paper_eligibility", "trade_eligibility", "live_supported",
+    "signal_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "next-session-signal.v2"},
+    "signal_id": {"type": "string", "minLength": 1},
+    "strategy_id": {"const": "a-share-small-account-adaptive-exposure-v2"},
+    "channel": {"enum": ["ALPHA_NEXT_SESSION", "RISK_REDUCTION_NEXT_SESSION"]},
+    "strategy_date": {"type": "string", "format": "date"},
+    "execution_date": {"type": "string", "format": "date"},
+    "frozen_at": {"type": "string", "format": "date-time"},
+    "portfolio_intent": {"$ref": "portfolio_intent.v1.json"},
+    "construction": {"$ref": "portfolio_construction_result.v2.json"},
+    "constructor_policy": {"$ref": "portfolio_constructor_policy.v2.json"},
+    "data_snapshot_sha256": {"$ref": "#/$defs/sha256"},
+    "model_sha256": {"$ref": "#/$defs/sha256"},
+    "policy_sha256": {"$ref": "#/$defs/sha256"},
+    "experiment_spec_sha256": {"$ref": "#/$defs/sha256"},
+    "experiment_admission_receipt_sha256": {"$ref": "#/$defs/sha256"},
+    "daily_signal_publication_receipt_sha256": {"$ref": "#/$defs/sha256"},
+    "approved_factor_registry_sha256": {"$ref": "#/$defs/sha256"},
+    "model_training_receipt_sha256": {"$ref": "#/$defs/sha256"},
+    "model_admission_receipt_sha256": {"$ref": "#/$defs/sha256"},
+    "calibration_receipt_sha256": {"$ref": "#/$defs/sha256"},
+    "calibration_horizon_sessions": {"type": "integer", "minimum": 1},
+    "intent_sha256": {"$ref": "#/$defs/sha256"},
+    "expected_account_state_sha256": {"$ref": "#/$defs/sha256"},
+    "calendar_receipt": {"$ref": "official_calendar_receipt.v1.json"},
+    "calendar_receipt_sha256": {"$ref": "#/$defs/sha256"},
+    "calendar_registry_sha256": {"$ref": "#/$defs/sha256"},
+    "execution_rule_bundle_sha256": {"$ref": "#/$defs/sha256"},
+    "execution_rule_trust_statement": {"const": "hash_consistency_only_metadata_source_not_authenticated"},
+    "frozen_reference_prices": {
+      "type": "object",
+      "propertyNames": {"pattern": "^[0-9A-Z][0-9A-Z.]{2,31}$"},
+      "additionalProperties": {"$ref": "#/$defs/decimal"}
+    },
+    "maximum_execution_price_deviation": {"$ref": "#/$defs/decimal"},
+    "one_shot": {"const": true},
+    "manual_execution_required": {"const": true},
+    "automatic_submission": {"const": false},
+    "paper_eligibility": {"const": false},
+    "trade_eligibility": {"const": false},
+    "live_supported": {"const": false},
+    "signal_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {"channel": {"const": "ALPHA_NEXT_SESSION"}},
+        "required": ["channel"]
+      },
+      "then": {
+        "properties": {
+          "portfolio_intent": {
+            "properties": {"intent_type": {"const": "ALPHA_REBALANCE"}}
+          },
+          "construction": {
+            "properties": {"intent_type": {"const": "ALPHA_REBALANCE"}}
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "portfolio_intent": {
+            "properties": {
+              "intent_type": {
+                "enum": [
+                  "NO_ALPHA_CASH", "DEFENSIVE_REDUCTION", "RISK_OFF",
+                  "ACCOUNT_DRAWDOWN_EXIT"
+                ]
+              }
+            }
+          },
+          "construction": {
+            "properties": {
+              "intent_type": {
+                "enum": [
+                  "NO_ALPHA_CASH", "DEFENSIVE_REDUCTION", "RISK_OFF",
+                  "ACCOUNT_DRAWDOWN_EXIT"
+                ]
+              }
+            }
+          }
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "decimal": {"type": "string", "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"}
+  }
+}

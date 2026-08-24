@@ -10,6 +10,7 @@ from pathlib import Path
 from unittest.mock import patch
 
 import research.strategy_workspace.next_session_signal as next_session_signal_module
+import research.strategy_workspace.daily_signal_publication as daily_signal_publication_module
 
 from operations.daily_pipeline import (
     ControlledHeldPositionReferenceV1,
@@ -32,6 +33,9 @@ from research.strategy_workspace.exposure_engine_v2 import (
     ExposureState,
     ExposureStateMemoryV2,
 )
+from research.strategy_workspace.experiment_v3_admission import (
+    ExperimentV3AdmissionReceiptV1,
+)
 from research.strategy_workspace.next_session_signal import (
     CalendarRegistryEntry,
     NextSessionAlreadyConsumed,
@@ -45,7 +49,12 @@ from research.strategy_workspace.paper_ledger_v2 import (
     ADAPTIVE_STRATEGY_ID,
     CanonicalExecutionCostBundleV1,
     ControlledCloseMarkBundleV1,
+    PaperCloseExecutionEvidenceV1,
+    PaperDailySessionDraftV2,
+    PaperExecutionAttemptV2,
+    PaperLedgerV2Error,
     VerifiedPaperLedgerV2,
+    append_paper_daily_session_v2,
     create_or_verify_paper_ledger_v2,
 )
 from research.strategy_workspace.portfolio_constructor_v2 import (
@@ -56,13 +65,20 @@ from research.market_data.validation import validate_json_schema
 from tests.test_alpha_engine_v2 import (
     _bars,
     _instrument_input,
-    _model,
+    _model_bundle,
     _sessions,
     _snapshot,
 )
 from tests.test_exposure_engine_v2 import _inputs, _memory, _policy
 from trading.costs import FeeSchedule
-from trading.models import AccountSnapshot, InstrumentRule, MarketQuote, Position
+from trading.models import (
+    AccountSnapshot,
+    InstrumentRule,
+    MarketQuote,
+    PortfolioIntent,
+    PortfolioIntentType,
+    Position,
+)
 
 
 TZ = timezone(timedelta(hours=8))
@@ -90,14 +106,36 @@ class RaisingUpdater:
         raise OSError("provider detail must not enter the immutable receipt")
 
 
-def constructor_policy(decision_at: datetime) -> PortfolioConstructorPolicy:
+def admitted_exposure_policy(
+    admission_receipt: ExperimentV3AdmissionReceiptV1,
+):
+    return replace(
+        _policy(),
+        preregistered_at=admission_receipt.exposure_policy_frozen_at,
+        policy_source_sha256=admission_receipt.exposure_policy_source_sha256,
+        experiment_spec_sha256=admission_receipt.experiment_spec_sha256,
+        policy_admission_receipt=admission_receipt,
+    )
+
+
+def constructor_policy(
+    decision_at: datetime,
+    admission_receipt: ExperimentV3AdmissionReceiptV1,
+) -> PortfolioConstructorPolicy:
     return PortfolioConstructorPolicy(
         policy_id="daily-pipeline-integration-v1",
-        frozen_at=decision_at - timedelta(days=1),
+        frozen_at=admission_receipt.constructor_policy_frozen_at,
+        policy_source_sha256=(
+            admission_receipt.constructor_policy_source_sha256
+        ),
+        experiment_spec_sha256=admission_receipt.experiment_spec_sha256,
+        policy_admission_receipt=admission_receipt,
         max_positions=3,
         max_position_weight=D("0.40"),
         entry_percentile_min=D("0.80"),
         hold_percentile_min=D("0.60"),
+        entry_predicted_return_min=D("0.000001"),
+        hold_predicted_return_min=D("0"),
         no_trade_threshold=D("0"),
         maximum_execution_price_deviation=D("0.02"),
         maximum_quote_age_seconds=300,
@@ -195,6 +233,13 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
         )
         self._registry_patch.start()
         self.addCleanup(self._registry_patch.stop)
+        self._publication_registry_patch = patch.object(
+            daily_signal_publication_module,
+            "DAILY_SIGNAL_PUBLICATION_REGISTRY_ROOT",
+            Path(self._registry_directory.name) / "fixed-daily-publication-registry",
+        )
+        self._publication_registry_patch.start()
+        self.addCleanup(self._publication_registry_patch.stop)
 
     def run_pipeline(
         self,
@@ -207,8 +252,10 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
         paper_ledger_path=None,
         held_position_references=(),
         exposure_registry_root=None,
+        publication_registry_root=None,
         strategy_date=STRATEGY_DATE,
         exposure_memory_override=None,
+        governance_bundle_override=None,
     ):
         selected = snapshot or _snapshot()
         calendar_receipt = receipt(selected)
@@ -230,7 +277,17 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
                 held_position_references=held_position_references,
             )
         updater = data_updater or StaticUpdater(data)
-        exposure_policy = _policy()
+        (
+            alpha_model,
+            approved_factor_registry,
+            experiment_v3_admission_receipt,
+        ) = governance_bundle_override or _model_bundle()
+        exposure_policy = admitted_exposure_policy(
+            experiment_v3_admission_receipt
+        )
+        self.experiment_v3_admission_receipt = (
+            experiment_v3_admission_receipt
+        )
         controlled_registry = registry(
             data.alpha_snapshot.decision_at, calendar_receipt
         )
@@ -246,6 +303,18 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
             if exposure_registry_root is not None
             else folder / ".test-exposure-state-registry.v1"
         )
+        selected_publication_root = (
+            Path(publication_registry_root)
+            if publication_registry_root is not None
+            else folder / ".test-daily-publication-registry.v1"
+        )
+        publication_patch = patch.object(
+            daily_signal_publication_module,
+            "DAILY_SIGNAL_PUBLICATION_REGISTRY_ROOT",
+            selected_publication_root,
+        )
+        publication_patch.start()
+        self.addCleanup(publication_patch.stop)
         with patch(
             "operations.daily_pipeline.EXPOSURE_STATE_REGISTRY_ROOT",
             selected_registry_root,
@@ -253,14 +322,21 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
             result = run_after_close_daily_pipeline(
                 strategy_date=strategy_date,
                 data_updater=updater,
-                alpha_model=_model(),
+                approved_factor_registry=approved_factor_registry,
+                experiment_v3_admission_receipt=(
+                    experiment_v3_admission_receipt
+                ),
+                alpha_model=alpha_model,
                 exposure_policy=exposure_policy,
                 exposure_memory=(
                     exposure_memory_override
                     if exposure_memory_override is not None
                     else _memory(exposure_policy)
                 ),
-                constructor_policy=constructor_policy(data.alpha_snapshot.decision_at),
+                constructor_policy=constructor_policy(
+                    data.alpha_snapshot.decision_at,
+                    experiment_v3_admission_receipt,
+                ),
                 account=account,
                 fees=fees(),
                 calendar_receipt=calendar_receipt,
@@ -271,6 +347,175 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
                 manual_pause=manual_pause,
             )
         return result, updater, controlled_registry, account
+
+    def run_risk_exit_pipeline(self, folder: Path):
+        selected = _snapshot()
+        previous_session = selected.trading_sessions[-2]
+        seed_decision_date = selected.trading_sessions[-3]
+        seed_intent = PortfolioIntent(
+            intent_id="seed-position-before-risk-exit",
+            strategy_id=ADAPTIVE_STRATEGY_ID,
+            intent_type=PortfolioIntentType.ALPHA_REBALANCE,
+            decision_at=datetime.combine(seed_decision_date, time(15, 5), TZ),
+            available_at=datetime.combine(seed_decision_date, time(15, 0), TZ),
+            frozen_at=datetime.combine(seed_decision_date, time(15, 4), TZ),
+            target_gross_exposure=D("0.10"),
+            target_weights={"000001.SZ": D("0.10")},
+            reason_codes=("controlled_seed_position",),
+            signal_sha256="1" * 64,
+            market_data_sha256="2" * 64,
+            model_sha256="3" * 64,
+            risk_state_sha256="4" * 64,
+        )
+        self.seed_intent = seed_intent
+        seed_cost_bundle = CanonicalExecutionCostBundleV1(
+            fee_schedule=fees(),
+            instrument_rules=rules(("000001.SZ",)),
+        )
+        seed_rule = seed_cost_bundle.instrument_rules["000001.SZ"]
+        seed_attempt = PaperExecutionAttemptV2(
+            attempt_id="controlled-seed-buy",
+            intent_id=seed_intent.intent_id,
+            intent_sha256=seed_intent.intent_sha256,
+            instrument_id="000001.SZ",
+            side="BUY",
+            status="FILLED",
+            requested_quantity=100,
+            filled_quantity=100,
+            execution_session=previous_session,
+            attempted_at=datetime.combine(previous_session, time(9, 31), TZ),
+            reference_open=D("10"),
+            fill_price=D("10"),
+            evidence_sha256="5" * 64,
+            execution_cost_bundle_sha256=seed_cost_bundle.cost_bundle_sha256,
+            commission_rate=fees().commission_rate,
+            minimum_commission=fees().minimum_commission,
+            sell_tax_rate=seed_rule.sell_stamp_duty_rate,
+            transfer_fee_rate=fees().exchange_fee_rate,
+        )
+        seed_close_bundle = ControlledCloseMarkBundleV1.from_close_prices(
+            session_date=previous_session,
+            observed_at=datetime.combine(previous_session, time(15, 0), TZ),
+            available_at=datetime.combine(previous_session, time(15, 1), TZ),
+            source="controlled-seed-close",
+            source_receipt_sha256="6" * 64,
+            position_closes={"000001.SZ": (100, D("30"))},
+        )
+        seed_evidence = PaperCloseExecutionEvidenceV1(
+            signal_id="controlled-seed-signal",
+            signal_sha256="7" * 64,
+            consumption_sha256="8" * 64,
+            fill_bundle_sha256="9" * 64,
+            frozen_execution_rule_bundle_sha256=(
+                seed_cost_bundle.execution_rule_bundle_sha256
+            ),
+            review_execution_rule_bundle_sha256=(
+                seed_cost_bundle.execution_rule_bundle_sha256
+            ),
+            execution_cost_bundle_sha256=seed_cost_bundle.cost_bundle_sha256,
+            execution_intent_sha256=seed_intent.intent_sha256,
+        )
+        ledger_path = folder / "controlled-paper-ledger-v2.jsonl"
+        with patch(
+            "research.strategy_workspace.paper_ledger_v2._now",
+            return_value=datetime.combine(previous_session, time(8), TZ),
+        ):
+            create_or_verify_paper_ledger_v2(
+                ledger_path,
+                strategy_id=ADAPTIVE_STRATEGY_ID,
+                policy_schema_version=ADAPTIVE_POLICY_SCHEMA_VERSION,
+                policy_sha256=FROZEN_ADAPTIVE_EXPOSURE_POLICY_SHA256,
+                controlled_trading_dates=(
+                    previous_session,
+                    STRATEGY_DATE,
+                    EXECUTION_DATE,
+                    date(2026, 8, 20),
+                ),
+            )
+        with patch(
+            "research.strategy_workspace.paper_ledger_v2._now",
+            return_value=datetime.combine(previous_session, time(15, 30), TZ),
+        ):
+            seeded = append_paper_daily_session_v2(
+                ledger_path,
+                PaperDailySessionDraftV2(
+                    trading_date=previous_session,
+                    execution_intent=seed_intent,
+                    closing_intent=seed_intent,
+                    attempts=(seed_attempt,),
+                    execution_cost_bundle=seed_cost_bundle,
+                    close_mark_bundle=seed_close_bundle,
+                    execution_evidence=seed_evidence,
+                ),
+            )
+        seed_cash = D(seeded.daily_sessions[-1]["cash"])
+        account = AccountSnapshot(
+            strategy_id=ADAPTIVE_STRATEGY_ID,
+            cash=seed_cash,
+            positions={
+                "000001.SZ": Position(
+                    instrument_id="000001.SZ",
+                    quantity=100,
+                    sellable_quantity=100,
+                )
+            },
+            snapshot_id="strategy-close-risk-exit-20260818",
+            as_of=selected.decision_at - timedelta(minutes=1),
+        )
+        return self.run_pipeline(
+            folder,
+            account_override=account,
+            paper_ledger_path=ledger_path,
+        )
+
+    def append_strategy_date_bridge(self, folder: Path, run) -> None:
+        cost_bundle = CanonicalExecutionCostBundleV1(
+            fee_schedule=fees(),
+            instrument_rules=run.frozen_data.instrument_rules,
+        )
+        reference_price = next(
+            item.reference_price
+            for item in run.construction.actions
+            if item.instrument_id == "000001.SZ"
+        )
+        close_bundle = ControlledCloseMarkBundleV1.from_close_prices(
+            session_date=STRATEGY_DATE,
+            observed_at=datetime.combine(STRATEGY_DATE, time(15, 0), TZ),
+            available_at=datetime.combine(STRATEGY_DATE, time(15, 1), TZ),
+            source="controlled-strategy-date-close",
+            source_receipt_sha256="a" * 64,
+            position_closes={"000001.SZ": (100, reference_price)},
+        )
+        evidence = PaperCloseExecutionEvidenceV1(
+            signal_id="controlled-strategy-date-bridge",
+            signal_sha256="b" * 64,
+            consumption_sha256="c" * 64,
+            fill_bundle_sha256="d" * 64,
+            frozen_execution_rule_bundle_sha256=(
+                cost_bundle.execution_rule_bundle_sha256
+            ),
+            review_execution_rule_bundle_sha256=(
+                cost_bundle.execution_rule_bundle_sha256
+            ),
+            execution_cost_bundle_sha256=cost_bundle.cost_bundle_sha256,
+            execution_intent_sha256=self.seed_intent.intent_sha256,
+        )
+        with patch(
+            "research.strategy_workspace.paper_ledger_v2._now",
+            return_value=datetime.combine(STRATEGY_DATE, time(17, 0), TZ),
+        ):
+            append_paper_daily_session_v2(
+                folder / "controlled-paper-ledger-v2.jsonl",
+                PaperDailySessionDraftV2(
+                    trading_date=STRATEGY_DATE,
+                    execution_intent=self.seed_intent,
+                    closing_intent=run.portfolio_intent,
+                    attempts=(),
+                    execution_cost_bundle=cost_bundle,
+                    close_mark_bundle=close_bundle,
+                    execution_evidence=evidence,
+                ),
+            )
 
     def test_data_updater_exception_still_writes_immutable_blocked_decision(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
@@ -305,6 +550,48 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
                 / "daily_pipeline_failure_receipt.v1.json",
             )
 
+    def test_experiment_v3_cross_artifact_mismatch_is_blocked_without_signal(self) -> None:
+        model, factor_registry, admitted = _model_bundle()
+        mismatched = replace(
+            admitted,
+            receipt_id="daily-pipeline-mismatched-experiment",
+            experiment_spec_sha256="7" * 64,
+        )
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            blocked, _, _, _ = self.run_pipeline(
+                folder,
+                governance_bundle_override=(model, factor_registry, mismatched),
+            )
+            self.assertIsInstance(blocked, DailyPipelineBlockedRunV1)
+            self.assertFalse(blocked.daily_decision.buy_orders)
+            self.assertFalse(blocked.daily_decision.sell_orders)
+            self.assertIsNone(blocked.signal_path)
+            self.assertFalse((folder / "next-session-signal.json").exists())
+            self.assertIn(
+                "pipeline_validation_dailypipelineerror",
+                blocked.daily_decision.failure_codes,
+            )
+
+    def test_self_hash_drifted_factor_registry_is_blocked_without_signal(self) -> None:
+        model, factor_registry, admitted = _model_bundle()
+        object.__setattr__(factor_registry, "registry_sha256", "0" * 64)
+        with tempfile.TemporaryDirectory() as directory:
+            folder = Path(directory)
+            blocked, _, _, _ = self.run_pipeline(
+                folder,
+                governance_bundle_override=(model, factor_registry, admitted),
+            )
+            self.assertIsInstance(blocked, DailyPipelineBlockedRunV1)
+            self.assertFalse(blocked.daily_decision.buy_orders)
+            self.assertFalse(blocked.daily_decision.sell_orders)
+            self.assertIsNone(blocked.signal_path)
+            self.assertFalse((folder / "next-session-signal.json").exists())
+            self.assertNotEqual(
+                blocked.daily_decision.data_sha256,
+                blocked.daily_decision.failure_receipt_sha256,
+            )
+
     def test_exposure_memory_must_match_the_preceding_immutable_artifacts(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory)
@@ -323,9 +610,9 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
                 )
             forged = ExposureStateMemoryV2(
                 policy_sha256=memory.policy_sha256,
-                current_state=ExposureState.RISK_OFF,
+                current_state=memory.current_state,
                 last_decision_at=memory.last_decision_at,
-                last_input_snapshot_sha256=memory.last_input_snapshot_sha256,
+                last_input_snapshot_sha256="f" * 64,
             )
             with patch(
                 "operations.daily_pipeline.EXPOSURE_STATE_REGISTRY_ROOT",
@@ -346,7 +633,7 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
             folder = Path(directory)
             registry_root = folder / ".test-exposure-state-registry.v1"
             self.run_pipeline(folder)
-            policy = _policy()
+            policy = admitted_exposure_policy(_model_bundle()[2])
             with patch(
                 "operations.daily_pipeline.EXPOSURE_STATE_REGISTRY_ROOT",
                 registry_root,
@@ -373,7 +660,7 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
                 first_output,
                 exposure_registry_root=registry_root,
             )
-            policy = _policy()
+            policy = admitted_exposure_policy(_model_bundle()[2])
             with patch(
                 "operations.daily_pipeline.EXPOSURE_STATE_REGISTRY_ROOT",
                 registry_root,
@@ -397,7 +684,7 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
                 data_updater=RaisingUpdater(),
             )
             self.assertIsInstance(blocked, DailyPipelineBlockedRunV1)
-            policy = _policy()
+            policy = admitted_exposure_policy(_model_bundle()[2])
             with patch(
                 "operations.daily_pipeline.EXPOSURE_STATE_REGISTRY_ROOT",
                 registry_root,
@@ -507,7 +794,14 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
                 trading_calendar_receipt_sha256=calendar_receipt.receipt_sha256,
             )
             data = frozen_data(selected)
-            policy = _policy()
+            (
+                alpha_model,
+                approved_factor_registry,
+                experiment_v3_admission_receipt,
+            ) = _model_bundle()
+            policy = admitted_exposure_policy(
+                experiment_v3_admission_receipt
+            )
             account = AccountSnapshot(
                 strategy_id=ADAPTIVE_STRATEGY_ID,
                 cash=D("10000"),
@@ -522,10 +816,17 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
                 result = run_after_close_daily_pipeline(
                     strategy_date=STRATEGY_DATE,
                     data_updater=StaticUpdater(data),
-                    alpha_model=_model(),
+                    approved_factor_registry=approved_factor_registry,
+                    experiment_v3_admission_receipt=(
+                        experiment_v3_admission_receipt
+                    ),
+                    alpha_model=alpha_model,
                     exposure_policy=policy,
                     exposure_memory=_memory(policy),
-                    constructor_policy=constructor_policy(selected.decision_at),
+                    constructor_policy=constructor_policy(
+                        selected.decision_at,
+                        experiment_v3_admission_receipt,
+                    ),
                     account=account,
                     fees=fees(),
                     calendar_receipt=calendar_receipt,
@@ -659,7 +960,7 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
             daily_sessions=(
                 {
                     "trading_date": selected.trading_sessions[-2].isoformat(),
-                    "peak_nav": "10000",
+                    "peak_nav": "12000",
                 },
             ),
             last_record_sha256="d" * 64,
@@ -691,16 +992,47 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
     def test_end_to_end_replay_preopen_manual_fill_and_paper_close(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory)
-            first, updater, controlled_registry, close_account = self.run_pipeline(folder)
+            first, updater, controlled_registry, close_account = (
+                self.run_risk_exit_pipeline(folder)
+            )
             original_decision = first.artifacts.json_path.read_bytes()
-            second, _, _, _ = self.run_pipeline(folder)
+            second, _, _, _ = self.run_pipeline(
+                folder,
+                account_override=close_account,
+                paper_ledger_path=folder / "controlled-paper-ledger-v2.jsonl",
+            )
 
             self.assertEqual(updater.calls, [STRATEGY_DATE])
             self.assertEqual(first.daily_decision.to_dict(), second.daily_decision.to_dict())
             self.assertEqual(original_decision, second.artifacts.json_path.read_bytes())
             self.assertEqual(first.alpha_ranking.ranking_sha256, second.alpha_ranking.ranking_sha256)
             self.assertEqual(first.next_session_signal.signal_sha256, second.next_session_signal.signal_sha256)
+            self.append_strategy_date_bridge(folder, first)
             self.assertTrue(first.evidence_artifacts.alpha_ranking_path.is_file())
+            self.assertTrue(
+                first.evidence_artifacts.approved_factor_registry_path.is_file()
+            )
+            self.assertTrue(
+                first.evidence_artifacts.experiment_v3_admission_receipt_path.is_file()
+            )
+            governance_evidence = json.loads(
+                first.evidence_artifacts.experiment_v3_evidence_path.read_text(
+                    encoding="utf-8"
+                )
+            )
+            evidence_sha256 = governance_evidence.pop("evidence_sha256")
+            self.assertEqual(
+                evidence_sha256,
+                first.evidence_artifacts.experiment_v3_evidence_sha256,
+            )
+            self.assertEqual(
+                evidence_sha256,
+                canonical_sha256(governance_evidence),
+            )
+            self.assertEqual(
+                first.next_session_signal.experiment_admission_receipt_sha256,
+                self.experiment_v3_admission_receipt.receipt_sha256,
+            )
             self.assertFalse(first.daily_decision.to_dict()["automatic_order_submission"])
 
             trades = [
@@ -733,6 +1065,12 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
                 first.signal_path,
                 consumption_path,
                 calendar_registry=controlled_registry,
+                experiment_v3_admission_receipt=(
+                    self.experiment_v3_admission_receipt
+                ),
+                daily_signal_publication_receipt=(
+                    first.daily_signal_publication_receipt
+                ),
                 account=execution_account,
                 quotes=quotes,
                 fees=fees(),
@@ -748,6 +1086,12 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
                     first.signal_path,
                     consumption_path,
                     calendar_registry=controlled_registry,
+                    experiment_v3_admission_receipt=(
+                        self.experiment_v3_admission_receipt
+                    ),
+                    daily_signal_publication_receipt=(
+                        first.daily_signal_publication_receipt
+                    ),
                     account=execution_account,
                     quotes=quotes,
                     fees=fees(),
@@ -781,6 +1125,13 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
                     signal=first.next_session_signal,
                     consumption=forged_consumption,
                     intent=first.portfolio_intent,
+                    experiment_v3_admission_receipt=(
+                        self.experiment_v3_admission_receipt
+                    ),
+                    daily_signal_publication_receipt=(
+                        first.daily_signal_publication_receipt
+                    ),
+                    calendar_registry=controlled_registry,
                     fees=fees(),
                     instrument_rules=first.frozen_data.instrument_rules,
                     confirmations=confirmations,
@@ -800,7 +1151,7 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
                     * D("1.03")
                 ),
             )
-            with self.assertRaisesRegex(DailyPipelineError, "frozen deviation"):
+            with self.assertRaisesRegex(DailyPipelineError, "reviewed quote"):
                 record_manual_fills(
                     fill_bundle_path,
                     batch_id="manual-open-attacked-20260819",
@@ -808,6 +1159,13 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
                     signal=first.next_session_signal,
                     consumption=consumed,
                     intent=first.portfolio_intent,
+                    experiment_v3_admission_receipt=(
+                        self.experiment_v3_admission_receipt
+                    ),
+                    daily_signal_publication_receipt=(
+                        first.daily_signal_publication_receipt
+                    ),
+                    calendar_registry=controlled_registry,
                     fees=fees(),
                     instrument_rules=first.frozen_data.instrument_rules,
                     confirmations=(attacked_confirmation, *confirmations[1:]),
@@ -819,6 +1177,13 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
                 signal=first.next_session_signal,
                 consumption=consumed,
                 intent=first.portfolio_intent,
+                experiment_v3_admission_receipt=(
+                    self.experiment_v3_admission_receipt
+                ),
+                daily_signal_publication_receipt=(
+                    first.daily_signal_publication_receipt
+                ),
+                calendar_registry=controlled_registry,
                 fees=fees(),
                 instrument_rules=first.frozen_data.instrument_rules,
                 confirmations=confirmations,
@@ -845,6 +1210,13 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
                     signal=first.next_session_signal,
                     consumption=consumed,
                     intent=first.portfolio_intent,
+                    experiment_v3_admission_receipt=(
+                        self.experiment_v3_admission_receipt
+                    ),
+                    daily_signal_publication_receipt=(
+                        first.daily_signal_publication_receipt
+                    ),
+                    calendar_registry=controlled_registry,
                     fees=fees(),
                     instrument_rules=first.frozen_data.instrument_rules,
                     confirmations=(mismatched_reference, *confirmations[1:]),
@@ -862,6 +1234,13 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
                     signal=first.next_session_signal,
                     consumption=consumed,
                     intent=first.portfolio_intent,
+                    experiment_v3_admission_receipt=(
+                        self.experiment_v3_admission_receipt
+                    ),
+                    daily_signal_publication_receipt=(
+                        first.daily_signal_publication_receipt
+                    ),
+                    calendar_registry=controlled_registry,
                     fees=fees(),
                     instrument_rules=first.frozen_data.instrument_rules,
                     confirmations=(pre_review_attempt, *confirmations[1:]),
@@ -875,6 +1254,13 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
                     signal=first.next_session_signal,
                     consumption=consumed,
                     intent=first.portfolio_intent,
+                    experiment_v3_admission_receipt=(
+                        self.experiment_v3_admission_receipt
+                    ),
+                    daily_signal_publication_receipt=(
+                        first.daily_signal_publication_receipt
+                    ),
+                    calendar_registry=controlled_registry,
                     fees=fees(),
                     instrument_rules=first.frozen_data.instrument_rules,
                     confirmations=confirmations,
@@ -887,28 +1273,23 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
                     signal=first.next_session_signal,
                     consumption=consumed,
                     intent=first.portfolio_intent,
+                    experiment_v3_admission_receipt=(
+                        self.experiment_v3_admission_receipt
+                    ),
+                    daily_signal_publication_receipt=(
+                        first.daily_signal_publication_receipt
+                    ),
+                    calendar_registry=controlled_registry,
                     fees=fees(),
                     instrument_rules=first.frozen_data.instrument_rules,
                     confirmations=confirmations,
                 )
 
-            ledger_path = folder / "paper-ledger-v2.jsonl"
-            with patch(
-                "research.strategy_workspace.paper_ledger_v2._now",
-                return_value=datetime.combine(EXECUTION_DATE, time(8), TZ),
-            ):
-                create_or_verify_paper_ledger_v2(
-                    ledger_path,
-                    strategy_id=ADAPTIVE_STRATEGY_ID,
-                    policy_schema_version=ADAPTIVE_POLICY_SCHEMA_VERSION,
-                    policy_sha256=FROZEN_ADAPTIVE_EXPOSURE_POLICY_SHA256,
-                    controlled_trading_dates=(EXECUTION_DATE, date(2026, 8, 20)),
-                )
-            quantities = {
-                attempt.instrument_id: attempt.filled_quantity
-                for attempt in fill_bundle.attempts
-                if attempt.filled_quantity
-            }
+            ledger_path = folder / "controlled-paper-ledger-v2.jsonl"
+            self.assertTrue(fill_bundle.attempts)
+            self.assertTrue(
+                all(item.side == "SELL" for item in fill_bundle.attempts)
+            )
             cost_bundle = CanonicalExecutionCostBundleV1(
                 fee_schedule=fees(),
                 instrument_rules=first.frozen_data.instrument_rules,
@@ -919,10 +1300,7 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
                 available_at=datetime.combine(EXECUTION_DATE, time(15, 1), TZ),
                 source="controlled-close-test-adapter",
                 source_receipt_sha256="f" * 64,
-                position_closes={
-                    instrument_id: (quantity, quotes[instrument_id].last)
-                    for instrument_id, quantity in sorted(quantities.items())
-                },
+                position_closes={},
             )
             forged_fill_bundle = replace(
                 fill_bundle,
@@ -937,6 +1315,10 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
                     trading_date=EXECUTION_DATE,
                     execution_intent=first.portfolio_intent,
                     closing_intent=first.portfolio_intent,
+                    next_session_signal=first.next_session_signal,
+                    experiment_v3_admission_receipt=(
+                        self.experiment_v3_admission_receipt
+                    ),
                     fill_bundle=forged_fill_bundle,
                     execution_cost_bundle=cost_bundle,
                     close_mark_bundle=close_marks,
@@ -950,28 +1332,28 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
                     trading_date=EXECUTION_DATE,
                     execution_intent=first.portfolio_intent,
                     closing_intent=first.portfolio_intent,
+                    next_session_signal=first.next_session_signal,
+                    experiment_v3_admission_receipt=(
+                        self.experiment_v3_admission_receipt
+                    ),
                     fill_bundle=fill_bundle,
                     execution_cost_bundle=cost_bundle,
                     close_mark_bundle=close_marks,
                 )
-            self.assertEqual(len(verified.daily_sessions), 1)
+            self.assertEqual(len(verified.daily_sessions), 3)
             self.assertGreater(
-                D(verified.daily_sessions[0]["session_transaction_cost"]), D("0")
+                D(verified.daily_sessions[-1]["session_transaction_cost"]), D("0")
             )
             self.assertEqual(
-                verified.daily_sessions[0]["feasible_gross_exposure"],
-                str(
-                    sum(first.portfolio_intent.target_weights.values(), D("0")).quantize(
-                        D("0.00000001")
-                    )
-                ),
+                verified.daily_sessions[-1]["feasible_gross_exposure"],
+                "0.00000000",
             )
             self.assertNotEqual(
-                verified.daily_sessions[0]["execution_evidence_bundle_sha256"],
+                verified.daily_sessions[-1]["execution_evidence_bundle_sha256"],
                 "1" * 64,
             )
             self.assertEqual(
-                verified.daily_sessions[0]["execution_evidence_bundle_sha256"],
+                verified.daily_sessions[-1]["execution_evidence_bundle_sha256"],
                 canonical_sha256(
                     {
                         "schema_version": "paper-close-execution-evidence.v1",
@@ -998,7 +1380,10 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
     def test_self_hashed_expanded_consumption_in_canonical_slot_is_rejected(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory)
-            run, _, controlled_registry, close_account = self.run_pipeline(folder)
+            run, _, controlled_registry, close_account = (
+                self.run_risk_exit_pipeline(folder)
+            )
+            self.append_strategy_date_bridge(folder, run)
             checked_at = datetime.combine(EXECUTION_DATE, time(9, 31), TZ)
             trades = [
                 item
@@ -1022,6 +1407,12 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
             )
             legitimate = next_session_signal_module._preflight(
                 run.next_session_signal,
+                experiment_v3_admission_receipt=(
+                    self.experiment_v3_admission_receipt
+                ),
+                daily_signal_publication_receipt=(
+                    run.daily_signal_publication_receipt
+                ),
                 registry=controlled_registry,
                 account=execution_account,
                 quotes=quotes,
@@ -1065,15 +1456,25 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
                     signal=run.next_session_signal,
                     consumption=forged,
                     intent=run.portfolio_intent,
+                    experiment_v3_admission_receipt=(
+                        self.experiment_v3_admission_receipt
+                    ),
+                    daily_signal_publication_receipt=(
+                        run.daily_signal_publication_receipt
+                    ),
+                    calendar_registry=controlled_registry,
                     fees=fees(),
                     instrument_rules=run.frozen_data.instrument_rules,
                     confirmations=(),
                 )
 
-    def test_rule_drift_cancellation_still_reaches_empty_fill_and_close_ledger(self) -> None:
+    def test_rule_drift_cancellation_cannot_silently_close_without_exit_retry(self) -> None:
         with tempfile.TemporaryDirectory() as directory:
             folder = Path(directory)
-            run, _, controlled_registry, close_account = self.run_pipeline(folder)
+            run, _, controlled_registry, close_account = (
+                self.run_risk_exit_pipeline(folder)
+            )
+            self.append_strategy_date_bridge(folder, run)
             checked_at = datetime.combine(EXECUTION_DATE, time(9, 31), TZ)
             trades = [
                 item
@@ -1107,6 +1508,12 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
                 run.signal_path,
                 consumption_path,
                 calendar_registry=controlled_registry,
+                experiment_v3_admission_receipt=(
+                    self.experiment_v3_admission_receipt
+                ),
+                daily_signal_publication_receipt=(
+                    run.daily_signal_publication_receipt
+                ),
                 account=execution_account,
                 quotes=quotes,
                 fees=fees(),
@@ -1127,6 +1534,13 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
                 signal=run.next_session_signal,
                 consumption=consumed,
                 intent=run.portfolio_intent,
+                experiment_v3_admission_receipt=(
+                    self.experiment_v3_admission_receipt
+                ),
+                daily_signal_publication_receipt=(
+                    run.daily_signal_publication_receipt
+                ),
+                calendar_registry=controlled_registry,
                 fees=fees(),
                 instrument_rules=drifted_rules,
                 confirmations=(),
@@ -1137,18 +1551,7 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
                 fill_bundle.review_execution_rule_bundle_sha256,
             )
 
-            ledger_path = folder / "rule-drift-paper-ledger-v2.jsonl"
-            with patch(
-                "research.strategy_workspace.paper_ledger_v2._now",
-                return_value=datetime.combine(EXECUTION_DATE, time(8), TZ),
-            ):
-                create_or_verify_paper_ledger_v2(
-                    ledger_path,
-                    strategy_id=ADAPTIVE_STRATEGY_ID,
-                    policy_schema_version=ADAPTIVE_POLICY_SCHEMA_VERSION,
-                    policy_sha256=FROZEN_ADAPTIVE_EXPOSURE_POLICY_SHA256,
-                    controlled_trading_dates=(EXECUTION_DATE,),
-                )
+            ledger_path = folder / "controlled-paper-ledger-v2.jsonl"
             with patch(
                 "research.strategy_workspace.paper_ledger_v2._now",
                 return_value=datetime.combine(EXECUTION_DATE, time(15, 5), TZ),
@@ -1163,21 +1566,27 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
                     available_at=datetime.combine(EXECUTION_DATE, time(15, 1), TZ),
                     source="controlled-close-test-adapter",
                     source_receipt_sha256="f" * 64,
-                    position_closes={},
+                    position_closes={
+                        "000001.SZ": (100, quotes["000001.SZ"].last),
+                    },
                 )
-                verified = append_close_paper_ledger_v2(
-                    ledger_path,
-                    trading_date=EXECUTION_DATE,
-                    execution_intent=run.portfolio_intent,
-                    closing_intent=run.portfolio_intent,
-                    fill_bundle=fill_bundle,
-                    execution_cost_bundle=cost_bundle,
-                    close_mark_bundle=close_marks,
-                )
-            session = verified.daily_sessions[0]
-            self.assertEqual(session["attempts"], [])
-            self.assertEqual(session["session_transaction_cost"], "0.00")
-            self.assertEqual(session["realized_gross_exposure"], "0.00000000")
+                with self.assertRaisesRegex(
+                    PaperLedgerV2Error,
+                    "every residual position requires exactly one daily exit retry",
+                ):
+                    append_close_paper_ledger_v2(
+                        ledger_path,
+                        trading_date=EXECUTION_DATE,
+                        execution_intent=run.portfolio_intent,
+                        closing_intent=run.portfolio_intent,
+                        next_session_signal=run.next_session_signal,
+                        experiment_v3_admission_receipt=(
+                            self.experiment_v3_admission_receipt
+                        ),
+                        fill_bundle=fill_bundle,
+                        execution_cost_bundle=cost_bundle,
+                        close_mark_bundle=close_marks,
+                    )
 
     def test_future_input_fails_closed_and_creates_no_buy(self) -> None:
         base = _snapshot()
@@ -1273,8 +1682,8 @@ class DailyPipelineIntegrationTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory() as directory:
             cash, _, _, _ = self.run_pipeline(Path(directory), snapshot=both_missing)
-        self.assertEqual(cash.alpha_ranking.status.value, "NO_ALPHA_CASH")
-        self.assertEqual(cash.daily_decision.portfolio_intent_type, "NO_ALPHA_CASH")
+        self.assertEqual(cash.alpha_ranking.status.value, "DATA_FAIL_CLOSED")
+        self.assertEqual(cash.daily_decision.portfolio_intent_type, "RISK_OFF")
         self.assertEqual(
             cash.next_session_signal.channel.value,
             "RISK_REDUCTION_NEXT_SESSION",

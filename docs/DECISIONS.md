@@ -18,6 +18,9 @@
 | [D-20260820-02](#d-20260820-02-按证据价值清理仓库) | 2026-08-20 | `accepted` | 按证据价值清理仓库 |
 | [D-20260820-03](#d-20260820-03-隔离自适应仓位-v2-p0不替换质量成长-v1) | 2026-08-20 | `accepted` | 隔离自适应仓位V2 P0，不替换质量成长V1 |
 | [D-20260821-01](#d-20260821-01-冻结-v2-p01-执行内核并采用五模块日终信号架构) | 2026-08-21 | `accepted` | 冻结V2 P0.1执行内核并采用五模块日终信号架构 |
+| [D-20260821-02](#d-20260821-02-使用固定策略级运行注册表并延后实际仓位事实) | 2026-08-21 | `accepted` | 使用固定策略级运行注册表并延后实际仓位事实 |
+| [D-20260821-03](#d-20260821-03-分离llm因子候选与experiment-v3正式冻结证据) | 2026-08-21 | `accepted` | 分离LLM因子候选与Experiment V3正式冻结证据 |
+| [D-20260824-01](#d-20260824-01-在daily到next信任边界复验完整语义并拒绝契约子类) | 2026-08-24 | `accepted` | 在Daily到Next信任边界复验完整语义并拒绝契约子类 |
 
 ## D-20260820-01 以仓库作为跨 Agent 交接界面
 
@@ -250,6 +253,102 @@ P0已经能表达现金与跨日风险退出，但仍存在七个会破坏失败
 ### 重新评估条件
 
 生产调度、多机执行或外部人工工作台接入前，必须提供受控共享CAS、官方calendar/account/quote/rule receipt loader和明确的registry迁移/恢复流程；不得用本地路径或哈希自行宣称来源可信。
+
+## D-20260821-03 分离LLM因子候选与Experiment V3正式冻结证据
+
+- 日期：2026-08-21
+- 状态：`accepted`
+- 影响范围：因子发现、Alpha模型、Exposure/Constructor policy、Next-session Signal、Daily Pipeline固定发布边界
+- 关系：细化 `D-20260821-01` 的模型/阈值预注册与外部artifact边界，并以Model/Policy/Signal V2替代 `D-20260821-02` 当时使用的对应V1运行时契约；不改写该历史记录
+
+### 背景
+
+五模块已能消费调用方给出的冻结对象，但旧契约仍可能让候选因子、裸自哈希模型或调用方自报policy越过研究治理边界。金融与非金融子模型的裸分数也不能在没有同目标、同期限train-only校准的情况下直接混排。Next-session若只信任Signal内嵌的receipt内容，则自签JSON仍可能把未获外部控制的政策带到D+1。与此同时，池外旧持仓和仅有相对排名但预测收益不为正的候选必须有明确、可跨进程检查的处理规则。
+
+### 决策
+
+- LLM只能创建永久状态为 `llm_research_candidate_only` 的 `FactorHypothesisV2`。候选必须经过预注册、独立、只使用Validation分区的typed validation receipt，才可进入按ID规范排序和自哈希的approved-factor registry；候选、验证和批准三者不合并。
+- Alpha诊断入口只接受 `frozen-alpha-model.v2`：模型feature集合必须与approved registry完全一致，并绑定train-only训练receipt、同一目标/预测期限的金融与非金融校准、候选模型准入receipt、runtime源码manifest及Experiment V3结构绑定。旧V1模型和未批准因子在运行时失败关闭。正式入口还必须通过formal loader；当前固定返回全池 `DATA_FAIL_CLOSED`，不能产生BUY。
+- Exposure与Constructor升级为V2 policy并绑定同一admission receipt。Constructor除percentile band外必须设置严格为正的entry预测收益门及hold预测收益门；池外现有持仓固定 `MANDATORY_EXIT`，不能因截面缺行而静默保留。
+- `ExperimentV3AdmissionReceiptV1`只表达 `diagnostic_binding_only_not_formally_admitted` 的结构绑定，formal loader固定为 `blocked_not_implemented`。生产代码不提供issuer token或issuer helper；测试直接构造dataclass也不能令formal verifier成功。该receipt不认证外部artifact，不是正式Experiment V3冻结证据。
+- Daily Pipeline每天写decision，并以固定本地registry作为D→D+1唯一发布权威。authority枚举只有 `BLOCKED` 和 `RISK_REDUCTION_ONLY`，故不存在Alpha authority：前者恰好发布daily decision、authority receipt、canonical failure receipt、received-input commitments四项且 `next_session_allowed=false`；后者恰好发布17项完整证据且只允许无BUY的四类风险退出。
+- 所有publication artifact先做canonical JSON roundtrip再校验和持久化。每个 `YYYY-MM-DD/` 日期槽create-only占用，逐文件排他创建，admission/publication receipt与全部artifact写完后最后写 `COMMITTED`；崩溃留下的部分槽被视为毒化状态，必须失败关闭并人工恢复，不能自动覆盖或补齐。
+- Next-session升级为 `next-session-signal.v2`，创建、落盘、重载和消费都必须从固定registry重读精确canonical字节；调用方传入的receipt、路径或hash不能替代registry。当前只有 `RISK_REDUCTION_ONLY` 可进入第一次紧邻D+1，保留 `RISK_OFF`、`DEFENSIVE_REDUCTION`、`NO_ALPHA_CASH`、`ACCOUNT_DRAWDOWN_EXIT` 的首次执行；风险退出不得冒充普通Alpha买入。
+- 固定registry和文件ACL只是单机本地writer权限边界，不是外部来源认证、多主机共识或正式准入。Schema、自哈希、测试fixture、diagnostic receipt和逐日publication均不能提升Paper、交易、真实资金或LIVE准入。
+
+### 证据与真源
+
+- [Factor Discovery治理](../research/factor_discovery/README.md)
+- [Factor Governance实现](../research/factor_discovery/governance.py)
+- [Experiment V3 diagnostic binding契约](../research/strategy_workspace/experiment_v3_admission.py)
+- [Alpha Engine](../research/strategy_workspace/alpha_engine_v2.py)
+- [Exposure Engine](../research/strategy_workspace/exposure_engine_v2.py)
+- [Portfolio Constructor](../research/strategy_workspace/portfolio_constructor_v2.py)
+- [Next-session Adapter](../research/strategy_workspace/next_session_signal.py)
+- [Daily publication boundary](../research/strategy_workspace/daily_signal_publication.py)
+- [Daily Pipeline](../operations/daily_pipeline.py)
+- [Daily signal admission Schema](../schemas/daily_signal_admission_receipt.v1.json)
+- [Daily signal publication Schema](../schemas/daily_signal_publication_receipt.v1.json)
+- [Schema目录说明](../schemas/README.md)
+- [因子治理测试](../tests/test_factor_discovery_governance.py)
+
+### 放弃的方案
+
+- 让LLM直接输出“已验证因子”或把候选清单当模型feature registry：这会把提出假设与独立证伪合并为同一权限。
+- 只比较factor/model/policy SHA-256：哈希能绑定内容，不能证明issuer、数据源、训练分区或正式冻结流程可信。
+- 在生产代码保留issuer token/helper或允许测试fixture签发“正式”receipt：研究调用方会同时成为信任授予方，`blocked_not_implemented`失去意义。
+- 允许Next-session从Signal内嵌字段、调用方receipt或任意路径重建信任：同一调用方可以自签闭环或更换目录，绕过逐日唯一发布边界。
+- 只写一份publication receipt而不固化全部artifact，或在partial槽上自动续写：无法证明D+1使用的就是D日不可变决策，崩溃恢复还可能拼接两次运行。
+- 只按percentile买入或让池外持仓继续HOLD：前者可能买入全截面预期收益为负的相对优胜者，后者会丢失股票池变更后的退出责任。
+
+### 后果与取舍
+
+- 研究候选、独立验证、批准registry、模型训练/校准和政策形成可重放的诊断证据图；正式Alpha在外部loader缺失时明确失败关闭，不能借内部一致性获得BUY权限。
+- Daily仍满足“每天有决策”，同时把可执行边界缩窄为零订单阻断或纯风险减仓；四类风险退出不会因Alpha准入阻断而失去第一次D+1。
+- Risk publication增加到17项artifact，Blocked保留4项最小证据；canonical roundtrip、完整文件集和`COMMITTED`-last提升本地重放确定性，但partial槽需要人工恢复。
+- 当前只能验证单机内部一致性，不能证明外部来源、统计有效性或正式Experiment V3冻结；2024—2025 Locked Test继续不运行、不解释。
+
+### 重新评估条件
+
+只有在独立于研究调用方的正式controlled loader能够认证approved-factor registry、训练/校准产物、两份policy、官方PIT与市场registry，并形成不可变Experiment V3冻结receipt后，才重新评估“正式冻结”状态。之后仍须单独完成唯一Locked Test和前向Paper门，且LIVE永久不支持。
+
+## D-20260824-01 在Daily到Next信任边界复验完整语义并拒绝契约子类
+
+- 日期：2026-08-24
+- 状态：`accepted`
+- 影响范围：Daily publication、Exposure/Alpha正式artifact、Next-session加载边界、Experiment V3诊断receipt
+- 关系：补强`D-20260821-03`的固定发布与失败关闭边界，不改变其formal loader阻断和risk-only authority结论
+
+### 背景
+
+最终红队发现三项阻断：canonical字节和自哈希不能证明正式Daily/Exposure/Alpha artifact符合冻结Schema；分别自洽的authority、状态、failure、安全旗标与Exposure目标仍可能组合成不可达决策图；使用`isinstance`或动态分派还可能让调用方子类覆写验证/序列化方法。Next-session若只依赖loader已经校验过，也缺少独立防御层。
+
+### 决策
+
+- Daily publication在持久化前和固定registry重载时，实际执行`daily_strategy_decision.v2`、`exposure_decision.v2`和`alpha_ranking.v2`正式Schema，并复核Alpha status与eligible count。
+- Authority、decision/data status、failure receipt和所有安全旗标必须形成同一分支；blocked不能套risk authority，risk/no-failure分支不能携带blocked字段。
+- Exposure固定state/target必须沿流水线真实优先级映射到Intent、Construction和Daily：账户回撤优先，其次数据/Alpha失败、`NO_ALPHA_CASH`、`RISK_OFF`、真实减仓，其他情况为当前禁止发布的Alpha。
+- Next-session从固定registry加载后独立重跑完整publication contract；它不把loader返回对象视为已经足够可信。
+- Experiment诊断receipt、Daily admission/publication/loaded结果和Next-session Signal均要求exact contract type；关键校验显式调用基类实现，拒绝调用方子类覆写。
+- 以上只关闭本地工程绕过，不增加Alpha、Paper、交易、真实资金或LIVE authority；四个Locked/Experiment模块继续不运行、不解释。
+
+### 证据与真源
+
+- [Daily publication boundary](../research/strategy_workspace/daily_signal_publication.py)
+- [Next-session Adapter](../research/strategy_workspace/next_session_signal.py)
+- [Experiment V3 diagnostic binding](../research/strategy_workspace/experiment_v3_admission.py)
+- [Next-session对抗测试](../tests/test_next_session_signal.py)
+- [Schema对抗测试](../tests/test_schema_validation_v2.py)
+
+### 后果与取舍
+
+- 同一risk publication须同时通过Schema、hash、authority分支和跨artifact条件图；只重签被修改的字段不再足够。
+- Next重复校验增加少量本地计算，但减少loader替换或未来重构削弱语义校验的风险。
+- Exact-type边界有意拒绝继承扩展；任何新版本必须显式升级契约和Schema，不能靠子类兼容。
+
+### 重新评估条件
+
+只有在新的版本化契约明确替代现有V1/V2类型、同步Schema和对抗测试后，才重新评估exact-type限制；formal Experiment V3、Locked Test及任何准入仍按既有独立门处理。
 
 ## 新增记录模板
 

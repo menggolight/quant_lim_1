@@ -4,8 +4,11 @@ from copy import deepcopy
 from datetime import datetime
 import json
 from pathlib import Path
+import tempfile
 import unittest
+from unittest.mock import patch
 
+import research.strategy_workspace.daily_signal_publication as daily_signal_publication_module
 from research.market_data.validation import (
     SchemaValidationError,
     validate_json_schema,
@@ -15,17 +18,23 @@ from research.strategy_workspace.contracts import canonical_json_bytes
 from research.strategy_workspace.exposure_engine_v2 import decide_exposure
 from research.strategy_workspace.next_session_signal import (
     create_alpha_next_session_signal,
+    create_risk_next_session_signal,
+    NextSessionSignalError,
 )
 from tests.test_alpha_engine_v2 import _model, _snapshot
 from tests.test_daily_pipeline import decision as daily_decision
 from tests.test_exposure_engine_v2 import TZ, _inputs, _memory, _policy
 from tests.test_next_session_signal import (
+    admission_receipt,
     build_alpha,
+    build_risk,
     canonical_fees,
     canonical_rules,
+    publish_risk_bundle,
     receipt,
     registry,
 )
+from tests.test_portfolio_constructor_v2 import policy as constructor_policy
 
 
 SCHEMA_ROOT = Path(__file__).resolve().parents[1] / "schemas"
@@ -84,6 +93,41 @@ class Draft202012SchemaValidationTests(unittest.TestCase):
     def assert_schema_rejects(self, payload: object, schema_name: str) -> None:
         with self.assertRaises(SchemaValidationError):
             validate_json_schema(payload, SCHEMA_ROOT / schema_name)
+
+    def test_experiment_v3_receipt_and_policy_v2_schemas_reject_legacy_or_drift(self) -> None:
+        exposure_policy = _policy()
+        constructor = constructor_policy(no_trade="0")
+        receipt = exposure_policy.policy_admission_receipt
+
+        validate_json_schema(
+            _json_payload(receipt.to_dict()),
+            SCHEMA_ROOT / "experiment_v3_admission_receipt.v1.json",
+        )
+        validate_json_schema(
+            _json_payload(exposure_policy.to_dict()),
+            SCHEMA_ROOT / "exposure_hysteresis_policy.v2.json",
+        )
+        constructor_payload = _json_payload(constructor.to_dict())
+        validate_json_schema(
+            constructor_payload,
+            SCHEMA_ROOT / "portfolio_constructor_policy.v2.json",
+        )
+
+        legacy = deepcopy(constructor_payload)
+        legacy["schema_version"] = "portfolio-constructor-policy.v1"
+        self.assert_schema_rejects(
+            legacy, "portfolio_constructor_policy.v2.json"
+        )
+        missing_receipt = deepcopy(constructor_payload)
+        missing_receipt.pop("policy_admission_receipt_sha256")
+        self.assert_schema_rejects(
+            missing_receipt, "portfolio_constructor_policy.v2.json"
+        )
+        non_positive_entry = deepcopy(constructor_payload)
+        non_positive_entry["entry_predicted_return_min"] = "0"
+        self.assert_schema_rejects(
+            non_positive_entry, "portfolio_constructor_policy.v2.json"
+        )
 
     def test_daily_decision_schema_enforces_closed_shape_and_conditional_branch(self) -> None:
         schema_name = "daily_strategy_decision.v2.json"
@@ -252,20 +296,50 @@ class Draft202012SchemaValidationTests(unittest.TestCase):
         self.assert_schema_rejects(decision_extra, decision_schema)
 
     def test_next_session_schema_resolves_external_refs_and_closes_embedded_intent(self) -> None:
-        selected_policy, construction, intent = build_alpha()
+        selected_policy, construction, intent = build_risk()
         calendar_receipt = receipt()
-        signal = create_alpha_next_session_signal(
-            intent=intent,
-            construction=construction,
-            policy=selected_policy,
-            receipt=calendar_receipt,
-            registry=registry(calendar_receipt),
-            fees=canonical_fees(),
-            instrument_rules=canonical_rules(),
-        )
+        controlled_registry = registry(calendar_receipt)
+        with tempfile.TemporaryDirectory() as directory, patch.object(
+            daily_signal_publication_module,
+            "DAILY_SIGNAL_PUBLICATION_REGISTRY_ROOT",
+            Path(directory) / "fixed-daily-publication-registry",
+        ):
+            publish_risk_bundle(
+                selected_policy,
+                construction,
+                intent,
+                calendar_receipt,
+                controlled_registry,
+            )
+            signal = create_risk_next_session_signal(
+                intent=intent,
+                construction=construction,
+                policy=selected_policy,
+                experiment_v3_admission_receipt=admission_receipt(),
+                receipt=calendar_receipt,
+                registry=controlled_registry,
+                fees=canonical_fees(),
+                instrument_rules=canonical_rules(),
+            )
         payload = _json_payload(signal.to_dict())
-        schema_name = "next_session_signal.v1.json"
+        schema_name = "next_session_signal.v2.json"
         validate_json_schema(payload, SCHEMA_ROOT / schema_name)
+
+        alpha_policy, alpha_construction, alpha_intent = build_alpha()
+        with self.assertRaisesRegex(
+            NextSessionSignalError,
+            "formal Experiment V3 loader is blocked_not_implemented",
+        ):
+            create_alpha_next_session_signal(
+                intent=alpha_intent,
+                construction=alpha_construction,
+                policy=alpha_policy,
+                experiment_v3_admission_receipt=admission_receipt(),
+                receipt=calendar_receipt,
+                registry=controlled_registry,
+                fees=canonical_fees(),
+                instrument_rules=canonical_rules(),
+            )
 
         construction_payload = _json_payload(construction.to_dict())
         construction_schema = "portfolio_construction_result.v2.json"
@@ -274,18 +348,16 @@ class Draft202012SchemaValidationTests(unittest.TestCase):
             SCHEMA_ROOT / construction_schema,
         )
         risk_construction_with_buy = deepcopy(construction_payload)
-        risk_construction_with_buy["intent_type"] = "RISK_OFF"
+        risk_construction_with_buy["actions"][0]["action"] = "BUY"
         self.assert_schema_rejects(
             risk_construction_with_buy,
             construction_schema,
         )
 
-        alpha_buy_masquerading_as_risk = deepcopy(payload)
-        alpha_buy_masquerading_as_risk["channel"] = (
-            "RISK_REDUCTION_NEXT_SESSION"
-        )
+        risk_sell_masquerading_as_alpha = deepcopy(payload)
+        risk_sell_masquerading_as_alpha["channel"] = "ALPHA_NEXT_SESSION"
         self.assert_schema_rejects(
-            alpha_buy_masquerading_as_risk,
+            risk_sell_masquerading_as_alpha,
             schema_name,
         )
 
@@ -293,9 +365,14 @@ class Draft202012SchemaValidationTests(unittest.TestCase):
         forged_embedded_intent["portfolio_intent"]["bypass"] = True
         self.assert_schema_rejects(forged_embedded_intent, schema_name)
 
-        positive_intent_without_weight = deepcopy(payload)
-        positive_intent_without_weight["portfolio_intent"]["target_weights"] = {}
-        self.assert_schema_rejects(positive_intent_without_weight, schema_name)
+        defensive_intent_without_positive_weight = deepcopy(payload)
+        defensive_intent_without_positive_weight["portfolio_intent"][
+            "intent_type"
+        ] = "DEFENSIVE_REDUCTION"
+        self.assert_schema_rejects(
+            defensive_intent_without_positive_weight,
+            schema_name,
+        )
 
 
 if __name__ == "__main__":

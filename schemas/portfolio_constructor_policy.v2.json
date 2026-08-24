@@ -1,0 +1,65 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/portfolio_constructor_policy.v2.json",
+  "title": "Experiment V3 diagnostic-bound Adaptive Exposure V2 constructor policy",
+  "description": "Pre-registered positive-Alpha and exit thresholds. No production defaults or execution authority are provided.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "status", "policy_id", "frozen_at",
+    "policy_source_sha256", "experiment_spec_sha256",
+    "policy_admission_receipt_sha256", "selection_method",
+    "out_of_pool_position_policy", "weighting_method", "improvement_rule",
+    "max_positions", "max_position_weight", "entry_percentile_min",
+    "hold_percentile_min", "entry_predicted_return_min",
+    "hold_predicted_return_min", "no_trade_threshold",
+    "maximum_execution_price_deviation", "maximum_quote_age_seconds",
+    "maximum_account_age_seconds", "costs", "manual_execution_required",
+    "automatic_submission", "live_supported", "policy_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "portfolio-constructor-policy.v2"},
+    "status": {"const": "frozen_pre_registered"},
+    "policy_id": {"$ref": "#/$defs/identifier"},
+    "frozen_at": {"type": "string", "format": "date-time"},
+    "policy_source_sha256": {"$ref": "#/$defs/sha256"},
+    "experiment_spec_sha256": {"$ref": "#/$defs/sha256"},
+    "policy_admission_receipt_sha256": {"$ref": "#/$defs/sha256"},
+    "selection_method": {"const": "incumbent_hold_band_then_ranked_entry_band"},
+    "out_of_pool_position_policy": {"const": "MANDATORY_EXIT"},
+    "weighting_method": {"const": "equal_weight_capped_then_whole_lot_floor"},
+    "improvement_rule": {"const": "strictly_greater_than_complete_cost_plus_threshold"},
+    "max_positions": {"type": "integer", "minimum": 1, "maximum": 3},
+    "max_position_weight": {"$ref": "#/$defs/decimal"},
+    "entry_percentile_min": {"$ref": "#/$defs/decimal"},
+    "hold_percentile_min": {"$ref": "#/$defs/decimal"},
+    "entry_predicted_return_min": {"$ref": "#/$defs/positiveDecimal"},
+    "hold_predicted_return_min": {"$ref": "#/$defs/decimal"},
+    "no_trade_threshold": {"$ref": "#/$defs/decimal"},
+    "maximum_execution_price_deviation": {"$ref": "#/$defs/decimal"},
+    "maximum_quote_age_seconds": {"type": "integer", "minimum": 1},
+    "maximum_account_age_seconds": {"type": "integer", "minimum": 1},
+    "costs": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["commission_rate", "minimum_commission", "sell_tax_rate", "transfer_fee_rate", "slippage_bps_one_way"],
+      "properties": {
+        "commission_rate": {"$ref": "#/$defs/decimal"},
+        "minimum_commission": {"$ref": "#/$defs/decimal"},
+        "sell_tax_rate": {"$ref": "#/$defs/decimal"},
+        "transfer_fee_rate": {"$ref": "#/$defs/decimal"},
+        "slippage_bps_one_way": {"$ref": "#/$defs/decimal"}
+      }
+    },
+    "manual_execution_required": {"const": true},
+    "automatic_submission": {"const": false},
+    "live_supported": {"const": false},
+    "policy_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "identifier": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "decimal": {"type": "string", "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
+    "positiveDecimal": {"type": "string", "pattern": "^(?:0\\.(?:0*[1-9][0-9]*)|[1-9][0-9]*(?:\\.[0-9]+)?)$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

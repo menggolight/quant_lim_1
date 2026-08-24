@@ -7,6 +7,12 @@ orders.  A hash proves content consistency only; official-source trust is
 derived from an independently supplied receipt allowlist/registry, never from
 a caller-provided boolean or source-name string.
 
+The current V2 signal also binds the Experiment V3 admission evidence.  Its
+embedded constructor-policy JSON deliberately contains only a receipt hash,
+so every create/write/read/consume boundary requires the independently held
+typed ``ExperimentV3AdmissionReceiptV1``.  Persisted JSON cannot issue or
+reconstruct that controlled receipt for itself.
+
 Normal Alpha/cash decisions and explicit risk reductions use separate factory
 functions.  A risk exit cannot be smuggled through the Alpha adapter.
 """
@@ -40,9 +46,26 @@ from trading.models import (
 )
 
 from .contracts import canonical_json_bytes, canonical_sha256
+from .daily_signal_publication import (
+    DailySignalAdmissionReceiptV1,
+    DailySignalAuthority,
+    DailySignalPublicationError,
+    DailySignalPublicationReceiptV1,
+    LoadedDailySignalPublicationV1,
+    load_daily_signal_publication,
+    load_daily_signal_publication_for_date,
+    validate_daily_signal_publication_contract,
+)
+from .experiment_v3_admission import (
+    ExperimentV3AdmissionError,
+    ExperimentV3AdmissionReceiptV1,
+    verify_experiment_v3_diagnostic_binding,
+    verify_experiment_v3_admission_receipt,
+)
 from .portfolio_constructor_v2 import (
     ConstructorCostPolicy,
     ConstructionActionType,
+    POLICY_SCHEMA_VERSION,
     PortfolioConstructionResult,
     PortfolioConstructorPolicy,
     STRATEGY_ID,
@@ -51,7 +74,7 @@ from .portfolio_constructor_v2 import (
 
 CALENDAR_RECEIPT_SCHEMA_VERSION = "official-calendar-receipt.v1"
 CALENDAR_REGISTRY_SCHEMA_VERSION = "official-calendar-registry.v1"
-NEXT_SESSION_SIGNAL_SCHEMA_VERSION = "next-session-signal.v1"
+NEXT_SESSION_SIGNAL_SCHEMA_VERSION = "next-session-signal.v2"
 NEXT_SESSION_CONSUMPTION_SCHEMA_VERSION = "next-session-consumption.v1"
 NEXT_SESSION_CONSUMPTION_REGISTRY_DIR = "consumptions"
 NEXT_SESSION_MANUAL_FILL_REGISTRY_DIR = "manual-fills"
@@ -252,19 +275,29 @@ def _intent_from_embedded(payload: Mapping[str, Any]) -> PortfolioIntent:
     return intent
 
 
-def _policy_from_embedded(payload: Mapping[str, Any]) -> PortfolioConstructorPolicy:
+def _policy_from_embedded(
+    payload: Mapping[str, Any],
+    *,
+    experiment_v3_admission_receipt: ExperimentV3AdmissionReceiptV1,
+) -> PortfolioConstructorPolicy:
     expected = {
         "schema_version",
         "status",
         "policy_id",
         "frozen_at",
+        "policy_source_sha256",
+        "experiment_spec_sha256",
+        "policy_admission_receipt_sha256",
         "selection_method",
+        "out_of_pool_position_policy",
         "weighting_method",
         "improvement_rule",
         "max_positions",
         "max_position_weight",
         "entry_percentile_min",
         "hold_percentile_min",
+        "entry_predicted_return_min",
+        "hold_predicted_return_min",
         "no_trade_threshold",
         "maximum_execution_price_deviation",
         "maximum_quote_age_seconds",
@@ -291,7 +324,7 @@ def _policy_from_embedded(payload: Mapping[str, Any]) -> PortfolioConstructorPol
         "embedded constructor costs",
     )
     if (
-        payload["schema_version"] != "portfolio-constructor-policy.v1"
+        payload["schema_version"] != POLICY_SCHEMA_VERSION
         or payload["status"] != "frozen_pre_registered"
         or payload["selection_method"]
         != "incumbent_hold_band_then_ranked_entry_band"
@@ -299,6 +332,7 @@ def _policy_from_embedded(payload: Mapping[str, Any]) -> PortfolioConstructorPol
         != "equal_weight_capped_then_whole_lot_floor"
         or payload["improvement_rule"]
         != "strictly_greater_than_complete_cost_plus_threshold"
+        or payload["out_of_pool_position_policy"] != "MANDATORY_EXIT"
         or payload["manual_execution_required"] is not True
         or payload["automatic_submission"] is not False
         or payload["live_supported"] is not False
@@ -308,6 +342,9 @@ def _policy_from_embedded(payload: Mapping[str, Any]) -> PortfolioConstructorPol
         policy = PortfolioConstructorPolicy(
             policy_id=str(payload["policy_id"]),
             frozen_at=datetime.fromisoformat(str(payload["frozen_at"])),
+            policy_source_sha256=str(payload["policy_source_sha256"]),
+            experiment_spec_sha256=str(payload["experiment_spec_sha256"]),
+            policy_admission_receipt=experiment_v3_admission_receipt,
             max_positions=int(payload["max_positions"]),
             max_position_weight=_decimal(
                 payload["max_position_weight"], "policy.max_position_weight"
@@ -317,6 +354,14 @@ def _policy_from_embedded(payload: Mapping[str, Any]) -> PortfolioConstructorPol
             ),
             hold_percentile_min=_decimal(
                 payload["hold_percentile_min"], "policy.hold_percentile_min"
+            ),
+            entry_predicted_return_min=_decimal(
+                payload["entry_predicted_return_min"],
+                "policy.entry_predicted_return_min",
+            ),
+            hold_predicted_return_min=_decimal(
+                payload["hold_predicted_return_min"],
+                "policy.hold_predicted_return_min",
             ),
             no_trade_threshold=_decimal(
                 payload["no_trade_threshold"], "policy.no_trade_threshold"
@@ -347,6 +392,9 @@ def _policy_from_embedded(payload: Mapping[str, Any]) -> PortfolioConstructorPol
                     "policy.costs.slippage_bps_one_way",
                 ),
             ),
+            out_of_pool_position_policy=str(
+                payload["out_of_pool_position_policy"]
+            ),
         )
     except (KeyError, TypeError, ValueError) as exc:
         raise NextSessionSignalError("embedded constructor policy is malformed") from exc
@@ -354,6 +402,13 @@ def _policy_from_embedded(payload: Mapping[str, Any]) -> PortfolioConstructorPol
         str(payload["policy_sha256"]), "policy.policy_sha256"
     ):
         raise NextSessionSignalError("embedded constructor policy hash mismatch")
+    if policy.policy_admission_receipt.receipt_sha256 != _sha256(
+        str(payload["policy_admission_receipt_sha256"]),
+        "policy.policy_admission_receipt_sha256",
+    ):
+        raise NextSessionSignalError(
+            "embedded constructor policy admission receipt mismatch"
+        )
     if canonical_json_bytes(policy.to_dict()) != canonical_json_bytes(payload):
         raise NextSessionSignalError("embedded constructor policy is not canonical")
     return policy
@@ -587,6 +642,14 @@ class NextSessionSignal:
     data_snapshot_sha256: str
     model_sha256: str
     policy_sha256: str
+    experiment_spec_sha256: str
+    experiment_admission_receipt_sha256: str
+    daily_signal_publication_receipt_sha256: str
+    approved_factor_registry_sha256: str
+    model_training_receipt_sha256: str
+    model_admission_receipt_sha256: str
+    calibration_receipt_sha256: str
+    calibration_horizon_sessions: int
     intent_sha256: str
     expected_account_state_sha256: str
     calendar_receipt: Mapping[str, Any]
@@ -610,6 +673,13 @@ class NextSessionSignal:
             "data_snapshot_sha256",
             "model_sha256",
             "policy_sha256",
+            "experiment_spec_sha256",
+            "experiment_admission_receipt_sha256",
+            "daily_signal_publication_receipt_sha256",
+            "approved_factor_registry_sha256",
+            "model_training_receipt_sha256",
+            "model_admission_receipt_sha256",
+            "calibration_receipt_sha256",
             "intent_sha256",
             "expected_account_state_sha256",
             "calendar_receipt_sha256",
@@ -617,6 +687,13 @@ class NextSessionSignal:
             "execution_rule_bundle_sha256",
         ):
             object.__setattr__(self, field_name, _sha256(getattr(self, field_name), field_name))
+        if (
+            type(self.calibration_horizon_sessions) is not int
+            or self.calibration_horizon_sessions <= 0
+        ):
+            raise NextSessionSignalError(
+                "calibration_horizon_sessions must be a positive integer"
+            )
         deviation = _decimal(
             self.maximum_execution_price_deviation,
             "maximum_execution_price_deviation",
@@ -656,6 +733,22 @@ class NextSessionSignal:
             "data_snapshot_sha256": self.data_snapshot_sha256,
             "model_sha256": self.model_sha256,
             "policy_sha256": self.policy_sha256,
+            "experiment_spec_sha256": self.experiment_spec_sha256,
+            "experiment_admission_receipt_sha256": (
+                self.experiment_admission_receipt_sha256
+            ),
+            "daily_signal_publication_receipt_sha256": (
+                self.daily_signal_publication_receipt_sha256
+            ),
+            "approved_factor_registry_sha256": (
+                self.approved_factor_registry_sha256
+            ),
+            "model_training_receipt_sha256": self.model_training_receipt_sha256,
+            "model_admission_receipt_sha256": (
+                self.model_admission_receipt_sha256
+            ),
+            "calibration_receipt_sha256": self.calibration_receipt_sha256,
+            "calibration_horizon_sessions": self.calibration_horizon_sessions,
             "intent_sha256": self.intent_sha256,
             "expected_account_state_sha256": self.expected_account_state_sha256,
             "calendar_receipt": _thaw(self.calendar_receipt),
@@ -686,7 +779,13 @@ class NextSessionSignal:
         payload: Mapping[str, Any],
         *,
         registry: OfficialCalendarRegistry,
+        experiment_v3_admission_receipt: ExperimentV3AdmissionReceiptV1,
+        daily_signal_publication_receipt: DailySignalPublicationReceiptV1 | None,
     ) -> "NextSessionSignal":
+        if payload.get("schema_version") != NEXT_SESSION_SIGNAL_SCHEMA_VERSION:
+            raise NextSessionSignalError(
+                "unsupported next-session signal schema; runtime accepts v2 only"
+            )
         _require_exact_keys(
             payload,
             {
@@ -703,6 +802,14 @@ class NextSessionSignal:
                 "data_snapshot_sha256",
                 "model_sha256",
                 "policy_sha256",
+                "experiment_spec_sha256",
+                "experiment_admission_receipt_sha256",
+                "daily_signal_publication_receipt_sha256",
+                "approved_factor_registry_sha256",
+                "model_training_receipt_sha256",
+                "model_admission_receipt_sha256",
+                "calibration_receipt_sha256",
+                "calibration_horizon_sessions",
                 "intent_sha256",
                 "expected_account_state_sha256",
                 "calendar_receipt",
@@ -722,8 +829,6 @@ class NextSessionSignal:
             },
             "next-session signal",
         )
-        if payload.get("schema_version") != NEXT_SESSION_SIGNAL_SCHEMA_VERSION:
-            raise NextSessionSignalError("unsupported next-session signal schema")
         if payload.get("strategy_id") != STRATEGY_ID:
             raise NextSessionSignalError("next-session strategy_id mismatch")
         if (
@@ -750,6 +855,28 @@ class NextSessionSignal:
                 data_snapshot_sha256=str(payload["data_snapshot_sha256"]),
                 model_sha256=str(payload["model_sha256"]),
                 policy_sha256=str(payload["policy_sha256"]),
+                experiment_spec_sha256=str(payload["experiment_spec_sha256"]),
+                experiment_admission_receipt_sha256=str(
+                    payload["experiment_admission_receipt_sha256"]
+                ),
+                daily_signal_publication_receipt_sha256=str(
+                    payload["daily_signal_publication_receipt_sha256"]
+                ),
+                approved_factor_registry_sha256=str(
+                    payload["approved_factor_registry_sha256"]
+                ),
+                model_training_receipt_sha256=str(
+                    payload["model_training_receipt_sha256"]
+                ),
+                model_admission_receipt_sha256=str(
+                    payload["model_admission_receipt_sha256"]
+                ),
+                calibration_receipt_sha256=str(
+                    payload["calibration_receipt_sha256"]
+                ),
+                calibration_horizon_sessions=int(
+                    payload["calibration_horizon_sessions"]
+                ),
                 intent_sha256=str(payload["intent_sha256"]),
                 expected_account_state_sha256=str(payload["expected_account_state_sha256"]),
                 calendar_receipt=payload["calendar_receipt"],
@@ -789,7 +916,12 @@ class NextSessionSignal:
         stored_hash = _sha256(str(payload.get("signal_sha256")), "signal_sha256")
         if signal.signal_sha256 != stored_hash:
             raise NextSessionSignalError("next-session signal hash mismatch")
-        _validate_persisted_signal_semantics(signal)
+        _validate_persisted_signal_semantics(
+            signal,
+            experiment_v3_admission_receipt=experiment_v3_admission_receipt,
+            daily_signal_publication_receipt=daily_signal_publication_receipt,
+            registry=registry,
+        )
         return signal
 
 
@@ -971,6 +1103,33 @@ def _validate_construction_payload(payload: Mapping[str, Any]) -> None:
             _embedded_decimal(item[field_name], f"construction action {field_name}")
         if not isinstance(item["reason_codes"], list):
             raise NextSessionSignalError("construction action reasons are malformed")
+    instrument_action_ids = [
+        str(item["instrument_id"])
+        for item in actions
+        if item["instrument_id"] is not None
+    ]
+    if len(instrument_action_ids) != len(set(instrument_action_ids)):
+        raise NextSessionSignalError(
+            "construction cannot repeat an instrument action"
+        )
+    if sum(item["action"] == "CASH" for item in actions) != 1:
+        raise NextSessionSignalError(
+            "construction must contain exactly one CASH action"
+        )
+    current_quantities = payload["current_quantities"]
+    for item in actions:
+        if item["action"] == "SELL":
+            instrument_id = str(item["instrument_id"])
+            current_quantity = current_quantities.get(instrument_id)
+            if (
+                type(current_quantity) is not int
+                or item["current_quantity"] != current_quantity
+                or item["order_quantity"]
+                != current_quantity - item["target_quantity"]
+            ):
+                raise NextSessionSignalError(
+                    "construction SELL does not equal the frozen position delta"
+                )
     exclusions = payload["exclusions"]
     if not isinstance(exclusions, list):
         raise NextSessionSignalError("construction exclusions are malformed")
@@ -993,7 +1152,97 @@ def _validate_construction_payload(payload: Mapping[str, Any]) -> None:
     )
 
 
-def _validate_persisted_signal_semantics(signal: NextSessionSignal) -> None:
+def _load_and_bind_daily_publication(
+    *,
+    daily_signal_publication_receipt: DailySignalPublicationReceiptV1 | None,
+    strategy_date: date,
+    intent_payload: Mapping[str, Any],
+    construction_payload: Mapping[str, Any],
+    policy_payload: Mapping[str, Any],
+    calendar_receipt_payload: Mapping[str, Any],
+    calendar_registry: OfficialCalendarRegistry,
+    experiment_v3_admission_receipt: ExperimentV3AdmissionReceiptV1,
+    execution_rule_bundle_hash: str,
+) -> LoadedDailySignalPublicationV1:
+    try:
+        loaded = (
+            load_daily_signal_publication_for_date(strategy_date)
+            if daily_signal_publication_receipt is None
+            else load_daily_signal_publication(daily_signal_publication_receipt)
+        )
+    except DailySignalPublicationError as exc:
+        raise NextSessionSignalError(
+            f"fixed Daily publication rejected: {exc}"
+        ) from exc
+    if (
+        type(loaded) is not LoadedDailySignalPublicationV1
+        or type(loaded.admission) is not DailySignalAdmissionReceiptV1
+        or type(loaded.publication) is not DailySignalPublicationReceiptV1
+    ):
+        raise NextSessionSignalError(
+            "fixed Daily loader returned a non-exact trust-boundary type"
+        )
+    try:
+        # Deliberately repeat the full contract after the load boundary.  The
+        # adapter therefore does not trust a substituted loader result or a
+        # receipt subclass to preserve Daily/status/exposure semantics.
+        validate_daily_signal_publication_contract(
+            loaded.admission,
+            loaded.artifacts,
+        )
+    except DailySignalPublicationError as exc:
+        raise NextSessionSignalError(
+            f"fixed Daily publication contract rejected at Next load: {exc}"
+        ) from exc
+    admission = loaded.admission
+    if (
+        admission.authority is not DailySignalAuthority.RISK_REDUCTION_ONLY
+        or not loaded.publication.next_session_allowed
+    ):
+        raise NextSessionSignalError(
+            "formal V3 loader is blocked; only fixed-registry risk reduction is allowed"
+        )
+    exact = {
+        "portfolio-intent": intent_payload,
+        "portfolio-construction": construction_payload,
+        "constructor-policy": policy_payload,
+        "calendar-receipt": calendar_receipt_payload,
+        "calendar-registry": calendar_registry.to_dict(),
+        "experiment-v3-admission": experiment_v3_admission_receipt.to_dict(),
+    }
+    for name, payload in exact.items():
+        if canonical_json_bytes(loaded.artifacts[name]) != canonical_json_bytes(payload):
+            raise NextSessionSignalError(
+                f"caller {name} differs from fixed Daily publication bytes"
+            )
+    if admission.execution_rule_bundle_sha256 != execution_rule_bundle_hash:
+        raise NextSessionSignalError(
+            "execution rule bundle differs from fixed Daily publication"
+        )
+    return loaded
+
+
+def _validate_persisted_signal_semantics(
+    signal: NextSessionSignal,
+    *,
+    experiment_v3_admission_receipt: ExperimentV3AdmissionReceiptV1,
+    daily_signal_publication_receipt: DailySignalPublicationReceiptV1 | None,
+    registry: OfficialCalendarRegistry,
+) -> None:
+    if type(experiment_v3_admission_receipt) is not ExperimentV3AdmissionReceiptV1:
+        raise NextSessionSignalError(
+            "experiment_v3_admission_receipt must be the exact external receipt type"
+        )
+    if not isinstance(registry, OfficialCalendarRegistry):
+        raise NextSessionSignalError(
+            "registry must be a typed OfficialCalendarRegistry"
+        )
+    if daily_signal_publication_receipt is not None and type(
+        daily_signal_publication_receipt
+    ) is not DailySignalPublicationReceiptV1:
+        raise NextSessionSignalError(
+            "daily_signal_publication_receipt must be the exact receipt type"
+        )
     intent_payload = _thaw(signal.portfolio_intent)
     construction = _thaw(signal.construction)
     policy_payload = _thaw(signal.constructor_policy)
@@ -1003,8 +1252,78 @@ def _validate_persisted_signal_semantics(signal: NextSessionSignal) -> None:
     ):
         raise NextSessionSignalError("frozen signal payloads must be objects")
     intent = _intent_from_embedded(intent_payload)
-    policy = _policy_from_embedded(policy_payload)
+    policy = _policy_from_embedded(
+        policy_payload,
+        experiment_v3_admission_receipt=experiment_v3_admission_receipt,
+    )
     _validate_construction_payload(construction)
+    loaded_publication = _load_and_bind_daily_publication(
+        daily_signal_publication_receipt=daily_signal_publication_receipt,
+        strategy_date=signal.strategy_date,
+        intent_payload=intent_payload,
+        construction_payload=construction,
+        policy_payload=policy_payload,
+        calendar_receipt_payload=_thaw(signal.calendar_receipt),
+        calendar_registry=registry,
+        experiment_v3_admission_receipt=experiment_v3_admission_receipt,
+        execution_rule_bundle_hash=signal.execution_rule_bundle_sha256,
+    )
+    try:
+        if signal.channel is NextSessionChannel.RISK_REDUCTION:
+            verify_experiment_v3_diagnostic_binding(
+                experiment_v3_admission_receipt,
+                as_of=signal.frozen_at,
+            )
+            if (
+                experiment_v3_admission_receipt.experiment_spec_sha256
+                != signal.experiment_spec_sha256
+                or experiment_v3_admission_receipt.approved_factor_registry_sha256
+                != signal.approved_factor_registry_sha256
+                or experiment_v3_admission_receipt.model_sha256
+                != signal.model_sha256
+                or experiment_v3_admission_receipt.constructor_policy_source_sha256
+                != policy.policy_source_sha256
+            ):
+                raise ExperimentV3AdmissionError(
+                    "diagnostic V3 receipt differs from fixed risk publication"
+                )
+        else:
+            verify_experiment_v3_admission_receipt(
+                experiment_v3_admission_receipt,
+                as_of=signal.frozen_at,
+                experiment_spec_sha256=signal.experiment_spec_sha256,
+                approved_factor_registry_sha256=(
+                    signal.approved_factor_registry_sha256
+                ),
+                model_sha256=signal.model_sha256,
+                model_training_receipt_sha256=(
+                    signal.model_training_receipt_sha256
+                ),
+                model_admission_receipt_sha256=(
+                    signal.model_admission_receipt_sha256
+                ),
+                calibration_receipt_sha256=signal.calibration_receipt_sha256,
+                calibration_horizon_sessions=signal.calibration_horizon_sessions,
+                constructor_policy_source_sha256=policy.policy_source_sha256,
+            )
+    except ExperimentV3AdmissionError as exc:
+        raise NextSessionSignalError(
+            f"external Experiment V3 admission receipt rejected: {exc}"
+        ) from exc
+    if (
+        signal.experiment_admission_receipt_sha256
+        != experiment_v3_admission_receipt.receipt_sha256
+        or signal.daily_signal_publication_receipt_sha256
+        != loaded_publication.publication.publication_receipt_sha256
+        or signal.strategy_date != loaded_publication.admission.strategy_date
+        or signal.execution_date != loaded_publication.admission.execution_date
+        or signal.experiment_spec_sha256 != policy.experiment_spec_sha256
+        or signal.experiment_admission_receipt_sha256
+        != policy.policy_admission_receipt.receipt_sha256
+    ):
+        raise NextSessionSignalError(
+            "persisted signal Experiment V3 admission binding mismatch"
+        )
 
     expected_types = (
         _ALPHA_TYPES
@@ -1077,13 +1396,19 @@ def _validate_persisted_signal_semantics(signal: NextSessionSignal) -> None:
         raise NextSessionSignalError("frozen reference prices do not match trade actions")
     identity_hash = canonical_sha256(
         {
-            "scope": "next-session-signal-id.v1",
+            "scope": "next-session-signal-id.v2",
             "strategy_id": STRATEGY_ID,
             "strategy_date": signal.strategy_date,
             "execution_date": signal.execution_date,
             "channel": signal.channel.value,
             "intent_sha256": intent.intent_sha256,
             "construction_sha256": str(construction["construction_sha256"]),
+            "experiment_admission_receipt_sha256": (
+                signal.experiment_admission_receipt_sha256
+            ),
+            "daily_signal_publication_receipt_sha256": (
+                signal.daily_signal_publication_receipt_sha256
+            ),
             "calendar_receipt_sha256": signal.calendar_receipt_sha256,
             "execution_rule_bundle_sha256": signal.execution_rule_bundle_sha256,
         }
@@ -1097,12 +1422,24 @@ def _validate_factory_inputs(
     intent: PortfolioIntent,
     construction: PortfolioConstructionResult,
     policy: PortfolioConstructorPolicy,
+    experiment_v3_admission_receipt: ExperimentV3AdmissionReceiptV1,
+    daily_signal_publication_receipt: DailySignalPublicationReceiptV1 | None,
     receipt: OfficialCalendarReceipt,
     registry: OfficialCalendarRegistry,
     fees: FeeSchedule,
     instrument_rules: Mapping[str, InstrumentRule],
     channel: NextSessionChannel,
 ) -> tuple[date, date, str]:
+    if type(experiment_v3_admission_receipt) is not ExperimentV3AdmissionReceiptV1:
+        raise NextSessionSignalError(
+            "experiment_v3_admission_receipt must be the exact external receipt type"
+        )
+    if daily_signal_publication_receipt is not None and type(
+        daily_signal_publication_receipt
+    ) is not DailySignalPublicationReceiptV1:
+        raise NextSessionSignalError(
+            "daily_signal_publication_receipt must be the exact receipt type"
+        )
     if not isinstance(intent, PortfolioIntent):
         raise NextSessionSignalError("intent must be PortfolioIntent")
     if intent.strategy_id != STRATEGY_ID:
@@ -1111,6 +1448,42 @@ def _validate_factory_inputs(
         raise NextSessionSignalError("construction must be PortfolioConstructionResult")
     if not isinstance(policy, PortfolioConstructorPolicy):
         raise NextSessionSignalError("policy must be PortfolioConstructorPolicy")
+    try:
+        if channel is NextSessionChannel.RISK_REDUCTION:
+            verify_experiment_v3_diagnostic_binding(
+                experiment_v3_admission_receipt,
+                as_of=intent.decision_at,
+            )
+            if (
+                experiment_v3_admission_receipt.experiment_spec_sha256
+                != policy.experiment_spec_sha256
+                or experiment_v3_admission_receipt.model_sha256
+                != construction.model_sha256
+                or experiment_v3_admission_receipt.constructor_policy_source_sha256
+                != policy.policy_source_sha256
+            ):
+                raise ExperimentV3AdmissionError(
+                    "diagnostic V3 receipt differs from fixed risk construction"
+                )
+        else:
+            verify_experiment_v3_admission_receipt(
+                experiment_v3_admission_receipt,
+                as_of=intent.decision_at,
+                experiment_spec_sha256=policy.experiment_spec_sha256,
+                model_sha256=construction.model_sha256,
+                constructor_policy_source_sha256=policy.policy_source_sha256,
+            )
+    except ExperimentV3AdmissionError as exc:
+        raise NextSessionSignalError(
+            f"external Experiment V3 admission receipt rejected: {exc}"
+        ) from exc
+    if (
+        experiment_v3_admission_receipt.receipt_sha256
+        != policy.policy_admission_receipt.receipt_sha256
+    ):
+        raise NextSessionSignalError(
+            "constructor policy and external Experiment V3 admission receipt differ"
+        )
     if not isinstance(registry, OfficialCalendarRegistry):
         raise NextSessionSignalError(
             "calendar trust requires OfficialCalendarRegistry, not a boolean or string"
@@ -1197,6 +1570,32 @@ def _validate_factory_inputs(
         )
     strategy_date = local_decision.date()
     execution_date = receipt.next_session_after(strategy_date)
+    loaded = _load_and_bind_daily_publication(
+        daily_signal_publication_receipt=daily_signal_publication_receipt,
+        strategy_date=strategy_date,
+        intent_payload=intent.to_dict(),
+        construction_payload=construction.to_dict(),
+        policy_payload=policy.to_dict(),
+        calendar_receipt_payload=receipt.to_dict(),
+        calendar_registry=registry,
+        experiment_v3_admission_receipt=experiment_v3_admission_receipt,
+        execution_rule_bundle_hash=rule_bundle_sha256,
+    )
+    admission = loaded.admission
+    if (
+        channel is NextSessionChannel.ALPHA
+        or admission.strategy_date != strategy_date
+        or admission.execution_date != execution_date
+        or admission.intent_sha256 != intent.intent_sha256
+        or admission.construction_sha256 != construction.construction_sha256
+        or admission.model_sha256 != construction.model_sha256
+        or admission.constructor_policy_sha256 != policy.policy_sha256
+        or admission.calendar_receipt_sha256 != receipt.receipt_sha256
+        or admission.calendar_registry_sha256 != registry.registry_sha256
+    ):
+        raise NextSessionSignalError(
+            "next-session inputs differ from fixed Daily admission"
+        )
     return strategy_date, execution_date, rule_bundle_sha256
 
 
@@ -1205,6 +1604,8 @@ def _create_signal(
     intent: PortfolioIntent,
     construction: PortfolioConstructionResult,
     policy: PortfolioConstructorPolicy,
+    experiment_v3_admission_receipt: ExperimentV3AdmissionReceiptV1,
+    daily_signal_publication_receipt: DailySignalPublicationReceiptV1 | None,
     receipt: OfficialCalendarReceipt,
     registry: OfficialCalendarRegistry,
     fees: FeeSchedule,
@@ -1215,11 +1616,18 @@ def _create_signal(
         intent=intent,
         construction=construction,
         policy=policy,
+        experiment_v3_admission_receipt=experiment_v3_admission_receipt,
+        daily_signal_publication_receipt=daily_signal_publication_receipt,
         receipt=receipt,
         registry=registry,
         fees=fees,
         instrument_rules=instrument_rules,
         channel=channel,
+    )
+    resolved_daily_publication = (
+        load_daily_signal_publication_for_date(strategy_date).publication
+        if daily_signal_publication_receipt is None
+        else load_daily_signal_publication(daily_signal_publication_receipt).publication
     )
     trade_prices = {
         item.instrument_id: item.reference_price
@@ -1229,13 +1637,19 @@ def _create_signal(
     }
     identity_hash = canonical_sha256(
         {
-            "scope": "next-session-signal-id.v1",
+            "scope": "next-session-signal-id.v2",
             "strategy_id": STRATEGY_ID,
             "strategy_date": strategy_date,
             "execution_date": execution_date,
             "channel": channel.value,
             "intent_sha256": intent.intent_sha256,
             "construction_sha256": construction.construction_sha256,
+            "experiment_admission_receipt_sha256": (
+                experiment_v3_admission_receipt.receipt_sha256
+            ),
+            "daily_signal_publication_receipt_sha256": (
+                resolved_daily_publication.publication_receipt_sha256
+            ),
             "calendar_receipt_sha256": receipt.receipt_sha256,
             "execution_rule_bundle_sha256": rule_bundle_sha256,
         }
@@ -1252,6 +1666,30 @@ def _create_signal(
         data_snapshot_sha256=construction.input_snapshot_sha256,
         model_sha256=construction.model_sha256,
         policy_sha256=policy.policy_sha256,
+        experiment_spec_sha256=(
+            experiment_v3_admission_receipt.experiment_spec_sha256
+        ),
+        experiment_admission_receipt_sha256=(
+            experiment_v3_admission_receipt.receipt_sha256
+        ),
+        daily_signal_publication_receipt_sha256=(
+            resolved_daily_publication.publication_receipt_sha256
+        ),
+        approved_factor_registry_sha256=(
+            experiment_v3_admission_receipt.approved_factor_registry_sha256
+        ),
+        model_training_receipt_sha256=(
+            experiment_v3_admission_receipt.model_training_receipt_sha256
+        ),
+        model_admission_receipt_sha256=(
+            experiment_v3_admission_receipt.model_admission_receipt_sha256
+        ),
+        calibration_receipt_sha256=(
+            experiment_v3_admission_receipt.calibration_receipt_sha256
+        ),
+        calibration_horizon_sessions=(
+            experiment_v3_admission_receipt.calibration_horizon_sessions
+        ),
         intent_sha256=intent.intent_sha256,
         expected_account_state_sha256=construction.account_state_sha256,
         calendar_receipt=receipt.to_dict(),
@@ -1270,6 +1708,8 @@ def create_alpha_next_session_signal(
     intent: PortfolioIntent,
     construction: PortfolioConstructionResult,
     policy: PortfolioConstructorPolicy,
+    experiment_v3_admission_receipt: ExperimentV3AdmissionReceiptV1,
+    daily_signal_publication_receipt: DailySignalPublicationReceiptV1 | None = None,
     receipt: OfficialCalendarReceipt,
     registry: OfficialCalendarRegistry,
     fees: FeeSchedule,
@@ -1281,6 +1721,8 @@ def create_alpha_next_session_signal(
         intent=intent,
         construction=construction,
         policy=policy,
+        experiment_v3_admission_receipt=experiment_v3_admission_receipt,
+        daily_signal_publication_receipt=daily_signal_publication_receipt,
         receipt=receipt,
         registry=registry,
         fees=fees,
@@ -1294,6 +1736,8 @@ def create_risk_next_session_signal(
     intent: PortfolioIntent,
     construction: PortfolioConstructionResult,
     policy: PortfolioConstructorPolicy,
+    experiment_v3_admission_receipt: ExperimentV3AdmissionReceiptV1,
+    daily_signal_publication_receipt: DailySignalPublicationReceiptV1 | None = None,
     receipt: OfficialCalendarReceipt,
     registry: OfficialCalendarRegistry,
     fees: FeeSchedule,
@@ -1305,6 +1749,8 @@ def create_risk_next_session_signal(
         intent=intent,
         construction=construction,
         policy=policy,
+        experiment_v3_admission_receipt=experiment_v3_admission_receipt,
+        daily_signal_publication_receipt=daily_signal_publication_receipt,
         receipt=receipt,
         registry=registry,
         fees=fees,
@@ -1365,10 +1811,22 @@ def _ensure_registry_directories() -> tuple[Path, Path, Path]:
     return root, consumptions, manual_fills
 
 
-def write_new_next_session_signal(path: str | Path, signal: NextSessionSignal) -> Path:
-    if not isinstance(signal, NextSessionSignal):
-        raise NextSessionSignalError("signal must be NextSessionSignal")
-    _validate_persisted_signal_semantics(signal)
+def write_new_next_session_signal(
+    path: str | Path,
+    signal: NextSessionSignal,
+    *,
+    registry: OfficialCalendarRegistry,
+    experiment_v3_admission_receipt: ExperimentV3AdmissionReceiptV1,
+    daily_signal_publication_receipt: DailySignalPublicationReceiptV1 | None = None,
+) -> Path:
+    if type(signal) is not NextSessionSignal:
+        raise NextSessionSignalError("signal must be the exact NextSessionSignal type")
+    _validate_persisted_signal_semantics(
+        signal,
+        experiment_v3_admission_receipt=experiment_v3_admission_receipt,
+        daily_signal_publication_receipt=daily_signal_publication_receipt,
+        registry=registry,
+    )
     _ensure_registry_directories()
     target = Path(path)
     target.parent.mkdir(parents=True, exist_ok=True)
@@ -1403,6 +1861,8 @@ def read_next_session_signal(
     path: str | Path,
     *,
     registry: OfficialCalendarRegistry,
+    experiment_v3_admission_receipt: ExperimentV3AdmissionReceiptV1,
+    daily_signal_publication_receipt: DailySignalPublicationReceiptV1 | None = None,
 ) -> NextSessionSignal:
     source = Path(path)
     try:
@@ -1416,7 +1876,12 @@ def read_next_session_signal(
         raise NextSessionSignalError("next-session signal root must be an object")
     if raw != canonical_json_bytes(payload) + b"\n":
         raise NextSessionSignalError("next-session signal bytes are not canonical")
-    return NextSessionSignal.from_dict(payload, registry=registry)
+    return NextSessionSignal.from_dict(
+        payload,
+        registry=registry,
+        experiment_v3_admission_receipt=experiment_v3_admission_receipt,
+        daily_signal_publication_receipt=daily_signal_publication_receipt,
+    )
 
 
 @dataclass(frozen=True, slots=True)
@@ -1867,6 +2332,10 @@ def _trade_actions(signal: NextSessionSignal) -> tuple[Mapping[str, Any], ...]:
 def _validate_consumption_against_signal(
     signal: NextSessionSignal,
     consumption: NextSessionConsumption,
+    *,
+    experiment_v3_admission_receipt: ExperimentV3AdmissionReceiptV1,
+    daily_signal_publication_receipt: DailySignalPublicationReceiptV1 | None,
+    registry: OfficialCalendarRegistry,
 ) -> None:
     """Bind every persisted instruction back to the frozen construction.
 
@@ -1875,7 +2344,12 @@ def _validate_consumption_against_signal(
     the central slot from changing the frozen action set or enlarging a trade.
     """
 
-    _validate_persisted_signal_semantics(signal)
+    _validate_persisted_signal_semantics(
+        signal,
+        experiment_v3_admission_receipt=experiment_v3_admission_receipt,
+        daily_signal_publication_receipt=daily_signal_publication_receipt,
+        registry=registry,
+    )
     if (
         consumption.signal_id != signal.signal_id
         or consumption.signal_sha256 != signal.signal_sha256
@@ -2000,6 +2474,8 @@ def _validate_consumption_against_signal(
 def _preflight(
     signal: NextSessionSignal,
     *,
+    experiment_v3_admission_receipt: ExperimentV3AdmissionReceiptV1,
+    daily_signal_publication_receipt: DailySignalPublicationReceiptV1 | None,
     registry: OfficialCalendarRegistry,
     account: AccountSnapshot,
     quotes: Mapping[str, MarketQuote],
@@ -2007,7 +2483,12 @@ def _preflight(
     instrument_rules: Mapping[str, InstrumentRule],
     checked_at: datetime,
 ) -> NextSessionConsumption:
-    _validate_persisted_signal_semantics(signal)
+    _validate_persisted_signal_semantics(
+        signal,
+        experiment_v3_admission_receipt=experiment_v3_admission_receipt,
+        daily_signal_publication_receipt=daily_signal_publication_receipt,
+        registry=registry,
+    )
     checked_at = _aware(checked_at, "checked_at")
     local_checked = checked_at.astimezone(CHINA_STANDARD_TIME)
     if local_checked.date() != signal.execution_date:
@@ -2063,6 +2544,20 @@ def _preflight(
     }
     if set(quotes) != trade_ids:
         global_cancel_reasons.add("execution_quote_bundle_incomplete_or_extra")
+    aggregate_sells: dict[str, int] = {}
+    for item in actions:
+        if item["action"] == "SELL":
+            instrument_id = str(item["instrument_id"])
+            aggregate_sells[instrument_id] = (
+                aggregate_sells.get(instrument_id, 0)
+                + int(item["order_quantity"])
+            )
+    for instrument_id, quantity in aggregate_sells.items():
+        position = account.positions.get(instrument_id)
+        if position is None or quantity > position.quantity:
+            global_cancel_reasons.add("aggregate_sell_quantity_exceeds_position")
+        elif quantity > position.sellable_quantity:
+            global_cancel_reasons.add("aggregate_sell_quantity_exceeds_sellable")
     try:
         quote_hash = execution_quote_bundle_sha256(quotes)
     except (TypeError, ValueError) as exc:
@@ -2277,7 +2772,13 @@ def _preflight(
         instructions=tuple(instructions),
         cancel_reasons=tuple(sorted(all_cancel_reasons)),
     )
-    _validate_consumption_against_signal(signal, result)
+    _validate_consumption_against_signal(
+        signal,
+        result,
+        experiment_v3_admission_receipt=experiment_v3_admission_receipt,
+        daily_signal_publication_receipt=daily_signal_publication_receipt,
+        registry=registry,
+    )
     return result
 
 
@@ -2286,6 +2787,8 @@ def consume_next_session_signal(
     consumption_path: str | Path,
     *,
     registry: OfficialCalendarRegistry,
+    experiment_v3_admission_receipt: ExperimentV3AdmissionReceiptV1,
+    daily_signal_publication_receipt: DailySignalPublicationReceiptV1 | None = None,
     account: AccountSnapshot,
     quotes: Mapping[str, MarketQuote],
     fees: FeeSchedule,
@@ -2294,7 +2797,12 @@ def consume_next_session_signal(
 ) -> NextSessionConsumption:
     """Run one D+1 preflight and atomically persist its one-shot outcome."""
 
-    signal = read_next_session_signal(signal_path, registry=registry)
+    signal = read_next_session_signal(
+        signal_path,
+        registry=registry,
+        experiment_v3_admission_receipt=experiment_v3_admission_receipt,
+        daily_signal_publication_receipt=daily_signal_publication_receipt,
+    )
     _, consumption_registry, _ = _ensure_registry_directories()
     expected_consumption_path = canonical_next_session_consumption_path(
         signal_path,
@@ -2314,6 +2822,8 @@ def consume_next_session_signal(
         )
     result = _preflight(
         signal,
+        experiment_v3_admission_receipt=experiment_v3_admission_receipt,
+        daily_signal_publication_receipt=daily_signal_publication_receipt,
         registry=registry,
         account=account,
         quotes=quotes,
@@ -2360,6 +2870,9 @@ def read_next_session_consumption(
     path: str | Path,
     *,
     signal: NextSessionSignal,
+    experiment_v3_admission_receipt: ExperimentV3AdmissionReceiptV1,
+    daily_signal_publication_receipt: DailySignalPublicationReceiptV1 | None = None,
+    registry: OfficialCalendarRegistry,
 ) -> NextSessionConsumption:
     """Strictly reload and bind the immutable central consumption artifact.
 
@@ -2368,8 +2881,8 @@ def read_next_session_consumption(
     cannot re-fetch the account/quote payloads from hashes alone.
     """
 
-    if not isinstance(signal, NextSessionSignal):
-        raise NextSessionSignalError("signal must be NextSessionSignal")
+    if type(signal) is not NextSessionSignal:
+        raise NextSessionSignalError("signal must be the exact NextSessionSignal type")
     expected = canonical_next_session_consumption_path(
         "registry-bound-signal",
         signal.signal_sha256,
@@ -2401,7 +2914,13 @@ def read_next_session_consumption(
             "next-session consumption bytes are not canonical"
         )
     result = NextSessionConsumption.from_dict(payload)
-    _validate_consumption_against_signal(signal, result)
+    _validate_consumption_against_signal(
+        signal,
+        result,
+        experiment_v3_admission_receipt=experiment_v3_admission_receipt,
+        daily_signal_publication_receipt=daily_signal_publication_receipt,
+        registry=registry,
+    )
     return result
 
 

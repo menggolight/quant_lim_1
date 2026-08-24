@@ -1,0 +1,213 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/frozen_alpha_model.v2.json",
+  "title": "Experiment V3 diagnostic-only calibrated frozen alpha model v2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "model_id", "model_version", "artifact_status", "training_partition",
+    "training_window_start", "training_window_end", "training_data_cutoff_at", "trained_at",
+    "frozen_at", "training_dataset_sha256", "training_code_sha256",
+    "preprocessing_policy_sha256", "model_config_sha256", "experiment_spec_sha256",
+    "approved_factor_registry_sha256", "prediction_target", "prediction_horizon_sessions",
+    "universe_policy", "benchmark_policy", "runtime_build_manifest",
+    "runtime_build_manifest_sha256", "calibration_artifact",
+    "calibration_receipt_sha256", "model_training_receipt", "model_training_receipt_sha256",
+    "financial_submodel", "non_financial_submodel", "model_candidate_sha256",
+    "model_admission_receipt", "model_admission_receipt_sha256", "model_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "frozen-alpha-model.v2"},
+    "model_id": {"type": "string", "minLength": 1},
+    "model_version": {"type": "string", "minLength": 1},
+    "artifact_status": {"const": "frozen_train_only_calibrated_research_candidate"},
+    "training_partition": {"const": "train_only"},
+    "training_window_start": {"type": "string", "format": "date"},
+    "training_window_end": {"type": "string", "format": "date"},
+    "training_data_cutoff_at": {"type": "string", "format": "date-time"},
+    "trained_at": {"type": "string", "format": "date-time"},
+    "frozen_at": {"type": "string", "format": "date-time"},
+    "training_dataset_sha256": {"$ref": "#/$defs/sha256"},
+    "training_code_sha256": {"$ref": "#/$defs/sha256"},
+    "preprocessing_policy_sha256": {"$ref": "#/$defs/sha256"},
+    "model_config_sha256": {"$ref": "#/$defs/sha256"},
+    "experiment_spec_sha256": {"$ref": "#/$defs/sha256"},
+    "approved_factor_registry_sha256": {"$ref": "#/$defs/sha256"},
+    "prediction_target": {"type": "string", "minLength": 1},
+    "prediction_horizon_sessions": {"type": "integer", "minimum": 1, "maximum": 252},
+    "universe_policy": {"type": "string", "minLength": 1},
+    "benchmark_policy": {"type": "string", "minLength": 1},
+    "runtime_build_manifest": {"$ref": "#/$defs/runtime_build_manifest"},
+    "runtime_build_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "calibration_artifact": {"$ref": "#/$defs/calibration"},
+    "calibration_receipt_sha256": {"$ref": "#/$defs/sha256"},
+    "model_training_receipt": {"$ref": "#/$defs/training_receipt"},
+    "model_training_receipt_sha256": {"$ref": "#/$defs/sha256"},
+    "financial_submodel": {"$ref": "#/$defs/submodel"},
+    "non_financial_submodel": {"$ref": "#/$defs/submodel"},
+    "model_candidate_sha256": {"$ref": "#/$defs/sha256"},
+    "model_admission_receipt": {"$ref": "#/$defs/admission_receipt"},
+    "model_admission_receipt_sha256": {"$ref": "#/$defs/sha256"},
+    "model_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "calibration": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "calibration_id", "calibration_method", "fitting_partition",
+        "target_id", "prediction_horizon_sessions", "experiment_spec_sha256",
+        "approved_factor_registry_sha256", "universe_policy", "benchmark_policy",
+        "fitting_window_start", "fitting_window_end",
+        "fitting_data_cutoff_at", "fitted_at", "financial_intercept", "financial_slope",
+        "non_financial_intercept", "non_financial_slope", "calibration_dataset_sha256",
+        "calibration_code_sha256", "calibration_config_sha256", "calibration_receipt_sha256"
+      ],
+      "properties": {
+        "schema_version": {"const": "frozen-alpha-calibration.v1"},
+        "calibration_id": {"type": "string", "minLength": 1},
+        "calibration_method": {"const": "submodel_affine_common_target"},
+        "fitting_partition": {"const": "train_only"},
+        "target_id": {"type": "string", "minLength": 1},
+        "prediction_horizon_sessions": {"type": "integer", "minimum": 1, "maximum": 252},
+        "experiment_spec_sha256": {"$ref": "#/$defs/sha256"},
+        "approved_factor_registry_sha256": {"$ref": "#/$defs/sha256"},
+        "universe_policy": {"type": "string", "minLength": 1},
+        "benchmark_policy": {"type": "string", "minLength": 1},
+        "fitting_window_start": {"type": "string", "format": "date"},
+        "fitting_window_end": {"type": "string", "format": "date"},
+        "fitting_data_cutoff_at": {"type": "string", "format": "date-time"},
+        "fitted_at": {"type": "string", "format": "date-time"},
+        "financial_intercept": {"type": "number"},
+        "financial_slope": {"type": "number", "exclusiveMinimum": 0},
+        "non_financial_intercept": {"type": "number"},
+        "non_financial_slope": {"type": "number", "exclusiveMinimum": 0},
+        "calibration_dataset_sha256": {"$ref": "#/$defs/sha256"},
+        "calibration_code_sha256": {"$ref": "#/$defs/sha256"},
+        "calibration_config_sha256": {"$ref": "#/$defs/sha256"},
+        "calibration_receipt_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "training_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "receipt_id", "status", "issued_at", "model_id", "model_version",
+        "experiment_spec_sha256", "approved_factor_registry_sha256", "prediction_target",
+        "prediction_horizon_sessions", "universe_policy", "benchmark_policy",
+        "training_window_start", "training_window_end", "training_data_cutoff_at", "trained_at",
+        "training_dataset_sha256", "training_code_sha256", "preprocessing_policy_sha256",
+        "model_config_sha256", "submodel_bundle_sha256", "runtime_build_manifest_sha256",
+        "receipt_sha256"
+      ],
+      "properties": {
+        "schema_version": {"const": "alpha-model-training-receipt.v1"},
+        "receipt_id": {"type": "string", "minLength": 1},
+        "status": {"const": "completed_train_only"},
+        "issued_at": {"type": "string", "format": "date-time"},
+        "model_id": {"type": "string", "minLength": 1},
+        "model_version": {"type": "string", "minLength": 1},
+        "experiment_spec_sha256": {"$ref": "#/$defs/sha256"},
+        "approved_factor_registry_sha256": {"$ref": "#/$defs/sha256"},
+        "prediction_target": {"type": "string", "minLength": 1},
+        "prediction_horizon_sessions": {"type": "integer", "minimum": 1, "maximum": 252},
+        "universe_policy": {"type": "string", "minLength": 1},
+        "benchmark_policy": {"type": "string", "minLength": 1},
+        "training_window_start": {"type": "string", "format": "date"},
+        "training_window_end": {"type": "string", "format": "date"},
+        "training_data_cutoff_at": {"type": "string", "format": "date-time"},
+        "trained_at": {"type": "string", "format": "date-time"},
+        "training_dataset_sha256": {"$ref": "#/$defs/sha256"},
+        "training_code_sha256": {"$ref": "#/$defs/sha256"},
+        "preprocessing_policy_sha256": {"$ref": "#/$defs/sha256"},
+        "model_config_sha256": {"$ref": "#/$defs/sha256"},
+        "submodel_bundle_sha256": {"$ref": "#/$defs/sha256"},
+        "runtime_build_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "receipt_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "admission_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "receipt_id", "status", "issued_at", "model_id", "model_version",
+        "model_candidate_sha256", "experiment_spec_sha256", "approved_factor_registry_sha256",
+        "prediction_target", "universe_policy", "benchmark_policy",
+        "model_training_receipt_sha256", "calibration_receipt_sha256",
+        "prediction_horizon_sessions", "runtime_build_manifest_sha256", "receipt_sha256"
+      ],
+      "properties": {
+        "schema_version": {"const": "alpha-model-admission-receipt.v1"},
+        "receipt_id": {"type": "string", "minLength": 1},
+        "status": {"const": "validated_for_experiment_v3_diagnostic_only_not_formally_admitted"},
+        "issued_at": {"type": "string", "format": "date-time"},
+        "model_id": {"type": "string", "minLength": 1},
+        "model_version": {"type": "string", "minLength": 1},
+        "model_candidate_sha256": {"$ref": "#/$defs/sha256"},
+        "experiment_spec_sha256": {"$ref": "#/$defs/sha256"},
+        "approved_factor_registry_sha256": {"$ref": "#/$defs/sha256"},
+        "prediction_target": {"type": "string", "minLength": 1},
+        "model_training_receipt_sha256": {"$ref": "#/$defs/sha256"},
+        "calibration_receipt_sha256": {"$ref": "#/$defs/sha256"},
+        "prediction_horizon_sessions": {"type": "integer", "minimum": 1, "maximum": 252},
+        "universe_policy": {"type": "string", "minLength": 1},
+        "benchmark_policy": {"type": "string", "minLength": 1},
+        "runtime_build_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "receipt_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "runtime_build_manifest": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version", "manifest_id", "built_at", "experiment_spec_sha256",
+        "approved_factor_registry_sha256", "prediction_target",
+        "prediction_horizon_sessions", "universe_policy", "benchmark_policy",
+        "runtime_code_sha256", "factor_bindings", "manifest_sha256"
+      ],
+      "properties": {
+        "schema_version": {"const": "alpha-runtime-build-manifest.v1"},
+        "manifest_id": {"type": "string", "minLength": 1},
+        "built_at": {"type": "string", "format": "date-time"},
+        "experiment_spec_sha256": {"$ref": "#/$defs/sha256"},
+        "approved_factor_registry_sha256": {"$ref": "#/$defs/sha256"},
+        "prediction_target": {"type": "string", "minLength": 1},
+        "prediction_horizon_sessions": {"type": "integer", "minimum": 1, "maximum": 252},
+        "universe_policy": {"type": "string", "minLength": 1},
+        "benchmark_policy": {"type": "string", "minLength": 1},
+        "runtime_code_sha256": {"$ref": "#/$defs/sha256"},
+        "factor_bindings": {
+          "type": "array", "minItems": 1,
+          "items": {
+            "type": "object", "additionalProperties": false,
+            "required": ["factor_id", "formula_sha256", "implementation_code_sha256", "input_schema_sha256"],
+            "properties": {
+              "factor_id": {"type": "string", "minLength": 1},
+              "formula_sha256": {"$ref": "#/$defs/sha256"},
+              "implementation_code_sha256": {"$ref": "#/$defs/sha256"},
+              "input_schema_sha256": {"$ref": "#/$defs/sha256"}
+            }
+          }
+        },
+        "manifest_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "submodel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["submodel_id", "feature_ids", "intercept", "coefficients", "centers", "scales"],
+      "properties": {
+        "submodel_id": {"enum": ["financial", "non_financial"]},
+        "feature_ids": {
+          "type": "array", "minItems": 8, "maxItems": 12, "uniqueItems": true,
+          "items": {"type": "string", "minLength": 1}
+        },
+        "intercept": {"type": "number"},
+        "coefficients": {"type": "array", "minItems": 8, "maxItems": 12, "items": {"type": "number"}},
+        "centers": {"type": "array", "minItems": 8, "maxItems": 12, "items": {"type": "number"}},
+        "scales": {"type": "array", "minItems": 8, "maxItems": 12, "items": {"type": "number", "exclusiveMinimum": 0}}
+      }
+    }
+  }
+}
