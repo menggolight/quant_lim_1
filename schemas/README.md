@@ -10,6 +10,12 @@
 - `security_master.v1.json`：沪深市场证券基础信息记录；北交所未接入，当前快照不能自证历史 point-in-time 股票池。
 - `provider_access_policy.v1.json`：Provider访问许可的版本化失败关闭策略；当前Choice固定`expired`且禁止网络、诊断session和新的正式离线研究消费，Tushare扩展固定为capability-probe-only。它不保存秘密，也不能授予正式Provider或LIVE权限。
 - `tushare_endpoint_result.v1.json`、`tushare_capability_receipt.v1.json`：约束固定白名单endpoint的小样本能力结果、raw哈希/manifest绑定和整次探针receipt；安全字段固定为`capability_probe_only_not_admitted`及全false，Schema、receipt哈希或接口成功均不能形成MarketDataBatch、Experiment V3、Paper或交易准入。
+- `tushare_single_endpoint_diagnostic_receipt.v1.json`：约束同一endpoint的SDK/HTTP双通道诊断；每通道最多一次，安全持久化transport/HTTP/upstream code/固定异常类型/消息类别，结论仅限四类根因且不产生任何准入。
+- `tushare_single_endpoint_diagnostic_postmortem.v1.json`：保留首次未绑定failure marker的历史unsealed形状；当前sealed verifier明确拒绝V1，不能把旧文件当作完整封存证据。
+- `tushare_single_endpoint_diagnostic_postmortem.v2.json`：保留首次marker-bound sealed形状；因仍用封存时当前配置回填runtime参数，已由V3替代，不再由当前verifier签发。
+- `tushare_single_endpoint_diagnostic_postmortem.v3.json`：完整内嵌并哈希绑定create-only budget slot与round-failure marker，三方复核run ID、endpoint、失败代码bundle、异常类别和时间顺序；实际请求数、runtime语义参数与两通道字段均明确为`null + unavailable`，并只在固定round根确认completed receipt不存在。结论只表示`capability_probe_bug`，不能判断Tushare能力或授权重跑。
+- `tushare_http_diagnostic_event.v1.json`：新授权HTTP-only轮次的create-only哈希链事件；固定`trade_cal`、`channel=http`、`max_requests=1`和SDK不运行，只允许`RUN_CREATED -> REQUEST_RESERVED -> NETWORK_CALL_STARTED -> [RESPONSE_RECEIVED] -> TERMINAL`及其提前终态，不保存凭证、原始响应、上游消息或异常文本。
+- `tushare_http_terminal_diagnostic_receipt.v1.json`：从上述已持久化事件链重建的终态receipt，拆分六类请求计数并固定`terminal_result_count=1`、`remote_execution_unknown=started-response`、`budget_consumed=reserved`；它只证明本地诊断链完整性，不作Tushare能力判断或任何准入。
 
 JSON Schema 负责结构，`research/market_data/validation.py` 在无网络依赖下执行本仓库所需的 Draft 2020-12 约束，包括内部/同目录外部 `$ref`、组合/条件分支、对象与数组上限、唯一性和 RFC3339 日期时间；同时负责请求证券一致性、日期唯一和升序、窗口范围、OHLC、非负成交量/成交额、缺字段和非法数字。`admission.py` 再按数据集重新计算本地准入。
 

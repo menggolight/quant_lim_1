@@ -1,0 +1,147 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/tushare_single_endpoint_diagnostic_postmortem.v1.json",
+  "title": "Tushare single-endpoint diagnostic runner postmortem",
+  "description": "Offline runner-integrity evidence for an unsealed diagnostic. Null channel fields are explicitly unobserved and grant no Tushare capability or execution authority.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "status",
+    "scope",
+    "recorded_at",
+    "provider_id",
+    "diagnostic_run_id",
+    "endpoint",
+    "semantic_parameters",
+    "budget_slot",
+    "budget_slot_sha256",
+    "failed_diagnostic_code_sha256",
+    "runner_exception_type",
+    "failure_window",
+    "original_receipt_present",
+    "git_commit",
+    "git_worktree_status",
+    "actual_request_count",
+    "actual_request_count_lower_bound",
+    "actual_request_count_upper_bound",
+    "channels",
+    "conclusion",
+    "tushare_capability_judgment",
+    "rerun_permitted",
+    "formal_data_admission",
+    "experiment_v3_impact",
+    "daily_signal_authority",
+    "next_session_allowed",
+    "paper_eligibility",
+    "trade_eligibility",
+    "real_money_list_allowed",
+    "automatic_order_submission",
+    "live_supported",
+    "receipt_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "tushare-single-endpoint-diagnostic-postmortem.v1"},
+    "status": {"const": "runner_failed_unsealed"},
+    "scope": {"const": "diagnostic_runner_integrity_only"},
+    "recorded_at": {"type": "string", "format": "date-time"},
+    "provider_id": {"const": "tushare"},
+    "diagnostic_run_id": {"$ref": "#/$defs/identifier"},
+    "endpoint": {"enum": ["trade_cal", "daily"]},
+    "semantic_parameters": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 8,
+      "propertyNames": {"pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$"},
+      "additionalProperties": {"type": "string", "minLength": 1, "maxLength": 64}
+    },
+    "budget_slot": {"$ref": "#/$defs/budgetSlot"},
+    "budget_slot_sha256": {"$ref": "#/$defs/sha256"},
+    "failed_diagnostic_code_sha256": {"$ref": "#/$defs/sha256"},
+    "runner_exception_type": {"const": "OtherError"},
+    "failure_window": {"const": "after_budget_reservation_before_receipt_publish"},
+    "original_receipt_present": {"const": false},
+    "git_commit": {
+      "oneOf": [
+        {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        {"const": "unknown"}
+      ]
+    },
+    "git_worktree_status": {"enum": ["clean", "dirty", "unknown"]},
+    "actual_request_count": {"type": "null"},
+    "actual_request_count_lower_bound": {"const": 0},
+    "actual_request_count_upper_bound": {"type": "integer", "minimum": 1, "maximum": 2},
+    "channels": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {"$ref": "#/$defs/unavailableChannel"}
+    },
+    "conclusion": {"const": "capability_probe_bug"},
+    "tushare_capability_judgment": {"const": "not_made"},
+    "rerun_permitted": {"const": false},
+    "formal_data_admission": {"const": false},
+    "experiment_v3_impact": {"const": "none"},
+    "daily_signal_authority": {"const": "none"},
+    "next_session_allowed": {"const": false},
+    "paper_eligibility": {"const": false},
+    "trade_eligibility": {"const": false},
+    "real_money_list_allowed": {"const": false},
+    "automatic_order_submission": {"const": false},
+    "live_supported": {"const": false},
+    "receipt_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "budgetSlot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "slot",
+        "endpoint",
+        "diagnostic_run_id",
+        "reserved_at",
+        "reserved_request_count",
+        "maximum_round_request_count"
+      ],
+      "properties": {
+        "schema_version": {"const": "tushare-diagnostic-round-budget-slot-v1"},
+        "slot": {"enum": [1, 2]},
+        "endpoint": {"enum": ["trade_cal", "daily"]},
+        "diagnostic_run_id": {"$ref": "#/$defs/identifier"},
+        "reserved_at": {"type": "string", "format": "date-time"},
+        "reserved_request_count": {"const": 2},
+        "maximum_round_request_count": {"const": 4}
+      }
+    },
+    "unavailableChannel": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "channel",
+        "evidence_status",
+        "request_count",
+        "transport_status",
+        "http_status",
+        "upstream_code",
+        "sdk_exception_type",
+        "sanitized_message_category"
+      ],
+      "properties": {
+        "channel": {"enum": ["sdk", "http"]},
+        "evidence_status": {"const": "unavailable"},
+        "request_count": {"type": "null"},
+        "transport_status": {"type": "null"},
+        "http_status": {"type": "null"},
+        "upstream_code": {"type": "null"},
+        "sdk_exception_type": {"type": "null"},
+        "sanitized_message_category": {"type": "null"}
+      }
+    }
+  }
+}

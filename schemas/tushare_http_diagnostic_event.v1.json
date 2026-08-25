@@ -1,0 +1,163 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/tushare_http_diagnostic_event.v1.json",
+  "title": "Tushare single-HTTP diagnostic journal event",
+  "description": "Create-only, secret-free, hash-chained event. Runtime parameters appear only in RUN_CREATED; no credential material, raw body, upstream message, or exception text is permitted.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "diagnostic_run_id", "request_id", "sequence",
+    "event_type", "recorded_at", "previous_event_sha256",
+    "runtime_semantics_sha256", "diagnostic_code_sha256", "git_commit",
+    "git_worktree_status", "expected_fields", "provider_id", "endpoint",
+    "transport_channel", "transport_target", "max_requests", "sdk_ran",
+    "automatic_retries_allowed", "runtime_semantic_parameters",
+    "transport_status", "http_status", "upstream_code",
+    "sanitized_message_category", "terminal_reason", "counts", "event_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "tushare-http-diagnostic-event.v1"},
+    "diagnostic_run_id": {"$ref": "#/$defs/identifier"},
+    "request_id": {"$ref": "#/$defs/identifier"},
+    "sequence": {"type": "integer", "minimum": 1, "maximum": 5},
+    "event_type": {"enum": ["RUN_CREATED", "REQUEST_RESERVED", "NETWORK_CALL_STARTED", "RESPONSE_RECEIVED", "TERMINAL"]},
+    "recorded_at": {"type": "string", "format": "date-time"},
+    "previous_event_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+    "runtime_semantics_sha256": {"$ref": "#/$defs/sha256"},
+    "diagnostic_code_sha256": {"$ref": "#/$defs/sha256"},
+    "git_commit": {"oneOf": [{"type": "string", "pattern": "^[0-9a-f]{40}$"}, {"const": "unknown"}]},
+    "git_worktree_status": {"enum": ["clean", "dirty", "unknown"]},
+    "expected_fields": {
+      "type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$"}
+    },
+    "provider_id": {"const": "tushare"},
+    "endpoint": {"const": "trade_cal"},
+    "transport_channel": {"const": "http"},
+    "transport_target": {"const": "https://api.tushare.pro"},
+    "max_requests": {"const": 1},
+    "sdk_ran": {"const": false},
+    "automatic_retries_allowed": {"const": false},
+    "runtime_semantic_parameters": {
+      "oneOf": [
+        {
+          "type": "object", "minProperties": 1, "maxProperties": 4,
+          "propertyNames": {"pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$"},
+          "additionalProperties": {"type": "string", "minLength": 1, "maxLength": 64}
+        },
+        {"type": "null"}
+      ]
+    },
+    "transport_status": {"oneOf": [{"const": "response_received"}, {"type": "null"}]},
+    "http_status": {"oneOf": [{"type": "integer", "minimum": 100, "maximum": 599}, {"type": "null"}]},
+    "upstream_code": {"oneOf": [{"type": "integer", "minimum": -2147483648, "maximum": 2147483647}, {"type": "null"}]},
+    "sanitized_message_category": {
+      "oneOf": [
+        {"enum": ["success", "permission", "rate_limit", "authentication_account", "invalid_parameter", "server_internal", "unknown"]},
+        {"type": "null"}
+      ]
+    },
+    "terminal_reason": {
+      "oneOf": [
+        {"enum": ["stopped_before_reservation", "stopped_before_network", "remote_execution_unknown", "response_received"]},
+        {"type": "null"}
+      ]
+    },
+    "counts": {"oneOf": [{"$ref": "#/$defs/counts"}, {"type": "null"}]},
+    "event_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"event_type": {"const": "RUN_CREATED"}}, "required": ["event_type"]},
+      "then": {
+        "properties": {
+          "sequence": {"const": 1}, "previous_event_sha256": {"type": "null"},
+          "runtime_semantic_parameters": {"type": "object"},
+          "transport_status": {"type": "null"}, "http_status": {"type": "null"},
+          "upstream_code": {"type": "null"}, "sanitized_message_category": {"type": "null"},
+          "terminal_reason": {"type": "null"}, "counts": {"type": "null"}
+        }
+      },
+      "else": {"properties": {"previous_event_sha256": {"$ref": "#/$defs/sha256"}, "runtime_semantic_parameters": {"type": "null"}}}
+    },
+    {
+      "if": {"properties": {"event_type": {"const": "RESPONSE_RECEIVED"}}, "required": ["event_type"]},
+      "then": {
+        "properties": {
+          "sequence": {"const": 4},
+          "transport_status": {"const": "response_received"},
+          "http_status": {"type": "integer", "minimum": 100, "maximum": 599},
+          "sanitized_message_category": {"enum": ["success", "permission", "rate_limit", "authentication_account", "invalid_parameter", "server_internal", "unknown"]},
+          "terminal_reason": {"type": "null"}, "counts": {"type": "null"}
+        },
+        "allOf": [
+          {
+            "if": {"properties": {"upstream_code": {"const": 0}}, "required": ["upstream_code"]},
+            "then": {"properties": {"sanitized_message_category": {"const": "success"}}}
+          },
+          {
+            "if": {"properties": {"upstream_code": {"const": 2002}}, "required": ["upstream_code"]},
+            "then": {"properties": {"sanitized_message_category": {"const": "permission"}}}
+          }
+        ]
+      }
+    },
+    {
+      "if": {"properties": {"event_type": {"const": "TERMINAL"}}, "required": ["event_type"]},
+      "then": {
+        "properties": {
+          "transport_status": {"type": "null"}, "http_status": {"type": "null"},
+          "upstream_code": {"type": "null"}, "sanitized_message_category": {"type": "null"},
+          "terminal_reason": {"enum": ["stopped_before_reservation", "stopped_before_network", "remote_execution_unknown", "response_received"]},
+          "counts": {"$ref": "#/$defs/counts"}
+        },
+        "oneOf": [
+          {"properties": {"sequence": {"const": 2}, "terminal_reason": {"const": "stopped_before_reservation"}, "counts": {"properties": {"reserved_request_count": {"const": 0}, "network_call_started_count": {"const": 0}, "response_received_count": {"const": 0}}}}},
+          {"properties": {"sequence": {"const": 3}, "terminal_reason": {"const": "stopped_before_network"}, "counts": {"properties": {"reserved_request_count": {"const": 1}, "network_call_started_count": {"const": 0}, "response_received_count": {"const": 0}}}}},
+          {"properties": {"sequence": {"const": 4}, "terminal_reason": {"const": "remote_execution_unknown"}, "counts": {"properties": {"reserved_request_count": {"const": 1}, "network_call_started_count": {"const": 1}, "response_received_count": {"const": 0}}}}},
+          {"properties": {"sequence": {"const": 5}, "terminal_reason": {"const": "response_received"}, "counts": {"properties": {"reserved_request_count": {"const": 1}, "network_call_started_count": {"const": 1}, "response_received_count": {"const": 1}}}}}
+        ]
+      }
+    },
+    {
+      "if": {"properties": {"event_type": {"enum": ["REQUEST_RESERVED", "NETWORK_CALL_STARTED"]}}, "required": ["event_type"]},
+      "then": {
+        "properties": {
+          "transport_status": {"type": "null"}, "http_status": {"type": "null"},
+          "upstream_code": {"type": "null"}, "sanitized_message_category": {"type": "null"},
+          "terminal_reason": {"type": "null"}, "counts": {"type": "null"}
+        }
+      }
+    },
+    {
+      "if": {"properties": {"event_type": {"const": "REQUEST_RESERVED"}}, "required": ["event_type"]},
+      "then": {"properties": {"sequence": {"const": 2}}}
+    },
+    {
+      "if": {"properties": {"event_type": {"const": "NETWORK_CALL_STARTED"}}, "required": ["event_type"]},
+      "then": {"properties": {"sequence": {"const": 3}}}
+    }
+  ],
+  "$defs": {
+    "identifier": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "counts": {
+      "type": "object", "additionalProperties": false,
+      "required": ["reserved_request_count", "network_call_started_count", "response_received_count", "terminal_result_count", "remote_execution_unknown_count", "budget_consumed_count"],
+      "properties": {
+        "reserved_request_count": {"enum": [0, 1]},
+        "network_call_started_count": {"enum": [0, 1]},
+        "response_received_count": {"enum": [0, 1]},
+        "terminal_result_count": {"const": 1},
+        "remote_execution_unknown_count": {"enum": [0, 1]},
+        "budget_consumed_count": {"enum": [0, 1]}
+      },
+      "oneOf": [
+        {"properties": {"reserved_request_count": {"const": 0}, "network_call_started_count": {"const": 0}, "response_received_count": {"const": 0}, "terminal_result_count": {"const": 1}, "remote_execution_unknown_count": {"const": 0}, "budget_consumed_count": {"const": 0}}},
+        {"properties": {"reserved_request_count": {"const": 1}, "network_call_started_count": {"const": 0}, "response_received_count": {"const": 0}, "terminal_result_count": {"const": 1}, "remote_execution_unknown_count": {"const": 0}, "budget_consumed_count": {"const": 1}}},
+        {"properties": {"reserved_request_count": {"const": 1}, "network_call_started_count": {"const": 1}, "response_received_count": {"const": 0}, "terminal_result_count": {"const": 1}, "remote_execution_unknown_count": {"const": 1}, "budget_consumed_count": {"const": 1}}},
+        {"properties": {"reserved_request_count": {"const": 1}, "network_call_started_count": {"const": 1}, "response_received_count": {"const": 1}, "terminal_result_count": {"const": 1}, "remote_execution_unknown_count": {"const": 0}, "budget_consumed_count": {"const": 1}}}
+      ]
+    }
+  }
+}

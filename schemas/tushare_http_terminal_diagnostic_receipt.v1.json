@@ -1,0 +1,92 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/tushare_http_terminal_diagnostic_receipt.v1.json",
+  "title": "Tushare single-HTTP terminal diagnostic receipt",
+  "description": "Terminal projection of a create-only HTTP journal. It is diagnostic-only and grants no data, Paper, trading, order, or LIVE authority.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "status", "scope", "provider_id", "endpoint",
+    "transport_channel", "transport_target", "max_requests", "sdk_ran",
+    "automatic_retries_allowed", "diagnostic_run_id", "request_id",
+    "started_at", "completed_at", "runtime_semantic_parameters",
+    "runtime_semantics_sha256", "diagnostic_code_sha256", "git_commit",
+    "git_worktree_status", "expected_fields", "event_chain", "journal_head_sha256",
+    "reserved_request_count", "network_call_started_count",
+    "response_received_count", "terminal_result_count",
+    "remote_execution_unknown_count", "budget_consumed_count",
+    "terminal_reason", "response_evidence_status", "transport_status",
+    "http_status", "upstream_code", "sanitized_message_category",
+    "tushare_capability_judgment", "formal_data_admission",
+    "experiment_v3_impact", "daily_signal_authority", "next_session_allowed",
+    "paper_eligibility", "trade_eligibility", "real_money_list_allowed",
+    "automatic_order_submission", "live_supported", "receipt_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "tushare-http-terminal-diagnostic-receipt.v1"},
+    "status": {"const": "terminal"},
+    "scope": {"const": "single_http_terminal_diagnostic_only_not_admitted"},
+    "provider_id": {"const": "tushare"},
+    "endpoint": {"const": "trade_cal"},
+    "transport_channel": {"const": "http"},
+    "transport_target": {"const": "https://api.tushare.pro"},
+    "max_requests": {"const": 1},
+    "sdk_ran": {"const": false},
+    "automatic_retries_allowed": {"const": false},
+    "diagnostic_run_id": {"$ref": "#/$defs/identifier"},
+    "request_id": {"$ref": "#/$defs/identifier"},
+    "started_at": {"type": "string", "format": "date-time"},
+    "completed_at": {"type": "string", "format": "date-time"},
+    "runtime_semantic_parameters": {
+      "type": "object", "minProperties": 1, "maxProperties": 4,
+      "propertyNames": {"pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$"},
+      "additionalProperties": {"type": "string", "minLength": 1, "maxLength": 64}
+    },
+    "runtime_semantics_sha256": {"$ref": "#/$defs/sha256"},
+    "diagnostic_code_sha256": {"$ref": "#/$defs/sha256"},
+    "git_commit": {"oneOf": [{"type": "string", "pattern": "^[0-9a-f]{40}$"}, {"const": "unknown"}]},
+    "git_worktree_status": {"enum": ["clean", "dirty", "unknown"]},
+    "expected_fields": {
+      "type": "array", "minItems": 1, "maxItems": 64, "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$"}
+    },
+    "event_chain": {
+      "type": "array", "minItems": 2, "maxItems": 5,
+      "items": {"$ref": "tushare_http_diagnostic_event.v1.json"}
+    },
+    "journal_head_sha256": {"$ref": "#/$defs/sha256"},
+    "reserved_request_count": {"enum": [0, 1]},
+    "network_call_started_count": {"enum": [0, 1]},
+    "response_received_count": {"enum": [0, 1]},
+    "terminal_result_count": {"const": 1},
+    "remote_execution_unknown_count": {"enum": [0, 1]},
+    "budget_consumed_count": {"enum": [0, 1]},
+    "terminal_reason": {"enum": ["stopped_before_reservation", "stopped_before_network", "remote_execution_unknown", "response_received"]},
+    "response_evidence_status": {"enum": ["available", "unavailable_before_network", "unavailable_after_network_start"]},
+    "transport_status": {"oneOf": [{"const": "response_received"}, {"type": "null"}]},
+    "http_status": {"oneOf": [{"type": "integer", "minimum": 100, "maximum": 599}, {"type": "null"}]},
+    "upstream_code": {"oneOf": [{"type": "integer", "minimum": -2147483648, "maximum": 2147483647}, {"type": "null"}]},
+    "sanitized_message_category": {"oneOf": [{"enum": ["success", "permission", "rate_limit", "authentication_account", "invalid_parameter", "server_internal", "unknown"]}, {"type": "null"}]},
+    "tushare_capability_judgment": {"const": "not_made"},
+    "formal_data_admission": {"const": false},
+    "experiment_v3_impact": {"const": "none"},
+    "daily_signal_authority": {"const": "none"},
+    "next_session_allowed": {"const": false},
+    "paper_eligibility": {"const": false},
+    "trade_eligibility": {"const": false},
+    "real_money_list_allowed": {"const": false},
+    "automatic_order_submission": {"const": false},
+    "live_supported": {"const": false},
+    "receipt_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "oneOf": [
+    {"properties": {"reserved_request_count": {"const": 0}, "network_call_started_count": {"const": 0}, "response_received_count": {"const": 0}, "terminal_result_count": {"const": 1}, "remote_execution_unknown_count": {"const": 0}, "budget_consumed_count": {"const": 0}, "terminal_reason": {"const": "stopped_before_reservation"}, "response_evidence_status": {"const": "unavailable_before_network"}, "transport_status": {"type": "null"}, "http_status": {"type": "null"}, "upstream_code": {"type": "null"}, "sanitized_message_category": {"type": "null"}}},
+    {"properties": {"reserved_request_count": {"const": 1}, "network_call_started_count": {"const": 0}, "response_received_count": {"const": 0}, "terminal_result_count": {"const": 1}, "remote_execution_unknown_count": {"const": 0}, "budget_consumed_count": {"const": 1}, "terminal_reason": {"const": "stopped_before_network"}, "response_evidence_status": {"const": "unavailable_before_network"}, "transport_status": {"type": "null"}, "http_status": {"type": "null"}, "upstream_code": {"type": "null"}, "sanitized_message_category": {"type": "null"}}},
+    {"properties": {"reserved_request_count": {"const": 1}, "network_call_started_count": {"const": 1}, "response_received_count": {"const": 0}, "terminal_result_count": {"const": 1}, "remote_execution_unknown_count": {"const": 1}, "budget_consumed_count": {"const": 1}, "terminal_reason": {"const": "remote_execution_unknown"}, "response_evidence_status": {"const": "unavailable_after_network_start"}, "transport_status": {"type": "null"}, "http_status": {"type": "null"}, "upstream_code": {"type": "null"}, "sanitized_message_category": {"type": "null"}}},
+    {"properties": {"reserved_request_count": {"const": 1}, "network_call_started_count": {"const": 1}, "response_received_count": {"const": 1}, "terminal_result_count": {"const": 1}, "remote_execution_unknown_count": {"const": 0}, "budget_consumed_count": {"const": 1}, "terminal_reason": {"const": "response_received"}, "response_evidence_status": {"const": "available"}, "transport_status": {"const": "response_received"}, "http_status": {"type": "integer", "minimum": 100, "maximum": 599}, "sanitized_message_category": {"enum": ["success", "permission", "rate_limit", "authentication_account", "invalid_parameter", "server_internal", "unknown"]}}}
+  ],
+  "$defs": {
+    "identifier": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"},
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

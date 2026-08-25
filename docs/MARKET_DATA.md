@@ -28,11 +28,11 @@ Provider 原始响应
 |---|---|---|---|
 | BaoStock | 沪深市场不复权日线、交易日历、证券基础信息 | 默认主源；完整合格批次可标为 `validated_research_only` | SDK 为可选依赖；是否安装、网络是否可达必须以本机真实探针为准。不是官方真值认证 |
 | Choice | 历史代码支持`EmQuantAPI`沪深A股`qfq`日线、白名单`000300.SH`不复权日线、交易日历和隔离候选证据 | 当前访问已到期；新网络、诊断session及新的正式离线研究消费均失败关闭 | 在SDK导入、初始化或登录前固定返回`provider_access_expired`；旧raw/quarantine/validated/诊断证据保留但不自动消费，也不触发其他Provider fallback |
-| Tushare | 现有V1只支持指定证券不复权日线独立核验；扩展接口位于独立capability probe | 可选核验/能力候选，不阻塞BaoStock且不形成正式dataset | 只从`TUSHARE_TOKEN`读取Token；缺失时为`not_configured`。能力receipt固定`capability_probe_only_not_admitted`，自动差异阈值尚未配置 |
+| Tushare | 现有V1只支持指定证券不复权日线独立核验；扩展接口位于隔离的capability probe与诊断runner | 可选核验/能力候选，不阻塞BaoStock且不形成正式dataset | 37/37统一失败只证明公共诊断不足；旧single-endpoint runner以`capability_probe_bug`封存；新授权链只允许一次HTTP `trade_cal`并必须形成可重放终态receipt，运行前Tushare capability继续`unknown` |
 | AKShare | 受控扩展骨架，没有已配置数据集 | 禁用、未准入 | 不提供任意函数执行；Eastmoney 上游或 `*_em` 接口只能是 `diagnostic_only/not_admitted` |
 | Eastmoney Legacy | 既有历史行情和行业榜探针 | 仅 Legacy 诊断；不是默认源、验证源或 fallback | Registry 不把旧缓存适配为 validated batch。东方财富研报公开样本来源与行情诊断是两条独立链路 |
 
-“代码能力”不等于真实接口已经连通。普通单元测试使用注入对象或Mock，不构成网络证据；正式V1日线状态只看`agent.market_data_probe`当次输出，扩展接口能力只看`agent.tushare_capability_probe --live`生成并重放通过的本机receipt。
+“代码能力”不等于真实接口已经连通。普通单元测试使用注入对象或Mock，不构成网络证据；正式V1日线状态只看`agent.market_data_probe`当次输出。旧双通道轮次的marker-bound sealed postmortem V3把未封存的runtime参数和通道字段保持为不可用，只证明runner完整性失败。新授权的HTTP-only轮次固定`trade_cal/max_requests=1`，以create-only的`REQUEST_RESERVED`、`NETWORK_CALL_STARTED`、`RESPONSE_RECEIVED`和`TERMINAL`事件拆分六类计数；其receipt即使成功也只形成HTTP通道诊断，不作正式Tushare能力或数据准入判断。
 
 Provider网络许可由[版本化访问策略](../configs/provider_access.v1.json)独立控制。`market_data.v1`中的`enabled=true`只表示该适配器仍在历史注册表内，不得覆盖`access_status=expired`；调用者布尔值、环境变量、SDK对象或fallback列表均不能恢复Choice访问。迁移判断见[Choice到期后的Tushare迁移边界](TUSHARE_MIGRATION.md)。
 

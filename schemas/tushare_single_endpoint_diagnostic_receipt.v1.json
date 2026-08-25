@@ -1,0 +1,438 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/tushare_single_endpoint_diagnostic_receipt.v1.json",
+  "title": "Tushare single-endpoint transport diagnostic receipt",
+  "description": "Secret-free SDK versus direct-HTTP diagnostic evidence only. It grants no data, research, Paper, trading, order or LIVE authority.",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "diagnostic_run_id",
+    "status",
+    "scope",
+    "started_at",
+    "completed_at",
+    "provider_id",
+    "endpoint",
+    "semantic_parameters",
+    "same_semantic_parameters",
+    "sdk_version",
+    "python_version",
+    "credential_status",
+    "config_sha256",
+    "diagnostic_code_sha256",
+    "git_commit",
+    "git_worktree_status",
+    "maximum_request_budget",
+    "planned_request_count",
+    "request_count",
+    "channels",
+    "conclusion",
+    "formal_data_admission",
+    "experiment_v3_impact",
+    "daily_signal_authority",
+    "next_session_allowed",
+    "paper_eligibility",
+    "trade_eligibility",
+    "real_money_list_allowed",
+    "automatic_order_submission",
+    "live_supported",
+    "receipt_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "tushare-single-endpoint-diagnostic-receipt.v1"},
+    "diagnostic_run_id": {"$ref": "#/$defs/identifier"},
+    "status": {"enum": ["completed", "not_configured", "dependency_missing", "failed"]},
+    "scope": {"const": "single_endpoint_transport_diagnostic_only_not_admitted"},
+    "started_at": {"type": "string", "format": "date-time"},
+    "completed_at": {"type": "string", "format": "date-time"},
+    "provider_id": {"const": "tushare"},
+    "endpoint": {"enum": ["trade_cal", "daily"]},
+    "semantic_parameters": {
+      "type": "object",
+      "minProperties": 3,
+      "maxProperties": 3,
+      "propertyNames": {"pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$"},
+      "additionalProperties": {"type": "string", "minLength": 1, "maxLength": 64}
+    },
+    "same_semantic_parameters": {"const": true},
+    "sdk_version": {"type": "string", "minLength": 1, "maxLength": 128},
+    "python_version": {"type": "string", "minLength": 1, "maxLength": 128},
+    "credential_status": {"enum": ["configured", "not_configured"]},
+    "config_sha256": {"$ref": "#/$defs/sha256"},
+    "diagnostic_code_sha256": {"$ref": "#/$defs/sha256"},
+    "git_commit": {
+      "oneOf": [
+        {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+        {"const": "unknown"}
+      ]
+    },
+    "git_worktree_status": {"enum": ["clean", "dirty", "unknown"]},
+    "maximum_request_budget": {"const": 4},
+    "planned_request_count": {"const": 2},
+    "request_count": {"type": "integer", "minimum": 0, "maximum": 2},
+    "channels": {
+      "type": "array",
+      "minItems": 2,
+      "maxItems": 2,
+      "items": {"$ref": "#/$defs/channelResult"}
+    },
+    "conclusion": {
+      "oneOf": [
+        {"enum": [
+          "token_or_account_problem",
+          "sdk_client_problem",
+          "network_transport_problem",
+          "capability_probe_bug"
+        ]},
+        {"type": "null"}
+      ]
+    },
+    "formal_data_admission": {"const": false},
+    "experiment_v3_impact": {"const": "none"},
+    "daily_signal_authority": {"const": "none"},
+    "next_session_allowed": {"const": false},
+    "paper_eligibility": {"const": false},
+    "trade_eligibility": {"const": false},
+    "real_money_list_allowed": {"const": false},
+    "automatic_order_submission": {"const": false},
+    "live_supported": {"const": false},
+    "receipt_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"status": {"const": "completed"}}, "required": ["status"]},
+      "then": {
+        "properties": {
+          "conclusion": {"enum": [
+            "token_or_account_problem",
+            "sdk_client_problem",
+            "network_transport_problem",
+            "capability_probe_bug"
+          ]}
+        }
+      },
+      "else": {"properties": {"conclusion": {"type": "null"}}}
+    }
+  ],
+  "$defs": {
+    "identifier": {
+      "type": "string",
+      "pattern": "^[A-Za-z0-9][A-Za-z0-9._:-]{0,127}$"
+    },
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "nullableDateTime": {
+      "oneOf": [
+        {"type": "string", "format": "date-time"},
+        {"type": "null"}
+      ]
+    },
+    "nullableHttpStatus": {
+      "oneOf": [
+        {"type": "integer", "minimum": 100, "maximum": 599},
+        {"type": "null"}
+      ]
+    },
+    "nullableUpstreamCode": {
+      "oneOf": [
+        {"type": "integer", "minimum": -2147483648, "maximum": 2147483647},
+        {"type": "null"}
+      ]
+    },
+    "nullableExceptionType": {
+      "oneOf": [
+        {"$ref": "#/$defs/identifier"},
+        {"type": "null"}
+      ]
+    },
+    "fieldArray": {
+      "type": "array",
+      "maxItems": 500,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,127}$"}
+    },
+    "channelResult": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "schema_version",
+        "channel",
+        "endpoint",
+        "transport_target",
+        "diagnostic_attempted",
+        "request_count",
+        "requested_at",
+        "completed_at",
+        "transport_status",
+        "http_status",
+        "upstream_code",
+        "sdk_exception_type",
+        "sanitized_message_category",
+        "outcome",
+        "row_count",
+        "field_names"
+      ],
+      "properties": {
+        "schema_version": {"const": "tushare-diagnostic-channel-result.v1"},
+        "channel": {"enum": ["sdk", "http"]},
+        "endpoint": {"enum": ["trade_cal", "daily"]},
+        "transport_target": {
+          "type": "string",
+          "pattern": "^https://[A-Za-z0-9.-]+(?::[0-9]{1,5})?(?:/[A-Za-z0-9._~/-]*)?$",
+          "maxLength": 256
+        },
+        "diagnostic_attempted": {"type": "boolean"},
+        "request_count": {"type": "integer", "minimum": 0, "maximum": 1},
+        "requested_at": {"$ref": "#/$defs/nullableDateTime"},
+        "completed_at": {"$ref": "#/$defs/nullableDateTime"},
+        "transport_status": {"enum": [
+          "not_attempted",
+          "response_received",
+          "dns_failure",
+          "connection_failure",
+          "timeout",
+          "tls_failure",
+          "protocol_failure",
+          "unknown_failure"
+        ]},
+        "http_status": {"$ref": "#/$defs/nullableHttpStatus"},
+        "upstream_code": {"$ref": "#/$defs/nullableUpstreamCode"},
+        "sdk_exception_type": {"$ref": "#/$defs/nullableExceptionType"},
+        "sanitized_message_category": {"enum": [
+          "success",
+          "permission",
+          "rate_limit",
+          "authentication_account",
+          "invalid_parameter",
+          "server_internal",
+          "network_transport",
+          "sdk_client",
+          "unknown",
+          "not_attempted"
+        ]},
+        "outcome": {"enum": [
+          "passed", "upstream_rejected", "transport_failed", "client_failed", "not_attempted"
+        ]},
+        "row_count": {"type": "integer", "minimum": 0, "maximum": 10000},
+        "field_names": {"$ref": "#/$defs/fieldArray"}
+      },
+      "allOf": [
+        {
+          "if": {
+            "properties": {"diagnostic_attempted": {"const": false}},
+            "required": ["diagnostic_attempted"]
+          },
+          "then": {
+            "properties": {
+              "request_count": {"const": 0},
+              "requested_at": {"type": "null"},
+              "completed_at": {"type": "null"},
+              "transport_status": {"const": "not_attempted"},
+              "http_status": {"type": "null"},
+              "upstream_code": {"type": "null"},
+              "sdk_exception_type": {"type": "null"},
+              "sanitized_message_category": {"const": "not_attempted"},
+              "outcome": {"const": "not_attempted"},
+              "row_count": {"const": 0},
+              "field_names": {"maxItems": 0}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"diagnostic_attempted": {"const": true}},
+            "required": ["diagnostic_attempted"]
+          },
+          "then": {
+            "properties": {
+              "requested_at": {"type": "string", "format": "date-time"},
+              "completed_at": {"type": "string", "format": "date-time"},
+              "sanitized_message_category": {
+                "not": {"const": "not_attempted"}
+              },
+              "outcome": {"not": {"const": "not_attempted"}}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "diagnostic_attempted": {"const": true},
+              "request_count": {"const": 0}
+            },
+            "required": ["diagnostic_attempted", "request_count"]
+          },
+          "then": {
+            "properties": {
+              "transport_status": {"const": "not_attempted"},
+              "http_status": {"type": "null"},
+              "upstream_code": {"type": "null"},
+              "sanitized_message_category": {"enum": ["sdk_client", "unknown"]},
+              "outcome": {"const": "client_failed"},
+              "row_count": {"const": 0},
+              "field_names": {"maxItems": 0}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"request_count": {"const": 1}},
+            "required": ["request_count"]
+          },
+          "then": {
+            "properties": {
+              "diagnostic_attempted": {"const": true},
+              "transport_status": {"not": {"const": "not_attempted"}}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"channel": {"const": "http"}},
+            "required": ["channel"]
+          },
+          "then": {
+            "properties": {"sdk_exception_type": {"type": "null"}}
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "channel": {"const": "http"},
+              "transport_status": {"const": "response_received"}
+            },
+            "required": ["channel", "transport_status"]
+          },
+          "then": {
+            "properties": {
+              "http_status": {"type": "integer", "minimum": 100, "maximum": 599}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "channel": {"const": "http"},
+              "transport_status": {"not": {"const": "response_received"}}
+            },
+            "required": ["channel", "transport_status"]
+          },
+          "then": {
+            "properties": {"http_status": {"type": "null"}}
+          }
+        },
+        {
+          "if": {
+            "properties": {"outcome": {"const": "passed"}},
+            "required": ["outcome"]
+          },
+          "then": {
+            "properties": {
+              "diagnostic_attempted": {"const": true},
+              "request_count": {"const": 1},
+              "transport_status": {"const": "response_received"},
+              "sdk_exception_type": {"type": "null"},
+              "sanitized_message_category": {"const": "success"},
+              "row_count": {"minimum": 1},
+              "field_names": {"minItems": 1}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "channel": {"const": "http"},
+              "outcome": {"const": "passed"}
+            },
+            "required": ["channel", "outcome"]
+          },
+          "then": {
+            "properties": {
+              "http_status": {"type": "integer", "minimum": 200, "maximum": 299},
+              "upstream_code": {"const": 0}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"outcome": {"const": "transport_failed"}},
+            "required": ["outcome"]
+          },
+          "then": {
+            "properties": {
+              "request_count": {"const": 1},
+              "transport_status": {"enum": [
+                "dns_failure", "connection_failure", "timeout",
+                "tls_failure", "protocol_failure", "unknown_failure"
+              ]},
+              "http_status": {"type": "null"},
+              "upstream_code": {"type": "null"},
+              "sanitized_message_category": {"const": "network_transport"},
+              "row_count": {"const": 0},
+              "field_names": {"maxItems": 0}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"outcome": {"const": "upstream_rejected"}},
+            "required": ["outcome"]
+          },
+          "then": {
+            "properties": {
+              "request_count": {"const": 1},
+              "transport_status": {"const": "response_received"},
+              "sanitized_message_category": {"enum": [
+                "permission", "rate_limit", "authentication_account",
+                "invalid_parameter", "server_internal", "unknown"
+              ]},
+              "row_count": {"const": 0},
+              "field_names": {"maxItems": 0}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {"outcome": {"const": "client_failed"}},
+            "required": ["outcome"]
+          },
+          "then": {
+            "properties": {
+              "transport_status": {"enum": [
+                "not_attempted", "response_received", "protocol_failure", "unknown_failure"
+              ]},
+              "sanitized_message_category": {"enum": ["sdk_client", "unknown"]},
+              "row_count": {"const": 0},
+              "field_names": {"maxItems": 0}
+            }
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "channel": {"const": "sdk"},
+              "diagnostic_attempted": {"const": true},
+              "request_count": {"const": 0}
+            },
+            "required": ["channel", "diagnostic_attempted", "request_count"]
+          },
+          "then": {
+            "properties": {"sdk_exception_type": {"$ref": "#/$defs/identifier"}}
+          }
+        },
+        {
+          "if": {
+            "properties": {
+              "channel": {"const": "sdk"},
+              "outcome": {"const": "transport_failed"}
+            },
+            "required": ["channel", "outcome"]
+          },
+          "then": {
+            "properties": {"sdk_exception_type": {"$ref": "#/$defs/identifier"}}
+          }
+        }
+      ]
+    }
+  }
+}

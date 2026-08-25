@@ -11,6 +11,8 @@ python -m unittest discover -s tests -p "test_market_data*.py" -v
 python -m unittest tests.test_factor_market_data tests.test_factor_evidence_probe tests.test_factor_lab -v
 python -m unittest tests.test_choice_quality_growth_batch tests.test_market_data_choice -v
 python -m unittest tests.test_choice_expired_access tests.test_tushare_capability_contract tests.test_tushare_capability_probe -v
+python -m unittest tests.test_tushare_single_endpoint_diagnostic tests.test_tushare_single_endpoint_diagnostic_postmortem -v
+python -m unittest tests.test_tushare_http_terminal_diagnostic -v
 ```
 
 研报审计专项：
@@ -66,6 +68,8 @@ python -m compileall -q agent research trading operations integrations tests
 - raw、quarantine、validated 分层及研究消费者隔离；
 - 整批 fallback，不拼接 Primary 与 Secondary；
 - Tushare capability plan不读Token/不导入SDK/不联网；live缺Token、SDK缺失、权限、限频、网络、字段漂移、重复主键、非有限数、create-only和重放均结构化失败且Token不落盘；
+- Tushare single-endpoint诊断固定SDK/HTTP同语义参数、每通道一次、全轮预算4、无retry/redirect、五项安全错误结构和四类结论；明显异常的本地凭证输入在预算/SDK/网络前拒绝；标准live入口全程持有跨进程round lock且output/budget固定同根，`daily`必须先重放已完成的`trade_cal` receipt；runner failure marker关闭整轮，sealed postmortem V3完整绑定marker与slot，并把实际请求数、runtime参数和两通道结果保持为未知，不伪造能力证据；
+- 新授权的Tushare HTTP终态诊断固定`trade_cal/http/max_requests=1`，覆盖reserve前、reserve后network前、network进入后、response后receipt前、receipt写中断和terminal写中断；所有残留前缀离线replay且不得触发第二次网络请求，六类计数逐项复核；
 - AKShare 的 Eastmoney/`*_em` 准入拒绝；
 - historical backfill 与 offline replay 分离；
 - 本地 JSON、调用者布尔值及直接写入 SQLite 的 `evidence_verified=true` 均不能替代逐条官方 receipt 绑定；

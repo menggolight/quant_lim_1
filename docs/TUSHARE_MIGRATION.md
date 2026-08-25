@@ -1,6 +1,6 @@
 # Choice 到期后的 Tushare 数据迁移边界
 
-> 状态：`probe_first_not_admitted`。本文记录候选迁移规则，不是数据准入、来源认证、Experiment V3、Paper 或交易授权。
+> 状态：`probe_diagnostic_inconclusive_not_admitted`。本文记录候选迁移规则，不是数据准入、来源认证、Experiment V3、Paper 或交易授权。
 
 ## 当前结论
 
@@ -9,13 +9,15 @@
 - BaoStock 继续是 `market_data.v1` 的默认主源。Tushare 仍只保留现有 `daily_bar` 独立核验职责；本轮不创建 `market_data.v2`，也不把任何探针接口注册为正式 dataset。
 - Tushare 5000 只描述待验证的账户能力假设。官方文档列出接口或积分门槛，不证明当前 Token 有权访问，也不证明历史覆盖、时点字段和返回 Schema 满足本项目要求。
 - capability receipt 固定为 `capability_probe_only_not_admitted`；成功、自哈希或重放通过均不能授予正式 MarketDataBatch、Factor Registry、Experiment V3、Daily Alpha、Paper、交易或 LIVE 权限。
+- 首次37次真实请求全部统一落入`unexpected`，只判为公共入口诊断不足。随后唯一一次`trade_cal` SDK/HTTP诊断在receipt发布前发生runner failure；marker-bound sealed postmortem V3结论为`capability_probe_bug`，runtime参数及两通道结果均不可用，因此Tushare能力继续`unknown`，本轮不重跑、不启用`daily`。
+- 用户已另行授权一个不可复用的新轮次：只允许直接HTTP调用一次`trade_cal`，`max_requests=1`；不运行SDK、`daily`或22接口。该轮次必须以create-only哈希链持久化请求预留、网络开始、响应收到和终态，失败前缀只允许离线replay补终态receipt，不能借恢复重发。
 
 ## Probe 与正式 Provider 的区别
 
 | 边界 | Capability probe | 正式 Provider / admission |
 |---|---|---|
 | 目的 | 验证某个 Token 在小样本、固定参数下能否调用接口及返回何种结构 | 形成可被版本化 dataset 契约消费的完整数据链 |
-| 网络入口 | 只有显式 `--live`；默认 `--plan` 不读 Token、不导入 SDK、不联网 | 尚未实现 |
+| 网络入口 | 22-endpoint probe已停止重跑；新授权入口固定一次HTTP `trade_cal`，默认plan与replay不读Token、不导入SDK、不联网 | 尚未实现 |
 | 方法范围 | 代码内固定 enum 与 SDK 映射，配置不能提供任意函数名 | 未来必须逐 dataset 独立实现和审查 |
 | 产物位置 | 只允许`data/tmp/tushare-capability/<probe_run_id>/`安全子树 | 不写入`raw/quarantine/validated`、策略registry、配置或其他正式目录 |
 | 结论 | endpoint capability evidence | 还需来源、PIT、完整性、Schema、版本和准入门 |
@@ -55,7 +57,7 @@
 
 ## 迁移决策矩阵
 
-在没有真实capability receipt前，能力与PIT状态统一为`unknown/not_run`。真实运行后只能根据receipt更新本地矩阵，不能直接改成正式`primary`或`admitted`。下表角色与探针配置一致；它们只是下一阶段候选，不改变现有Tushare V1的`daily_bar validation only`职责。
+当前虽存在真实full-probe receipt与single-endpoint postmortem，但二者都没有形成可信endpoint capability结果；能力与PIT状态因此继续为`unknown/not_run`，不能改成正式`primary`或`admitted`。下表角色与探针配置一致；它们只是未来候选，不改变现有Tushare V1的`daily_bar validation only`职责。
 
 | 策略数据集 | 候选接口 | 当前能力状态 | 当前 PIT 状态 | 允许的建议角色 | 当前阻塞原因 |
 |---|---|---|---|---|---|

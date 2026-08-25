@@ -8,6 +8,8 @@
 |---|---|
 | `market_data_probe.py` | 调用 Market Data Registry 做一次真实、只读探针，输出结构化状态和哈希 |
 | `tushare_capability_probe.py` | 默认离线plan、显式`--live`的小样本Tushare能力探针；只写`data/tmp`证据，不形成正式MarketDataBatch或策略权限 |
+| `tushare_single_endpoint_diagnostic.py` | 隔离的SDK/HTTP单接口诊断与离线postmortem；全轮最多4次请求，不形成Tushare能力或准入结论 |
+| `tushare_http_terminal_diagnostic.py` | 新授权轮次的固定HTTP-only `trade_cal`诊断；create-only事件链可崩溃重放，预算和网络请求上限均为1，不提供SDK、daily或全探针入口 |
 | `choice_candidate_probe.py` | 显式捕获或离线重放 Choice SW2021、sector、EDB 候选证据；永不转正式真值 |
 | `factor_evidence_probe.py` | 固定捕获/重放 Choice 23 指数、中证当前 12 指数或上交所交易日证据；输出内容寻址 receipt，始终不自动准入 |
 | `choice_evidence_archive.py` | 在读取秘密前排除敏感路径，把现有 Choice raw/receipt/quarantine/checkpoint 复制为只读内容寻址归档；不删除源文件 |
@@ -47,7 +49,7 @@ python -m agent.market_data_probe `
   --end-date 2026-08-07
 ```
 
-Tushare扩展接口使用独立能力探针。plan不读取Token、不导入SDK、不联网：
+Tushare扩展接口的22-endpoint能力探针仍可离线生成plan；plan不读取Token、不导入SDK、不联网：
 
 ```powershell
 python -m agent.tushare_capability_probe `
@@ -55,15 +57,28 @@ python -m agent.tushare_capability_probe `
   --plan
 ```
 
-只有显式`--live`才会读取当前进程的`TUSHARE_TOKEN`并执行有界只读调用；产物固定写入`data/tmp/tushare-capability/<probe_run_id>/`且始终`not_admitted`：
+37/37 endpoint 统一失败后，不再重跑全量`--live`。当前 P0 只使用独立的单接口 plan；它固定 `trade_cal` 的 SDK/HTTP 同语义参数，每通道最多一次，全轮预算不超过4，且同样不读取凭证、不导入SDK、不联网：
 
 ```powershell
-$env:TUSHARE_TOKEN = "<仅在本机设置>"
-python -m agent.tushare_capability_probe `
+python -m agent.tushare_single_endpoint_diagnostic `
   --config configs/tushare_capability_probe.v1.json `
-  --live `
-  --output-root data/tmp/tushare-capability
+  --endpoint trade_cal `
+  --plan
 ```
+
+显式`--live`才从当前进程读取`TUSHARE_TOKEN`。输入先通过不输出任何凭证派生信息的本地安全 envelope；之后无 retry、无 redirect，SDK与直接HTTP各最多一次。正常完成时只输出两通道的安全结构与四类诊断结论；它仍固定`formal_data_admission=false`。
+
+标准live入口要求output与budget使用同一固定根，并从预算检查到completed receipt或failure marker发布全程持有跨进程round lock；`daily`不能只凭slot 1存在获准，必须先重放同一slot绑定的终态`trade_cal` receipt。如果预算已预留但正常receipt未发布，runner异常边界写create-only round-failure marker并关闭整轮；sealed postmortem V3完整内嵌并哈希绑定该marker和slot，把实际请求数、runtime语义参数和两通道结果均标为不可用。本轮现场已封存为`capability_probe_bug`，不得删除slot或重跑22 endpoint probe。
+
+用户另行授权的新轮次只允许一次直接HTTP `trade_cal`。该入口没有endpoint、channel或max-requests参数，固定写入独立的`data/tmp/tushare-capability/http-terminal-once/`；live目录一旦创建即视为本轮已认领，不得换目录重发。网络前依次持久化`REQUEST_RESERVED`和`NETWORK_CALL_STARTED`，响应分类后写`RESPONSE_RECEIVED`，最后写`TERMINAL`与terminal receipt；任一持久化前缀只能离线补终态，replay绝不联网：
+
+```powershell
+python -m agent.tushare_http_terminal_diagnostic --plan
+python -m agent.tushare_http_terminal_diagnostic --live
+python -m agent.tushare_http_terminal_diagnostic --replay
+```
+
+终态receipt分别记录`reserved_request_count`、`network_call_started_count`、`response_received_count`、`terminal_result_count`、`remote_execution_unknown_count`和`budget_consumed_count`。它不保存Token、Token派生值、原始响应、上游消息或异常文本，并继续固定关闭正式数据、Experiment V3、Daily、Alpha、Paper、交易、自动下单和LIVE。
 
 质量成长历史批次使用另一个固定入口。它把 CSS 按日期和最多50只股票分批，每100项压缩checkpoint，中断后可从已验证artifact恢复；不开放调用者自选板块、字段或回测窗口：
 

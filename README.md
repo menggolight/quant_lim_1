@@ -51,7 +51,7 @@ python -m research.strategy_workspace quality-status `
 | Strategy Workspace | A股质量成长六因子、Experiment v2、Choice数据门、PIT截面、线性检验、100万元Top Decile/1万元Top2成本账本和append-only Paper账本内核已实现；当前60只非PIT价量诊断已真实运行，正式质量成长PIT数据与正式回测仍未跑，Stage B因 `blocked_missing_controlled_paper_signal_adapter` 和 `blocked_missing_daily_paper_risk_marks` 保持阻塞 |
 | 因子发现治理 | LLM仅能形成候选假设；独立Validation receipt与approved-factor registry负责从候选到冻结研究因子的显式升级。它们不运行Locked Test、不生成Alpha或订单，也不授予任何准入 |
 | 自适应仓位 V2（非默认） | P0.1执行内核、五模块、不可变日报、固定Daily publication registry、D+1人工复核与日频账本已实现；发布前及Next加载后均复核正式Schema与跨artifact条件图，信任边界拒绝契约子类。正式Alpha因V3 loader阻断而 `DATA_FAIL_CLOSED`，当前只有零订单 `BLOCKED` 或无BUY的 `RISK_REDUCTION_ONLY` 可发布；所有准入仍关闭 |
-| 市场数据 V2 | Provider Registry、BaoStock 日线/交易日历/证券基础信息、raw/quarantine/validated、离线回放和结构化探针；Choice新访问已到期失败关闭；Tushare扩展只允许独立能力探针，尚未迁移正式Provider；真实连通状态以当次探针为准 |
+| 市场数据 V2 | Provider Registry、BaoStock 日线/交易日历/证券基础信息、raw/quarantine/validated、离线回放和结构化探针；Choice新访问已到期失败关闭；Tushare旧轮次以`capability_probe_bug`封存，新授权链仅允许一次HTTP `trade_cal`并要求可重放终态；正式Provider仍未迁移 |
 | 中证行业 Factor Lab V1 | 引擎、Provider、固定 `RM20/RM60/RM120`、预注册 Screen/Confirm、主观假设卡和每周诊断报告已实现；尚无真实统计通过或研究准入结论 |
 | DeepVan 采集 | 整理人工有权读取的可见文本或 OCR 内容，不绕过登录、权限或付费限制 |
 | 行业变化雷达 R0 | `heuristic_baseline_not_alpha`，只做启发式研究排序 |
@@ -141,7 +141,7 @@ python -m research.broker_report_audit audit `
 |---|---|---|
 | BaoStock | 默认市场数据主源 | Provider 已实现；SDK/网络/真实响应须由本机探针确认，不是官方真值认证 |
 | Choice | 历史许可只读单源候选 | 2026-08-19 三项连接结果只保留为历史Secondary/diagnostic证据；当前访问已到期，新网络和新正式离线消费均失败关闭。完整历史PIT面板、行业/交易状态、首披财务及正式适配器仍缺，不能自动改用其他Provider补缺 |
-| Tushare | 现有可选日线核验源；新增能力探针 | 需要`market-tushare` extra和`TUSHARE_TOKEN`；除现有独立日线核验外，新增接口只产生`capability_probe_only_not_admitted`证据，不影响BaoStock主流程或Experiment V3 |
+| Tushare | 现有可选日线核验源；能力探针与诊断runner均隔离 | 当前能力仍为`unknown`；旧P0只得出`capability_probe_bug`，新轮次固定一次HTTP `trade_cal`，不影响BaoStock主流程、不迁移正式Provider、不解锁Experiment V3 |
 | AKShare | 受控扩展骨架 | 当前没有已配置数据集；Eastmoney/`*_em` 接口不得进入准入路径 |
 | Eastmoney 行情 | Legacy 诊断 | `default_provider=false`，不进入 V2 默认、fallback 或 validated 主链 |
 | Eastmoney 研报 | 公开可获取样本 | 仅 `publicly_retrievable_sample_only`，不代表券商全部研报，与行情来源解耦 |

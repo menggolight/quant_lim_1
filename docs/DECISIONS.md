@@ -22,6 +22,7 @@
 | [D-20260821-03](#d-20260821-03-分离llm因子候选与experiment-v3正式冻结证据) | 2026-08-21 | `accepted` | 分离LLM因子候选与Experiment V3正式冻结证据 |
 | [D-20260824-01](#d-20260824-01-在daily到next信任边界复验完整语义并拒绝契约子类) | 2026-08-24 | `accepted` | 在Daily到Next信任边界复验完整语义并拒绝契约子类 |
 | [D-20260824-02](#d-20260824-02-choice到期后采用tushare-probe-first而不自动迁移) | 2026-08-24 | `accepted` | Choice到期后采用Tushare probe-first而不自动迁移 |
+| [D-20260825-01](#d-20260825-01-统一失败后只做双通道单接口诊断) | 2026-08-25 | `accepted` | 统一失败后只做双通道单接口诊断 |
 
 ## D-20260820-01 以仓库作为跨 Agent 交接界面
 
@@ -399,6 +400,102 @@ P0已经能表达现金与跨日风险退出，但仍存在七个会破坏失败
 ### 重新评估条件
 
 只有在真实capability receipt明确接口权限与覆盖，并由独立Market Data V2决策逐dataset冻结Provider、Schema、PIT、单位、基准、失败条件及迁移策略后，才重新评估正式Tushare适配范围。该重新评估仍不授予Experiment V3、Paper、交易、真实资金或LIVE权限。
+
+## D-20260825-01 统一失败后只做双通道单接口诊断
+
+- 日期：2026-08-25
+- 状态：`accepted`
+- 影响范围：Tushare capability probe 诊断、真实请求预算、错误 receipt
+- 关系：补强 `D-20260824-02` 的 probe-first 边界，不改变正式 Provider、Experiment V3、Daily、Alpha 或执行准入
+
+### 背景
+
+首次 22-endpoint 探针实际产生 37 次 Tushare 请求，但所有 endpoint 都统一落入 `unexpected`。同构失败只能证明原公共入口没有提取足够的上游结构，不能区分 Token/账户、SDK 客户端、网络传输或探针实现，也不能据此判定 Tushare capability failure。
+
+### 决策
+
+- 停止 22-endpoint 探针，不删除或改写旧 receipt；只新增隔离的 single-endpoint diagnostic。
+- 固定先测 `trade_cal`：SDK 一次、直接 HTTP 一次，二者使用相同语义参数。仅在另有必要且仍在同一轮预算内时才可对 `daily` 各一次；全轮上限 4，预算槽 create-only、不可释放或复用。
+- 标准live入口固定output与budget同根，并从预算预留前到终态receipt或failure marker发布后全程持有跨进程round lock。`daily`不能以“slot 1存在且failure marker暂时不存在”作为放行条件；必须先重放同一slot 1 run ID对应的终态`trade_cal` receipt，未完成、硬退出或终态发布失败均零请求失败关闭。
+- 每通道最多一次发送，无 retry、无 redirect。SDK import/init 的隐式网络在计数发送之外失败关闭。
+- 只持久化 `transport_status`、`http_status`、整数或 null 的 `upstream_code`、固定枚举 `sdk_exception_type` 和 `sanitized_message_category`。结构化 code 优先，再按同一 envelope message、HTTP status、transport fallback 映射 permission、rate limit、authentication/account、invalid parameter 和 server/internal。
+- Token 只从当前进程环境读取；不得进入配置、Schema、日志、receipt、异常文本、测试夹具，也不得输出或持久化其哈希、长度、前后缀。明显不符合本地安全 envelope 的剪贴板输入必须在预算、SDK import 和网络之前拒绝；该预检不证明凭证真实有效。
+- completed receipt 的结论只能是 `token_or_account_problem`、`sdk_client_problem`、`network_transport_problem` 或 `capability_probe_bug`。
+- 若 runner 在预算预留后、completed receipt 发布前失败，异常边界必须先写 create-only round-failure marker并关闭整轮；标准入口随后拒绝`trade_cal`和`daily`。sealed postmortem V3必须完整内嵌marker并绑定marker SHA-256、slot与失败实现bundle，交叉验证run ID、endpoint、异常类别和时间顺序；只在固定round根确认completed receipt不存在。实际请求数、runtime语义参数和两通道五项字段均保持`null + unavailable`，不能用封存时当前配置回填失败进程事实。V1未绑定marker、V2回填当前参数的历史形状明确拒绝继续签发。禁止只凭slot抢先宣称runner失败、把预算预留数伪装成真实请求或把顶层异常伪装成SDK异常。此时结论固定为`capability_probe_bug`，只判断runner integrity，不判断Tushare capability，且本轮不得重跑。
+- 无论哪类诊断结论，`formal_data_admission`、Experiment V3、Daily authority、Alpha BUY、Paper、交易、真实资金和 LIVE 均保持关闭；不得继续实施 `market_data.v2`。
+
+### 证据与真源
+
+- [single-endpoint diagnostic CLI](../agent/tushare_single_endpoint_diagnostic.py)
+- [diagnostic contract](../research/market_data/tushare_diagnostic.py)
+- [postmortem contract](../research/market_data/tushare_diagnostic_postmortem.py)
+- [completed receipt Schema](../schemas/tushare_single_endpoint_diagnostic_receipt.v1.json)
+- [历史unsealed postmortem Schema V1](../schemas/tushare_single_endpoint_diagnostic_postmortem.v1.json)
+- [superseded sealed postmortem Schema V2](../schemas/tushare_single_endpoint_diagnostic_postmortem.v2.json)
+- [current sealed postmortem Schema V3](../schemas/tushare_single_endpoint_diagnostic_postmortem.v3.json)
+- [项目当前状态](STATUS.md)
+
+### 放弃的方案
+
+- 重新运行全部 22 endpoint：会增加预算消耗，却不能修复公共入口统一错误分类。
+- 只升级 SDK 或只测 HTTP：无法用相同语义参数定位 SDK 与 wire 层差异。
+- 将 reserved count 当实际 request count：进程失败后缺少通道内存证据，这样会制造虚假运行事实。
+- 只凭已存在的budget slot签发postmortem：并发finalizer可能在live尚未结束时抢占run directory；必须先有runner异常边界生成的round-failure marker。
+- 根据剪贴板形态或顶层 `OtherError` 直接断言 Token/账户问题：本地形态检查不是上游认证，顶层异常也不是通道结果。
+
+### 后果与取舍
+
+- 诊断面缩小到可证伪的两通道对照，并严格限制网络预算和秘密暴露。
+- runner 在本轮真实执行中未能封存两个通道，sealed postmortem V3因而诚实保留runtime参数与通道结果不可用；它给出`capability_probe_bug`，但没有完成Tushare capability判断。由于现场先于marker功能发生，当前marker明确标为posthoc；V3完整记录其`evidence_origin`并绑定marker文件哈希，但仍只承担关闭整轮与本地完整性证明，不被提升为上游通道证据。
+- 当前预算现场必须保留且不可重跑。未来若需新真实诊断，必须另获授权并建立新预算轮次，不能覆盖当前反证。
+
+### 重新评估条件
+
+只有新的、明确授权的预算轮次通过本地凭证预检，并生成 SDK/HTTP 两通道均有终态且可重放的 completed receipt 后，才可重新评估四类根因。正式数据源迁移仍须另立 Market Data V2 决策。
+
+## D-20260825-02 新授权轮次采用可重放的单HTTP请求记账
+
+- 日期：2026-08-25
+- 状态：`accepted`
+- 影响范围：Tushare `trade_cal` HTTP诊断、请求预算、崩溃恢复和终态receipt
+- 关系：承接`D-20260825-01`的`capability_probe_bug`，不复用或改写旧双通道轮次，不改变正式Provider及研究/执行准入
+
+### 背景
+
+旧轮次只形成marker-bound postmortem，无法证明网络调用是否开始、响应是否收到或两通道结果。用户接受`capability_probe_bug`，但要求在不重跑SDK、`daily`或22接口的前提下，对成功和失败都形成可重放终态，并把预算预留、网络开始、响应收到和终态结果分开记账。
+
+### 决策
+
+- 建立独立、不可复用的新目录和HTTP-only CLI，固定`endpoint=trade_cal`、`channel=http`、`max_requests=1`；不暴露endpoint、channel、预算、SDK、`daily`或全探针选择参数。
+- 网络前create-only持久化`REQUEST_RESERVED`和`NETWORK_CALL_STARTED`；收到并完成安全分类后写`RESPONSE_RECEIVED`；分类链结束写`TERMINAL`。事件使用canonical JSON、自哈希和前序哈希形成可重放链。
+- 顶层receipt分别记录`reserved_request_count`、`network_call_started_count`、`response_received_count`、`terminal_result_count`、`remote_execution_unknown_count`和`budget_consumed_count`；强制`terminal=1`、`unknown=started-response`、`budget=reserved`。
+- 任一崩溃前缀只能离线追加`TERMINAL`和缺失receipt，不能再次进入网络。已存在的terminal receipt必须逐事件、Schema、自哈希和文件canonical字节重放。
+- 不保存Token、Token hash、前后缀、原始响应、上游message或异常文本。直接HTTP禁用自动retry和redirect，启用TLS验证和1 MiB响应上限。
+- 该receipt只描述HTTP诊断终态；不补造SDK证据，不运行`daily`，不判断全量Tushare capability，也不形成Market Data、Experiment、Alpha、Paper、交易、自动下单或LIVE准入。
+
+### 证据与真源
+
+- [HTTP-only runner](../agent/tushare_http_terminal_diagnostic.py)
+- [事件与receipt domain](../research/market_data/tushare_http_terminal.py)
+- [事件Schema](../schemas/tushare_http_diagnostic_event.v1.json)
+- [终态receipt Schema](../schemas/tushare_http_terminal_diagnostic_receipt.v1.json)
+- [故障注入测试](../tests/test_tushare_http_terminal_diagnostic.py)
+- [项目当前状态](STATUS.md)
+
+### 放弃的方案
+
+- 修补并重跑旧SDK/HTTP双通道目录：会复用已经关闭的预算现场并增加不被本轮授权的SDK请求。
+- 用单一`actual_request_count`概括请求：无法区分已预留、已进入网络、已收到响应和远端执行未知。
+- 只生成postmortem：不能满足本轮无论上游成功或失败都必须有terminal diagnostic receipt的要求。
+- 崩溃恢复时重发：在`NETWORK_CALL_STARTED`之后无法证明远端未执行，重发会越过一次请求预算。
+
+### 后果与取舍
+
+网络开始后、响应marker前崩溃会保守记录`remote_execution_unknown_count=1`，即使远端事实上已经返回也不猜测；这是避免第二次调用的必要取舍。receipt成功和可重放只证明本地HTTP诊断证据闭合，仍不能提升Tushare数据能力或任何研究/执行状态。
+
+### 重新评估条件
+
+只在本轮唯一真实HTTP调用形成terminal receipt并完成离线replay、文件SHA-256和Token泄漏检查后，才报告该HTTP通道的真实终态。任何正式Tushare Provider、Market Data V2、Experiment V3、Locked Test、Alpha、Paper或执行工作都需要新的独立授权与决策。
 
 ## 新增记录模板
 
