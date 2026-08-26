@@ -1,8 +1,10 @@
 from __future__ import annotations
 
 import json
+import math
 import tempfile
 import unittest
+from unittest.mock import patch
 from datetime import date, timedelta
 from decimal import Decimal
 from pathlib import Path
@@ -200,6 +202,40 @@ class PortfolioReplayTests(unittest.TestCase):
         self.assertEqual(result["target_gross_exposure"], 0.0)
         self.assertTrue(result["data_fail_closed"])
 
+    def test_exposure_uses_configured_windows_and_annualization(self):
+        days = _sessions(4)
+        benchmark = tuple(
+            _row("000906.SH", day, close)
+            for day, close in zip(days, (100.0, 101.0, 102.0, 104.0), strict=True)
+        )
+        stock = tuple(
+            _row("000001.SZ", day, close)
+            for day, close in zip(days, (10.0, 10.1, 10.2, 10.4), strict=True)
+        )
+        policy = json.loads(json.dumps(self.config["exposure"]))
+        policy.update({
+            "benchmark_trend_sessions": 2,
+            "breadth_trend_sessions": 2,
+            "realized_vol_sessions": 2,
+            "annualization_sessions": 4,
+        })
+        result = compute_technical_shadow_exposure(
+            benchmark_rows=benchmark,
+            eligible_stock_rows=[stock],
+            current_nav=10000,
+            peak_nav=10000,
+            policy=policy,
+        )
+        expected_trend = 104.0 / ((102.0 + 104.0) / 2) - 1
+        returns = (math.log(102.0 / 101.0), math.log(104.0 / 102.0))
+        expected_vol = math.sqrt(
+            ((returns[0] - sum(returns) / 2) ** 2 + (returns[1] - sum(returns) / 2) ** 2)
+        ) * 2
+        self.assertAlmostEqual(result["benchmark_trend"], expected_trend)
+        self.assertAlmostEqual(result["realized_volatility"], expected_vol)
+        self.assertEqual(result["market_breadth"], 1.0)
+        self.assertFalse(result["data_fail_closed"])
+
     def test_run_directory_is_create_only_and_never_emits_orders(self):
         config, ids, sessions, stocks, benchmark = _alpha_inputs(122)
         captured = CapturedData(
@@ -222,6 +258,135 @@ class PortfolioReplayTests(unittest.TestCase):
                     config=config, captured=captured, recent_completed_sessions=1,
                     initial_cash=Decimal("10000"), output_root=output_root, run_id="fixed",
                 )
+
+    def test_natural_replay_stops_after_first_sell_and_preserves_t_plus_one(self):
+        config, _, sessions, stocks, benchmark = _alpha_inputs(124)
+        captured = CapturedData(
+            provider_id="mock", provider_kind="test_fixture", adapter_version="test-v1",
+            synthetic=True, captured_at="2026-08-26T16:00:00+08:00", sessions=sessions,
+            stock_rows=stocks, benchmark_rows=benchmark, receipts={},
+        )
+        exposures = [
+            {
+                "market_state": "RISK_ON", "target_gross_exposure": 1.00,
+                "benchmark_trend": 0.01, "market_breadth": 0.45,
+                "realized_volatility": 0.20, "account_drawdown": 0.0,
+                "data_fail_closed": False, "reason_codes": ["exposure_defensive"],
+            },
+            {
+                "market_state": "RISK_OFF", "target_gross_exposure": 0.0,
+                "benchmark_trend": -0.01, "market_breadth": 0.35,
+                "realized_volatility": 0.20, "account_drawdown": 0.0,
+                "data_fail_closed": False, "reason_codes": ["exposure_risk_off"],
+            },
+        ]
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "operations.run_technical_shadow_mvp.compute_technical_shadow_exposure",
+            side_effect=exposures,
+        ):
+            run_root, summary = run_replay(
+                config=config,
+                captured=captured,
+                recent_completed_sessions=3,
+                initial_cash=Decimal("10000"),
+                output_root=Path(temporary),
+                run_id="stop-after-sell",
+                stop_after_first_sell=True,
+            )
+            self.assertEqual(summary["daily_decision_count"], 2)
+            self.assertGreater(summary["buy_count"], 0)
+            self.assertGreater(summary["sell_count"], 0)
+            self.assertEqual(summary["run_stop_reason"], "first_sell_observed")
+            decisions = [
+                json.loads(path.read_text(encoding="utf-8"))
+                for path in sorted((run_root / "daily").glob("*.decision.json"))
+            ]
+            buy_day = next(
+                row["execution_date"]
+                for row in decisions
+                if any(fill["action"] == "BUY" for fill in row["fills"])
+            )
+            sell_day = next(
+                row["execution_date"]
+                for row in decisions
+                if any(fill["action"] == "SELL" for fill in row["fills"])
+            )
+            self.assertLess(buy_day, sell_day)
+
+    def test_single_stock_data_gap_is_excluded_without_global_fail_closed(self):
+        config, ids, sessions, stocks, benchmark = _alpha_inputs(122)
+        changed_stocks = dict(stocks)
+        changed_stocks[ids[0]] = stocks[ids[0]][1:]
+        captured = CapturedData(
+            provider_id="mock", provider_kind="test_fixture", adapter_version="test-v1",
+            synthetic=True, captured_at="2026-08-26T16:00:00+08:00", sessions=sessions,
+            stock_rows=changed_stocks, benchmark_rows=benchmark, receipts={},
+        )
+        with tempfile.TemporaryDirectory() as temporary:
+            run_root, summary = run_replay(
+                config=config,
+                captured=captured,
+                recent_completed_sessions=1,
+                initial_cash=Decimal("10000"),
+                output_root=Path(temporary),
+                run_id="one-stock-excluded",
+            )
+            decision = json.loads(
+                next((run_root / "daily").glob("*.decision.json")).read_text(
+                    encoding="utf-8"
+                )
+            )
+            self.assertFalse(decision["data_fail_closed"])
+            self.assertTrue(decision["data_exclusions_applied"])
+            self.assertEqual(
+                decision["data_exclusion_codes_by_instrument"],
+                {ids[0]: ["missing_common_session"]},
+            )
+            self.assertFalse(summary["data_fail_closed_occurred"])
+            self.assertTrue(summary["data_exclusion_occurred"])
+            self.assertEqual(summary["data_excluded_instrument_ids"], [ids[0]])
+
+    def test_prelude_sell_does_not_stop_before_selection_anchor(self):
+        config, _, sessions, stocks, benchmark = _alpha_inputs(125)
+        captured = CapturedData(
+            provider_id="mock", provider_kind="test_fixture", adapter_version="test-v1",
+            synthetic=True, captured_at="2026-08-26T16:00:00+08:00", sessions=sessions,
+            stock_rows=stocks, benchmark_rows=benchmark, receipts={},
+        )
+        risk_on = {
+            "market_state": "RISK_ON", "target_gross_exposure": 1.0,
+            "benchmark_trend": 0.01, "market_breadth": 0.70,
+            "realized_volatility": 0.10, "account_drawdown": 0.0,
+            "data_fail_closed": False, "reason_codes": ["exposure_risk_on"],
+        }
+        risk_off = {
+            "market_state": "RISK_OFF", "target_gross_exposure": 0.0,
+            "benchmark_trend": -0.01, "market_breadth": 0.30,
+            "realized_volatility": 0.20, "account_drawdown": 0.0,
+            "data_fail_closed": False, "reason_codes": ["exposure_risk_off"],
+        }
+        anchor = sessions[122]
+        with tempfile.TemporaryDirectory() as temporary, patch(
+            "operations.run_technical_shadow_mvp.compute_technical_shadow_exposure",
+            side_effect=[risk_on, risk_off, risk_on, risk_off],
+        ):
+            _, summary = run_replay(
+                config=config,
+                captured=captured,
+                recent_completed_sessions=4,
+                initial_cash=Decimal("10000"),
+                output_root=Path(temporary),
+                run_id="anchor-gated-stop",
+                stop_after_first_sell=True,
+                sell_stop_eligible_from_decision_date=anchor,
+            )
+            self.assertEqual(summary["daily_decision_count"], 4)
+            self.assertEqual(summary["sell_count"], 6)
+            self.assertEqual(summary["run_stop_reason"], "first_sell_observed")
+            self.assertEqual(
+                summary["sell_stop_eligible_from_decision_date"],
+                anchor.isoformat(),
+            )
 
 
 if __name__ == "__main__":

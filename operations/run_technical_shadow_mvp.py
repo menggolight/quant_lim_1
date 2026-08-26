@@ -1,4 +1,4 @@
-"""Run the non-admitted ten-session A-share technical Shadow business loop."""
+"""Run a non-admitted A-share technical Shadow business replay."""
 
 from __future__ import annotations
 
@@ -23,6 +23,7 @@ CHINA_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
 STRATEGY_ID = "a-share-technical-shadow-mvp-v1"
 DEFAULT_CONFIG = Path("configs/a_share_technical_shadow_mvp.v1.json")
 DEFAULT_OUTPUT_ROOT = Path("data/tmp/technical-shadow-mvp")
+ALPHA_LOOKBACK_SESSIONS = 120
 DAILY_FIELDS = (
     "date", "code", "open", "high", "low", "close", "preclose", "volume",
     "amount", "adjustflag", "tradestatus", "isST",
@@ -163,7 +164,7 @@ class BaoStockTechnicalShadowSource:
                 date.fromisoformat(row["calendar_date"])
                 for row in calendar_dicts if row["is_trading_day"] == "1"
             )
-            required_count = 120 + recent_completed_sessions + 1
+            required_count = ALPHA_LOOKBACK_SESSIONS + recent_completed_sessions + 1
             if len(open_sessions) < required_count:
                 raise TechnicalShadowRunError("fewer_than_required_completed_sessions")
             sessions = open_sessions[-required_count:]
@@ -263,14 +264,25 @@ def _execution_cost(
 ) -> dict[str, Decimal]:
     costs = config["costs"]
     slippage_rate = _decimal(costs["slippage_bps_one_way"]) / Decimal("10000")
-    execution_price = open_price * (Decimal("1") + slippage_rate if side == "BUY" else Decimal("1") - slippage_rate)
-    base_notional = open_price * quantity
-    execution_notional = execution_price * quantity
-    commission = max(_decimal(costs["minimum_commission"]), execution_notional * _decimal(costs["commission_rate"]))
-    transfer = execution_notional * _decimal(costs["transfer_fee_rate_both_sides"])
-    sell_tax = execution_notional * _decimal(costs["sell_tax_rate"]) if side == "SELL" else Decimal("0")
-    slippage = abs(execution_price - open_price) * quantity
+    execution_price = _money(
+        open_price
+        * (Decimal("1") + slippage_rate if side == "BUY" else Decimal("1") - slippage_rate)
+    )
+    base_notional = _money(open_price * quantity)
+    execution_notional = _money(execution_price * quantity)
+    commission = _money(max(
+        _decimal(costs["minimum_commission"]),
+        execution_notional * _decimal(costs["commission_rate"]),
+    ))
+    transfer = _money(execution_notional * _decimal(costs["transfer_fee_rate_both_sides"]))
+    sell_tax = _money(execution_notional * _decimal(costs["sell_tax_rate"])) if side == "SELL" else Decimal("0.00")
+    slippage = _money(abs(execution_price - open_price) * quantity)
     explicit = commission + transfer + sell_tax
+    cash_delta = (
+        -(execution_notional + explicit)
+        if side == "BUY"
+        else execution_notional - explicit
+    )
     return {
         "execution_price": execution_price,
         "base_notional": base_notional,
@@ -281,6 +293,7 @@ def _execution_cost(
         "slippage": slippage,
         "explicit_fees": explicit,
         "total_cost": explicit + slippage,
+        "cash_delta": cash_delta,
     }
 
 
@@ -346,11 +359,16 @@ def _execute_targets(
             "target_quantity": targets.get(item, positions.get(item, 0)),
             "market_open_price": _money_text(cost["base_notional"] / quantity),
             "simulated_fill_price": _money_text(cost["execution_price"]),
+            "base_notional": _money_text(cost["base_notional"]),
+            "execution_notional": _money_text(cost["execution_notional"]),
             "commission": _money_text(cost["commission"]),
             "transfer_fee": _money_text(cost["transfer_fee"]),
             "sell_tax": _money_text(cost["sell_tax"]),
             "slippage_cost": _money_text(cost["slippage"]),
-            "total_cost": _money_text(cost["total_cost"]), "reason_codes": [reason],
+            "explicit_fees": _money_text(cost["explicit_fees"]),
+            "total_cost": _money_text(cost["total_cost"]),
+            "cash_delta": _money_text(cost["cash_delta"]),
+            "reason_codes": [reason],
         })
 
     for item in sorted(set(positions) | set(targets)):
@@ -363,7 +381,7 @@ def _execute_targets(
             continue
         quantity = -delta
         cost = _execution_cost(side="SELL", quantity=quantity, open_price=_decimal(row["open"]), config=config)
-        cash += cost["execution_notional"] - cost["explicit_fees"]
+        cash += cost["cash_delta"]
         positions[item] -= quantity
         if positions[item] == 0:
             del positions[item]
@@ -389,7 +407,7 @@ def _execute_targets(
         if quantity <= 0 or cost is None:
             fills.append({"action": "BUY_CANCELLED", "instrument_id": item, "target_quantity": targets[item], "simulated_quantity": 0, "reason_codes": ["cash_or_whole_lot_unavailable"]})
             continue
-        cash -= cost["execution_notional"] + cost["explicit_fees"]
+        cash += cost["cash_delta"]
         positions[item] = positions.get(item, 0) + quantity
         add_fill("BUY", item, quantity, cost, "d_signal_d_plus_1_open")
     if cash < Decimal("-0.005"):
@@ -421,18 +439,21 @@ def _decision_markdown(decision: Mapping[str, Any]) -> str:
 def run_replay(
     *, config: Mapping[str, Any], captured: CapturedData, recent_completed_sessions: int,
     initial_cash: Decimal, output_root: Path, run_id: str | None = None,
+    stop_after_first_sell: bool = False,
+    sell_stop_eligible_from_decision_date: date | None = None,
+    run_context: Mapping[str, Any] | None = None,
 ) -> tuple[Path, dict[str, Any]]:
     validate_source_provenance(
         provider_id=captured.provider_id, provider_kind=captured.provider_kind, synthetic=captured.synthetic
     )
     if recent_completed_sessions <= 0:
         raise TechnicalShadowRunError("recent_completed_sessions_must_be_positive")
-    expected_count = 120 + recent_completed_sessions + 1
+    expected_count = ALPHA_LOOKBACK_SESSIONS + recent_completed_sessions + 1
     if len(captured.sessions) < expected_count:
         raise TechnicalShadowRunError("captured_sessions_insufficient")
     sessions = captured.sessions[-expected_count:]
-    decision_dates = sessions[120:-1]
-    execution_dates = sessions[121:]
+    decision_dates = sessions[ALPHA_LOOKBACK_SESSIONS:-1]
+    execution_dates = sessions[ALPHA_LOOKBACK_SESSIONS + 1:]
     if len(decision_dates) != recent_completed_sessions or len(execution_dates) != recent_completed_sessions:
         raise TechnicalShadowRunError("decision_execution_calendar_mismatch")
     run_id = run_id or f"{datetime.now(CHINA_TZ).strftime('%Y%m%dT%H%M%S%z')}-{uuid.uuid4().hex[:8]}"
@@ -456,6 +477,8 @@ def run_replay(
     action_counts = {"BUY": 0, "SELL": 0, "HOLD": 0}
     cash_days = 0
     data_fail_closed = False
+    data_excluded_instruments: set[str] = set()
+    stop_reason: str | None = None
 
     for decision_date, execution_date in zip(decision_dates, execution_dates, strict=True):
         history_sessions = tuple(day for day in sessions if day <= decision_date)
@@ -536,11 +559,29 @@ def run_replay(
             raise TechnicalShadowRunError(f"missing_execution_close_marks:{missing_marks}")
         closing_nav = cash + sum(execution_close[item] * quantity for item, quantity in positions.items())
         peak_nav = max(peak_nav, closing_nav)
-        ranking_data_failure = any(
-            any(code in {"duplicate_trading_date", "missing_common_session", "invalid_or_missing_ohlcv"} for code in row["exclusion_codes"])
+        data_exclusion_codes = {
+            str(row["instrument_id"]): sorted(
+                code
+                for code in row["exclusion_codes"]
+                if code
+                in {
+                    "duplicate_trading_date",
+                    "missing_common_session",
+                    "invalid_or_missing_ohlcv",
+                }
+            )
             for row in ranking
-        )
-        data_fail_closed = data_fail_closed or ranking_data_failure
+            if any(
+                code
+                in {
+                    "duplicate_trading_date",
+                    "missing_common_session",
+                    "invalid_or_missing_ohlcv",
+                }
+                for code in row["exclusion_codes"]
+            )
+        }
+        data_excluded_instruments.update(data_exclusion_codes)
         daily_record = {
             "strategy_id": STRATEGY_ID, "decision_date": decision_date.isoformat(),
             "execution_date": execution_date.isoformat(), "market_state": exposure["market_state"],
@@ -551,8 +592,14 @@ def run_replay(
             "fills": fills, "closing_positions": dict(sorted(positions.items())),
             "closing_cash": _money_text(cash), "closing_nav": _money_text(closing_nav),
             "daily_transaction_cost": _money_text(day_cost),
-            "data_fail_closed": bool(exposure["data_fail_closed"] or ranking_data_failure),
-            "reason_codes": exposure["reason_codes"] + _cash_reason_codes(
+            "data_fail_closed": bool(exposure["data_fail_closed"]),
+            "data_exclusions_applied": bool(data_exclusion_codes),
+            "data_exclusion_codes_by_instrument": data_exclusion_codes,
+            "reason_codes": exposure["reason_codes"] + (
+                ["UNIVERSE_DATA_EXCLUSIONS_APPLIED"]
+                if data_exclusion_codes
+                else []
+            ) + _cash_reason_codes(
                 ranking=ranking,
                 positions=opening_positions,
                 selected=selected,
@@ -571,6 +618,18 @@ def run_replay(
             "previous_event_sha256": ledger[-1]["event_sha256"] if ledger else None,
         })
         ledger[-1]["event_sha256"] = _digest(ledger[-1])
+        if (
+            stop_after_first_sell
+            and (
+                sell_stop_eligible_from_decision_date is None
+                or decision_date >= sell_stop_eligible_from_decision_date
+            )
+            and any(
+            fill["action"] == "SELL" for fill in fills
+            )
+        ):
+            stop_reason = "first_sell_observed"
+            break
 
     ledger_raw = b"".join(_canonical_bytes(item) for item in ledger)
     _write_new(run_root / "ledger.jsonl", ledger_raw, artifacts, run_root)
@@ -581,28 +640,46 @@ def run_replay(
         running_peak = max(running_peak, nav)
         max_drawdown = min(max_drawdown, nav / running_peak - Decimal("1"))
     final_nav = _decimal(ledger[-1]["nav"])
+    used_sessions = sessions[: ALPHA_LOOKBACK_SESSIONS + len(ledger) + 1]
     complete_instruments = sum(
-        all(day in stock_maps[item] and stock_maps[item][day].get("close") is not None for day in sessions)
+        all(day in stock_maps[item] and stock_maps[item][day].get("close") is not None for day in used_sessions)
         for item in instrument_ids
+    )
+    stop_reason = stop_reason or (
+        "decision_limit_reached"
+        if stop_after_first_sell
+        else "requested_window_completed"
     )
     summary = {
         "strategy_id": STRATEGY_ID, "purpose": "business_loop_validation",
         "research_status": "heuristic_shadow_baseline",
-        "actual_decision_date_range": [decision_dates[0].isoformat(), decision_dates[-1].isoformat()],
-        "actual_execution_date_range": [execution_dates[0].isoformat(), execution_dates[-1].isoformat()],
+        "actual_decision_date_range": [ledger[0]["decision_date"], ledger[-1]["decision_date"]],
+        "actual_execution_date_range": [ledger[0]["execution_date"], ledger[-1]["execution_date"]],
         "actual_stock_count": len(instrument_ids), "data_complete_stock_count": complete_instruments,
+        "requested_decision_count": recent_completed_sessions,
         "daily_decision_count": len(ledger), "buy_count": action_counts["BUY"],
         "sell_count": action_counts["SELL"], "hold_count": action_counts["HOLD"],
         "cash_day_count": cash_days, "final_positions": dict(sorted(positions.items())),
         "final_cash": _money_text(cash), "final_nav": _money_text(final_nav),
         "total_transaction_cost": _money_text(total_cost), "maximum_drawdown": float(max_drawdown),
         "data_fail_closed_occurred": data_fail_closed,
+        "data_exclusion_occurred": bool(data_excluded_instruments),
+        "data_excluded_instrument_ids": sorted(data_excluded_instruments),
+        "first_sell_stop_enabled": stop_after_first_sell,
+        "sell_stop_eligible_from_decision_date": (
+            sell_stop_eligible_from_decision_date.isoformat()
+            if sell_stop_eligible_from_decision_date is not None
+            else None
+        ),
+        "run_stop_reason": stop_reason,
         "provider_id": captured.provider_id, "provider_kind": captured.provider_kind,
         "synthetic": captured.synthetic, "output_directory": str(run_root.resolve()),
         "paper_eligibility": False, "trade_eligibility": False,
         "real_money_list_allowed": False, "automatic_order_submission": False,
         "live_supported": False,
     }
+    if run_context is not None:
+        summary["run_context"] = dict(run_context)
     _write_new(run_root / "run_summary.json", summary, artifacts, run_root)
     summary_md = "\n".join([
         "# A股技术 Shadow MVP 真实业务回放", "",
@@ -626,6 +703,8 @@ def run_replay(
         "artifacts": dict(sorted(artifacts.items())), "summary_sha256": _digest(summary),
         "safety": config["safety"],
     }
+    if run_context is not None:
+        manifest["run_context"] = dict(run_context)
     _write_new(run_root / "run_manifest.json", manifest, artifacts, run_root)
     return run_root, summary
 
