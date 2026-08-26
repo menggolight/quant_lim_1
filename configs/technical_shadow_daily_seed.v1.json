@@ -1,0 +1,46 @@
+{
+  "schema_version": "technical-shadow-daily-state-seed.v1",
+  "strategy_id": "a-share-technical-shadow-mvp-v1",
+  "mode": "stateful_daily",
+  "shadow_account_id": "technical-shadow-account-v1",
+  "config_sha256": "0ea5a5eaf25db2fbfce2cba34ac606e3bd331365dfef70be29df8280ff9d484f",
+  "state": {
+    "state_date": "2026-08-25",
+    "previous_trading_date": "2026-08-24",
+    "previous_record_sha256": "bf2ea7e7fe6b9c8040dee4795fe74935fe8f82393bf3f7b41328d84a4e5fac12",
+    "cash": "10000.00",
+    "positions": {},
+    "position_lots": [],
+    "sellable_quantities": {},
+    "nav": "10000.00",
+    "peak_nav": "10000.00",
+    "drawdown": 0.0,
+    "exposure_state": "RISK_OFF",
+    "pending_state": null,
+    "hysteresis_count": 0,
+    "cumulative_explicit_fee": "0.00",
+    "cumulative_slippage_cost": "0.00",
+    "cumulative_transaction_cost": "0.00"
+  },
+  "bootstrap": {
+    "kind": "controlled_20_session_replay_handoff",
+    "source_run_directory": "data/tmp/technical-shadow-mvp/20260826T143744+0800-d3d2607b",
+    "source_decision_date": "2026-08-24",
+    "source_execution_date": "2026-08-25",
+    "source_sequence": 20,
+    "source_manifest_sha256": "95652171b39a28d486f925b3b0dfae31048980eda462b7876e866533e1b05908",
+    "source_ledger_sha256": "a7fcb6a176420820c71317b921bdf5d94d4b1b0ec4b70ed785e1b2f0890731a6",
+    "source_summary_sha256": "bb804efe4cb6713ca3b8007b4f85a93bc83059579686cd554a31e162bc26afe8",
+    "source_last_decision_payload_sha256": "dba792f018466ad83208c57bf8e7216c52ff05c5af3054bd41fc805ab5675c1f"
+  },
+  "safety": {
+    "strategy_signal": false,
+    "alpha_evidence": false,
+    "trade_recommendation": false,
+    "paper_eligibility": false,
+    "trade_eligibility": false,
+    "real_money_list_allowed": false,
+    "automatic_order_submission": false,
+    "live_supported": false
+  }
+}

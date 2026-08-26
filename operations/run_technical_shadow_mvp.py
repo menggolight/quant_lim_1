@@ -142,6 +142,7 @@ class BaoStockTechnicalShadowSource:
         recent_completed_sessions: int,
         lookback_days: int,
         now: datetime,
+        completed_through: date | None = None,
     ) -> CapturedData:
         validate_source_provenance(
             provider_id=self.provider_id, provider_kind=self.provider_kind, synthetic=self.synthetic
@@ -151,7 +152,11 @@ class BaoStockTechnicalShadowSource:
         BaoStockProvider._check_result(login, "login")
         captured_at = now.astimezone(CHINA_TZ).isoformat()
         try:
-            end_day = now.astimezone(CHINA_TZ).date() - timedelta(days=1)
+            end_day = completed_through or (
+                now.astimezone(CHINA_TZ).date() - timedelta(days=1)
+            )
+            if end_day > now.astimezone(CHINA_TZ).date():
+                raise TechnicalShadowRunError("completed_through_cannot_be_future")
             start_day = end_day - timedelta(days=lookback_days)
             calendar_result = sdk.query_trade_dates(
                 start_date=start_day.isoformat(), end_date=end_day.isoformat()
@@ -264,37 +269,95 @@ def _execution_cost(
 ) -> dict[str, Decimal]:
     costs = config["costs"]
     slippage_rate = _decimal(costs["slippage_bps_one_way"]) / Decimal("10000")
+    reference_price = _money(open_price)
     execution_price = _money(
-        open_price
+        reference_price
         * (Decimal("1") + slippage_rate if side == "BUY" else Decimal("1") - slippage_rate)
     )
-    base_notional = _money(open_price * quantity)
-    execution_notional = _money(execution_price * quantity)
+    notional_at_reference_price = _money(reference_price * quantity)
+    notional_at_execution_price = _money(execution_price * quantity)
     commission = _money(max(
         _decimal(costs["minimum_commission"]),
-        execution_notional * _decimal(costs["commission_rate"]),
+        notional_at_execution_price * _decimal(costs["commission_rate"]),
     ))
-    transfer = _money(execution_notional * _decimal(costs["transfer_fee_rate_both_sides"]))
-    sell_tax = _money(execution_notional * _decimal(costs["sell_tax_rate"])) if side == "SELL" else Decimal("0.00")
-    slippage = _money(abs(execution_price - open_price) * quantity)
-    explicit = commission + transfer + sell_tax
+    transfer_fee = _money(
+        notional_at_execution_price
+        * _decimal(costs["transfer_fee_rate_both_sides"])
+    )
+    stamp_duty = (
+        _money(notional_at_execution_price * _decimal(costs["sell_tax_rate"]))
+        if side == "SELL"
+        else Decimal("0.00")
+    )
+    slippage_cost = _money(abs(execution_price - reference_price) * quantity)
+    explicit_fee = commission + transfer_fee + stamp_duty
+    total_transaction_cost = explicit_fee + slippage_cost
     cash_delta = (
-        -(execution_notional + explicit)
+        -(notional_at_execution_price + explicit_fee)
         if side == "BUY"
-        else execution_notional - explicit
+        else notional_at_execution_price - explicit_fee
     )
     return {
+        "reference_price": reference_price,
         "execution_price": execution_price,
-        "base_notional": base_notional,
-        "execution_notional": execution_notional,
+        "notional_at_reference_price": notional_at_reference_price,
+        "notional_at_execution_price": notional_at_execution_price,
         "commission": commission,
-        "transfer_fee": transfer,
-        "sell_tax": sell_tax,
-        "slippage": slippage,
-        "explicit_fees": explicit,
-        "total_cost": explicit + slippage,
+        "stamp_duty": stamp_duty,
+        "transfer_fee": transfer_fee,
+        "explicit_fee": explicit_fee,
+        "slippage_cost": slippage_cost,
+        "total_transaction_cost": total_transaction_cost,
         "cash_delta": cash_delta,
+        # Private compatibility aliases for the pre-contract unit tests. These
+        # aliases are deliberately not persisted in decision or ledger fills.
+        "base_notional": notional_at_reference_price,
+        "execution_notional": notional_at_execution_price,
+        "sell_tax": stamp_duty,
+        "slippage": slippage_cost,
+        "explicit_fees": explicit_fee,
+        "total_cost": total_transaction_cost,
     }
+
+
+def _ledger_transaction_accounting(
+    fills: Sequence[Mapping[str, Any]],
+) -> tuple[dict[str, Any], list[dict[str, Any]]]:
+    """Return a self-contained daily accounting summary and executed fills."""
+
+    executed = [fill for fill in fills if fill.get("action") in {"BUY", "SELL"}]
+    monetary_fields = (
+        "notional_at_reference_price",
+        "notional_at_execution_price",
+        "commission",
+        "stamp_duty",
+        "transfer_fee",
+        "explicit_fee",
+        "slippage_cost",
+        "total_transaction_cost",
+        "cash_delta",
+    )
+    summary: dict[str, Any] = {
+        "fill_count": len(executed),
+        "buy_fill_count": sum(fill["action"] == "BUY" for fill in executed),
+        "sell_fill_count": sum(fill["action"] == "SELL" for fill in executed),
+    }
+    for field in monetary_fields:
+        summary[field] = _money_text(sum(
+            (_decimal(fill[field]) for fill in executed),
+            start=Decimal("0.00"),
+        ))
+    ledger_fields = (
+        "action", "instrument_id", "target_quantity", "simulated_quantity",
+        "reference_price", "execution_price", "notional_at_reference_price",
+        "notional_at_execution_price", "commission", "stamp_duty",
+        "transfer_fee", "explicit_fee", "slippage_cost",
+        "total_transaction_cost", "cash_delta", "reason_codes",
+    )
+    return summary, [
+        {field: fill[field] for field in ledger_fields}
+        for fill in executed
+    ]
 
 
 def _plan_targets(
@@ -353,21 +416,25 @@ def _execute_targets(
 
     def add_fill(side: str, item: str, quantity: int, cost: Mapping[str, Decimal], reason: str) -> None:
         nonlocal total_cost
-        total_cost += cost["total_cost"]
+        total_cost += cost["total_transaction_cost"]
         fills.append({
             "action": side, "instrument_id": item, "simulated_quantity": quantity,
             "target_quantity": targets.get(item, positions.get(item, 0)),
-            "market_open_price": _money_text(cost["base_notional"] / quantity),
-            "simulated_fill_price": _money_text(cost["execution_price"]),
-            "base_notional": _money_text(cost["base_notional"]),
-            "execution_notional": _money_text(cost["execution_notional"]),
+            "reference_price": _money_text(cost["reference_price"]),
+            "execution_price": _money_text(cost["execution_price"]),
+            "notional_at_reference_price": _money_text(cost["notional_at_reference_price"]),
+            "notional_at_execution_price": _money_text(cost["notional_at_execution_price"]),
             "commission": _money_text(cost["commission"]),
+            "stamp_duty": _money_text(cost["stamp_duty"]),
             "transfer_fee": _money_text(cost["transfer_fee"]),
-            "sell_tax": _money_text(cost["sell_tax"]),
-            "slippage_cost": _money_text(cost["slippage"]),
-            "explicit_fees": _money_text(cost["explicit_fees"]),
-            "total_cost": _money_text(cost["total_cost"]),
+            "explicit_fee": _money_text(cost["explicit_fee"]),
+            "slippage_cost": _money_text(cost["slippage_cost"]),
+            "total_transaction_cost": _money_text(cost["total_transaction_cost"]),
             "cash_delta": _money_text(cost["cash_delta"]),
+            # Display compatibility only; canonical accounting uses the exact
+            # reference_price/execution_price names above.
+            "market_open_price": _money_text(cost["reference_price"]),
+            "simulated_fill_price": _money_text(cost["execution_price"]),
             "reason_codes": [reason],
         })
 
@@ -400,7 +467,11 @@ def _execute_targets(
         cost: dict[str, Decimal] | None = None
         while quantity > 0:
             candidate = _execution_cost(side="BUY", quantity=quantity, open_price=_decimal(row["open"]), config=config)
-            if candidate["execution_notional"] + candidate["explicit_fees"] <= cash:
+            if (
+                candidate["notional_at_execution_price"]
+                + candidate["explicit_fee"]
+                <= cash
+            ):
                 cost = candidate
                 break
             quantity -= lot_size
@@ -430,8 +501,8 @@ def _decision_markdown(decision: Mapping[str, Any]) -> str:
     for fill in fills:
         lines.append(
             f"- {fill['action']} {fill.get('instrument_id') or 'CASH'} target={fill.get('target_quantity', '-')}, "
-            f"filled={fill.get('simulated_quantity', 0)}, price={fill.get('simulated_fill_price', '-')}, "
-            f"cost={fill.get('total_cost', '0.00')}, reason={','.join(fill.get('reason_codes', []))}"
+            f"filled={fill.get('simulated_quantity', 0)}, price={fill.get('execution_price', '-')}, "
+            f"cost={fill.get('total_transaction_cost', '0.00')}, reason={','.join(fill.get('reason_codes', []))}"
         )
     return "\n".join(lines) + "\n"
 
@@ -538,12 +609,14 @@ def run_replay(
             if not any(fill.get("instrument_id") == item and fill["action"] in {"BUY", "SELL"} for fill in fills):
                 fills.append({
                     "action": "HOLD", "instrument_id": item, "target_quantity": targets.get(item, positions[item]),
-                    "simulated_quantity": 0, "simulated_fill_price": None, "total_cost": "0.00",
+                    "simulated_quantity": 0, "execution_price": None,
+                    "total_transaction_cost": "0.00",
                     "reason_codes": ["incumbent_within_hold_band" if item in selected else "execution_cancelled_position_retained"],
                 })
         fills.append({
             "action": "CASH", "instrument_id": None, "target_quantity": 0,
-            "simulated_quantity": 0, "simulated_fill_price": None, "total_cost": "0.00",
+            "simulated_quantity": 0, "execution_price": None,
+            "total_transaction_cost": "0.00",
             "cash_balance": _money_text(cash), "reason_codes": ["residual_cash_preserved"],
         })
         for action in action_counts:
@@ -610,11 +683,15 @@ def run_replay(
         daily_record["decision_sha256"] = _digest(daily_record)
         _write_new(run_root / "daily" / f"{decision_date}.decision.json", daily_record, artifacts, run_root)
         _write_text_new(run_root / "daily" / f"{decision_date}.decision.md", _decision_markdown(daily_record), artifacts, run_root)
+        transaction_summary, ledger_fills = _ledger_transaction_accounting(fills)
         ledger.append({
             "event_type": "D_PLUS_1_SIMULATED_ACCOUNT_CLOSE", "sequence": len(ledger) + 1,
             "decision_date": decision_date.isoformat(), "execution_date": execution_date.isoformat(),
             "cash": _money_text(cash), "positions": dict(sorted(positions.items())),
-            "nav": _money_text(closing_nav), "transaction_cost": _money_text(day_cost),
+            "nav": _money_text(closing_nav),
+            "total_transaction_cost": _money_text(day_cost),
+            "transaction_summary": transaction_summary,
+            "fills": ledger_fills,
             "previous_event_sha256": ledger[-1]["event_sha256"] if ledger else None,
         })
         ledger[-1]["event_sha256"] = _digest(ledger[-1])
