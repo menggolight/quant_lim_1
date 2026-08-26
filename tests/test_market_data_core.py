@@ -214,6 +214,7 @@ class MarketDataCoreTest(unittest.TestCase):
         self.assertEqual(to_baostock_code("000333.SZ"), "sz.000333")
         self.assertEqual(to_baostock_code("600519.SH"), "sh.600519")
         self.assertEqual(to_baostock_code("000300.SH"), "sh.000300")
+        self.assertEqual(to_baostock_code("000906.SH"), "sh.000906")
         self.assertEqual(to_baostock_code("000001.SZ"), "sz.000001")
         self.assertEqual(from_baostock_code("sz.000333"), "000333.SZ")
         with self.assertRaises(ValueError):

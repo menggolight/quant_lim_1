@@ -14,7 +14,7 @@ dependencies = ["numpy>=2.0"]
 quant-strategy = "research.strategy_workspace.cli:main"
 
 [project.optional-dependencies]
-market-baostock = ["baostock"]
+market-baostock = ["baostock>=0.9.3"]
 market-tushare = ["tushare"]
 market-akshare = ["akshare"]
 

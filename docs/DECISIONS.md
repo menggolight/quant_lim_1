@@ -23,6 +23,7 @@
 | [D-20260824-01](#d-20260824-01-在daily到next信任边界复验完整语义并拒绝契约子类) | 2026-08-24 | `accepted` | 在Daily到Next信任边界复验完整语义并拒绝契约子类 |
 | [D-20260824-02](#d-20260824-02-choice到期后采用tushare-probe-first而不自动迁移) | 2026-08-24 | `accepted` | Choice到期后采用Tushare probe-first而不自动迁移 |
 | [D-20260825-01](#d-20260825-01-统一失败后只做双通道单接口诊断) | 2026-08-25 | `accepted` | 统一失败后只做双通道单接口诊断 |
+| [D-20260826-01](#d-20260826-01-隔离technical-shadow-mvp并冻结启发式业务回放) | 2026-08-26 | `accepted` | 隔离Technical Shadow MVP并冻结启发式业务回放 |
 
 ## D-20260820-01 以仓库作为跨 Agent 交接界面
 
@@ -496,6 +497,53 @@ P0已经能表达现金与跨日风险退出，但仍存在七个会破坏失败
 ### 重新评估条件
 
 只在本轮唯一真实HTTP调用形成terminal receipt并完成离线replay、文件SHA-256和Token泄漏检查后，才报告该HTTP通道的真实终态。任何正式Tushare Provider、Market Data V2、Experiment V3、Locked Test、Alpha、Paper或执行工作都需要新的独立授权与决策。
+
+## D-20260826-01 隔离Technical Shadow MVP并冻结启发式业务回放
+
+- 日期：2026-08-26
+- 状态：`accepted`
+- 影响范围：独立60只技术Shadow策略、BaoStock只读采集、D/D+1模拟成交与本地连续账本
+- 关系：不替代或修改Adaptive Exposure V2、质量成长V1、Experiment V3、正式Market Data或既有研究准入
+
+### 背景
+
+项目已有较强数据和执行治理，但尚无一次真实数据驱动的连续业务回放。用户明确把本阶段目标改为业务链验证，并接受当前60只样本的非PIT性质，前提是所有研究、Paper、交易和LIVE权限继续关闭。
+
+### 决策
+
+- 新策略固定为`a-share-technical-shadow-mvp-v1`、`business_loop_validation`、`heuristic_shadow_baseline`；Paper、trade、real-money、automatic order和LIVE全部为false。
+- 冻结2026-08-18当前成分诊断样本的精确60只证券及原`sample_content_sha256`，明确不声称历史PIT中证800。
+- 因子沿用既有六项技术诊断公式，只增加冻结的横截面1%/99%去极值、总体Z-score、固定方向等权排名及Entry/Hold阈值；无LLM调用、训练系数或结果后调参。
+- Exposure只使用真实`000906.SH`价格指数趋势、样本宽度、基准已实现波动和账户回撤；四档目标固定为0/0.30/0.60/1.00，输入失败立即RISK_OFF。
+- 为避免改变正式Market Data V1契约，新增策略专用薄采集器，复用BaoStock代码映射和错误处理，并只为本Shadow请求`isST`；它不能注册为正式Provider或向其他研究链授予准入。
+- D收盘形成目标，D+1真实开盘加固定单边滑点模拟成交，卖出优先、买入按排名、整手和现金约束执行，D+1真实收盘估值；只写create-only本地证据，不产生订单。
+
+### 证据与真源
+
+- [冻结策略配置](../configs/a_share_technical_shadow_mvp.v1.json)
+- [Alpha模块](../research/strategy_workspace/technical_alpha_shadow_v1.py)
+- [Exposure模块](../research/strategy_workspace/technical_exposure_shadow_v1.py)
+- [回放入口](../operations/run_technical_shadow_mvp.py)
+- [业务关键测试](../tests/test_technical_shadow_mvp.py)
+- [当前状态](STATUS.md)
+
+### 放弃的方案
+
+- 修改正式BaoStock Provider或实现Market Data V2：超出本轮最小业务闭环，且会扩大既有契约回归面。
+- 用旧Choice归档、Tushare、fixture或合成价格补足本次真实运行：会违背真实BaoStock完成标准。
+- 为制造交易降低Entry/Hold阈值、仓位约束或成本：零交易本来就是合法结果。
+
+### 后果与取舍
+
+该实现可在BaoStock恢复后直接跑出完整本地Shadow账本，但不证明Alpha有效、PIT正确或可交易。2026-08-26真实CLI两次均在官方SDK登录前失败，未进入数据查询，故当前只有实现和离线测试证据，业务闭环仍未完成。
+
+### 重新评估条件
+
+只有标准CLI从真实BaoStock完成60只股票、真实基准和至少121个共同交易日采集，并生成可复核的连续10日create-only账本后，才可把本业务闭环标为完成。任何研究准入、Paper或交易升级仍需独立决策。
+
+### 同日后续验证
+
+首次失败由运行解释器仍安装`baostock 0.8.9`并连接旧主机导致。将项目可选依赖最低版本固定为`baostock>=0.9.3`、升级实际解释器，并补入`000906.SH -> sh.000906`映射后，标准CLI已通过官方SDK完成真实60股、真实基准及10日连续回放。最终create-only目录为`data/tmp/technical-shadow-mvp/20260826T131026+0800-269b6c81/`，manifest文件SHA-256为`8125dfd4f1d45f21b9db041246a89612bd2e598cca4a07d0fdfcde679e24e7ae`；60/60股票数据完整、10/10日`RISK_OFF_CASH`、零交易、`DATA_FAIL_CLOSED=false`。该验证满足本决策的业务闭环条件，但不改变任何研究或执行准入。
 
 ## 新增记录模板
 

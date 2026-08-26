@@ -1,0 +1,86 @@
+{
+  "schema_version": "a-share-technical-shadow-mvp-policy.v1",
+  "strategy_id": "a-share-technical-shadow-mvp-v1",
+  "purpose": "business_loop_validation",
+  "research_status": "heuristic_shadow_baseline",
+  "universe": {
+    "basis": "frozen_20260818_current_csi800_diagnostic_sample_not_historical_pit",
+    "source_sample_content_sha256": "f5cd2725ef42906889e7ae23336fc4b1e355d7ada5b47d44ab0c4b42e3ad1723",
+    "instrument_ids": [
+      "603786.SH", "600741.SH", "688615.SH", "601112.SH", "688361.SH",
+      "601118.SH", "601555.SH", "600060.SH", "300570.SZ", "600583.SH",
+      "000728.SZ", "300223.SZ", "300073.SZ", "601696.SH", "601615.SH",
+      "688343.SH", "600985.SH", "600685.SH", "601633.SH", "601728.SH",
+      "002179.SZ", "600549.SH", "603816.SH", "002241.SZ", "600536.SH",
+      "601818.SH", "600085.SH", "600519.SH", "601766.SH", "002432.SZ",
+      "600004.SH", "603369.SH", "300003.SZ", "600161.SH", "000596.SZ",
+      "600483.SH", "600900.SH", "600111.SH", "600362.SH", "600521.SH",
+      "688065.SH", "600027.SH", "600600.SH", "600958.SH", "002558.SZ",
+      "600095.SH", "600930.SH", "600131.SH", "601016.SH", "000858.SZ",
+      "002353.SZ", "688387.SH", "601001.SH", "300548.SZ", "600348.SH",
+      "600606.SH", "002244.SZ", "600208.SH", "001979.SZ", "000002.SZ"
+    ]
+  },
+  "data": {
+    "provider_id": "baostock",
+    "provider_kind": "real_provider",
+    "benchmark_id": "000906.SH",
+    "benchmark_description": "CSI 800 price index, unadjusted, real BaoStock observations",
+    "price_adjustment": "none",
+    "minimum_common_sessions": 121,
+    "calendar_lookback_days": 420,
+    "mock_forbidden_in_real_run": true,
+    "zero_fill_forbidden": true
+  },
+  "alpha": {
+    "factor_ids": ["RM20", "RM60", "RM120", "TREND_EFF60", "DOWNSIDE_VOL60", "BREAKOUT60"],
+    "winsor_lower_quantile": 0.01,
+    "winsor_upper_quantile": 0.99,
+    "zscore_ddof": 0,
+    "directions": {"RM20": 1, "RM60": 1, "RM120": 1, "TREND_EFF60": 1, "DOWNSIDE_VOL60": -1, "BREAKOUT60": 1},
+    "entry_score_min_exclusive": 0,
+    "entry_percentile_min": 0.90,
+    "hold_score_min_exclusive": 0,
+    "hold_percentile_min": 0.70
+  },
+  "exposure": {
+    "benchmark_trend_sessions": 60,
+    "breadth_trend_sessions": 60,
+    "realized_vol_sessions": 20,
+    "annualization_sessions": 252,
+    "risk_off": {"benchmark_trend_max": 0, "breadth_max": 0.40, "account_drawdown_max_loss": -0.10},
+    "defensive": {"breadth_trigger_below": 0.50, "realized_vol_max": 0.30, "account_drawdown_max_loss": -0.07},
+    "risk_on": {"benchmark_trend_min": 0, "breadth_min": 0.60, "realized_vol_max": 0.20, "account_drawdown_min": -0.03},
+    "gross_exposure": {"RISK_OFF": 0, "DEFENSIVE": 0.30, "NEUTRAL": 0.60, "RISK_ON": 1.00},
+    "failure_state": "RISK_OFF"
+  },
+  "portfolio": {
+    "initial_cash": 10000,
+    "max_positions": 3,
+    "max_position_weight": 0.40,
+    "lot_size": 100,
+    "leverage_allowed": false,
+    "short_selling_allowed": false,
+    "candidate_shortage_policy": "preserve_cash"
+  },
+  "costs": {
+    "commission_rate": 0.00018,
+    "minimum_commission": 5,
+    "sell_tax_rate": 0.0005,
+    "transfer_fee_rate_both_sides": 0.00001,
+    "slippage_bps_one_way": 10
+  },
+  "execution": {
+    "decision_time": "D_close",
+    "simulated_fill_time": "D_plus_1_open",
+    "valuation_time": "D_plus_1_close",
+    "automatic_order_submission": false
+  },
+  "safety": {
+    "paper_eligibility": false,
+    "trade_eligibility": false,
+    "real_money_list_allowed": false,
+    "automatic_order_submission": false,
+    "live_supported": false
+  }
+}

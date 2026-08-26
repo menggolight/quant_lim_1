@@ -26,7 +26,7 @@ CHINA_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
 _NORMALIZED = re.compile(r"^(?P<code>[0-9]{6})\.(?P<market>SH|SZ)$")
 _BAOSTOCK = re.compile(r"^(?P<market>sh|sz)\.(?P<code>[0-9]{6})$")
 _SH_INDEX_CODES = frozenset(
-    {"000001", "000016", "000300", "000688", "000852", "000905"}
+    {"000001", "000016", "000300", "000688", "000852", "000905", "000906"}
 )
 _SH_A_SHARE_PREFIXES = ("600", "601", "603", "605", "688", "689")
 _SZ_A_SHARE_PREFIXES = ("000", "001", "002", "003", "300", "301")
