@@ -9,12 +9,14 @@ from __future__ import annotations
 import argparse
 import importlib
 import json
+import math
+import time as time_module
 from dataclasses import dataclass
 from datetime import date, datetime, time, timedelta
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
-from typing import Any, Mapping, Sequence
+from typing import Any, Callable, Mapping, Sequence
 
 from operations.run_technical_shadow_mvp import (
     ALPHA_LOOKBACK_SESSIONS,
@@ -36,7 +38,7 @@ from operations.run_technical_shadow_mvp import (
     _plan_targets,
     validate_source_provenance,
 )
-from research.market_data.providers.baostock import BaoStockProvider
+from research.market_data.providers.baostock import BaoStockProvider, to_baostock_code
 from research.strategy_workspace.technical_alpha_shadow_v1 import (
     rank_technical_alpha_shadow,
 )
@@ -47,11 +49,16 @@ from research.strategy_workspace.technical_exposure_shadow_v1 import (
 
 DEFAULT_CONFIG = Path("configs/a_share_technical_shadow_mvp.v1.json")
 DEFAULT_SEED = Path("configs/technical_shadow_daily_seed.v1.json")
-DEFAULT_OUTPUT_ROOT = Path("data/tmp/technical-shadow-daily")
+DEFAULT_STATE_ROOT = Path("data/portfolio/technical-shadow-daily")
+DEFAULT_REPORT_ROOT = Path("data/tmp/technical-shadow-daily")
+LEGACY_INITIAL_STATE_DATE = date(2026, 8, 25)
 SHADOW_ACCOUNT_ID = "technical-shadow-account-v1"
 MODE = "stateful_daily"
 DECISION_CUTOFF = time(15, 30)
 EXECUTION_OPEN = time(9, 30)
+DEFAULT_READY_WAIT_MINUTES = 120
+DEFAULT_POLL_INTERVAL_SECONDS = 300
+DEFAULT_MAX_POLLS = 25
 DAILY_SAFETY = {
     "strategy_signal": False,
     "alpha_evidence": False,
@@ -84,6 +91,20 @@ class NextSessionEvidence:
     execution_date: date
     receipt: Mapping[str, Any]
     execution_window_status: str = "OPEN"
+
+
+@dataclass(frozen=True)
+class ReadinessResult:
+    status: str
+    state_date: date
+    latest_completed_trading_date: date | None
+    latest_benchmark_date: date | None
+    strategy_date: date | None
+    execution_date: date | None
+    checked_at: datetime
+    deadline_at: datetime | None
+    reason_codes: tuple[str, ...]
+    receipt: Mapping[str, Any]
 
 
 def _file_sha256(path: Path) -> str:
@@ -151,7 +172,7 @@ def _load_seed(path: Path, config: Mapping[str, Any]) -> dict[str, Any]:
     return seed
 
 
-def _verified_slot(path: Path) -> tuple[dict[str, Any], str]:
+def _verified_legacy_slot(path: Path) -> tuple[dict[str, Any], str]:
     manifest_path = path / "manifest.json"
     if not manifest_path.is_file():
         raise TechnicalShadowDailyError(f"partial_daily_slot_requires_manual_recovery:{path}")
@@ -232,59 +253,380 @@ def _latest_data_complete_capture(
     )
 
 
-def _load_previous_context(
-    *, strategy_date: date, output_root: Path, seed_path: Path,
-    config: Mapping[str, Any], previous_session: date,
-) -> tuple[dict[str, Any], dict[str, Any] | None, dict[str, Any]]:
-    seed = _load_seed(seed_path, config)
-    seed_state = dict(seed["state"])
-    seed_date = date.fromisoformat(str(seed_state["state_date"]))
-    if strategy_date < seed_date:
-        raise TechnicalShadowDailyError("strategy_date_precedes_controlled_seed")
-    if strategy_date == seed_date:
-        return seed_state, None, {
-            "kind": "controlled_seed_same_close",
-            "seed_sha256": _file_sha256(seed_path),
-            "bootstrap": seed["bootstrap"],
-        }
+PERSISTENT_ARTIFACTS = {
+    "state.json", "next_session_plan.json", "prior_plan_application.json",
+    "lineage.json",
+}
 
-    committed: list[tuple[date, Path]] = []
-    if output_root.exists():
-        for child in output_root.iterdir():
-            if not child.is_dir():
-                continue
-            try:
-                child_date = date.fromisoformat(child.name)
-            except ValueError:
-                continue
-            if child_date < strategy_date:
-                committed.append((child_date, child))
-    if not committed:
-        if previous_session != seed_date:
-            raise TechnicalShadowDailyError("daily_state_gap_after_seed")
-        return seed_state, None, {
-            "kind": "controlled_seed_cash_carry_forward_without_prior_plan",
-            "seed_sha256": _file_sha256(seed_path),
-            "bootstrap": seed["bootstrap"],
-            "reason_code": "NO_PRIOR_DAILY_PLAN_NO_RETROSPECTIVE_EXECUTION",
+
+def _verified_persistent_slot(path: Path) -> tuple[dict[str, Any], str]:
+    manifest_path = path / "manifest.json"
+    if not manifest_path.is_file():
+        raise TechnicalShadowDailyError(
+            f"partial_persistent_slot_requires_manual_recovery:{path}"
+        )
+    manifest = _json(manifest_path)
+    if manifest.get("schema_version") != "technical-shadow-persistent-state-manifest.v1":
+        raise TechnicalShadowDailyError("persistent_manifest_schema_mismatch")
+    manifest_base = {
+        key: value for key, value in manifest.items()
+        if key != "manifest_payload_sha256"
+    }
+    if manifest.get("manifest_payload_sha256") != _digest(manifest_base):
+        raise TechnicalShadowDailyError("persistent_manifest_payload_sha256_mismatch")
+    if (
+        manifest.get("strategy_id") != STRATEGY_ID
+        or manifest.get("shadow_account_id") != SHADOW_ACCOUNT_ID
+        or manifest.get("mode") != MODE
+        or manifest.get("safety") != DAILY_SAFETY
+        or manifest.get("automatic_order_submission") is not False
+    ):
+        raise TechnicalShadowDailyError("persistent_manifest_identity_or_safety_mismatch")
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, dict) or set(artifacts) != PERSISTENT_ARTIFACTS:
+        raise TechnicalShadowDailyError("persistent_manifest_artifact_contract_mismatch")
+    actual_files = {
+        artifact.relative_to(path).as_posix()
+        for artifact in path.rglob("*") if artifact.is_file()
+    }
+    if actual_files != PERSISTENT_ARTIFACTS | {"manifest.json"}:
+        raise TechnicalShadowDailyError("persistent_manifest_artifact_set_mismatch")
+    for relative, expected in artifacts.items():
+        artifact = path / relative
+        if _file_sha256(artifact) != expected:
+            raise TechnicalShadowDailyError(
+                f"persistent_artifact_integrity_failed:{relative}"
+            )
+    state = _json(path / "state.json")
+    state_base = {key: value for key, value in state.items() if key != "record_sha256"}
+    if state.get("record_sha256") != _digest(state_base):
+        raise TechnicalShadowDailyError("persistent_state_record_sha256_mismatch")
+    plan = _json(path / "next_session_plan.json")
+    plan_base = {key: value for key, value in plan.items() if key != "plan_payload_sha256"}
+    if plan.get("plan_payload_sha256") != _digest(plan_base):
+        raise TechnicalShadowDailyError("persistent_plan_payload_sha256_mismatch")
+    application = _json(path / "prior_plan_application.json")
+    lineage = _json(path / "lineage.json")
+    slot_date = date.fromisoformat(path.name)
+    if (
+        state.get("state_date") != slot_date.isoformat()
+        or plan.get("decision_date") != slot_date.isoformat()
+        or manifest.get("state_date") != slot_date.isoformat()
+        or manifest.get("account_record_sha256") != state.get("record_sha256")
+        or manifest.get("plan_payload_sha256") != plan.get("plan_payload_sha256")
+        or state.get("prior_plan_application_sha256") != _digest(application)
+        or plan.get("based_on_account_record_sha256") != state.get("record_sha256")
+        or lineage.get("state_date") != slot_date.isoformat()
+        or state.get("safety") != DAILY_SAFETY
+        or plan.get("safety") != DAILY_SAFETY
+        or plan.get("automatic_order_submission") is not False
+        or manifest.get("previous_trading_date")
+        != state.get("previous_trading_date")
+        or manifest.get("previous_record_sha256")
+        != state.get("previous_record_sha256")
+        or manifest.get("lineage_kind") != lineage.get("kind")
+        or manifest.get("execution_date") != plan.get("execution_date")
+        or plan.get("valid_only_for_execution_date") != plan.get("execution_date")
+        or application.get("execution_date") != state.get("state_date")
+        or application.get("decision_date") != state.get("previous_trading_date")
+        or lineage.get("schema_version")
+        != "technical-shadow-persistent-lineage.v1"
+        or lineage.get("strategy_id") != STRATEGY_ID
+        or lineage.get("shadow_account_id") != SHADOW_ACCOUNT_ID
+        or lineage.get("mode") != MODE
+        or lineage.get("safety") != DAILY_SAFETY
+    ):
+        raise TechnicalShadowDailyError("persistent_state_plan_manifest_binding_mismatch")
+    if lineage.get("kind") == "verified_legacy_slot_migration":
+        source_artifacts = lineage.get("source_artifacts")
+        if not isinstance(source_artifacts, dict) or any(
+            artifacts[name] != source_artifacts.get(name)
+            for name in (
+                "state.json", "next_session_plan.json",
+                "prior_plan_application.json",
+            )
+        ):
+            raise TechnicalShadowDailyError("persistent_genesis_source_hash_mismatch")
+    generated_at = manifest.get("generated_at")
+    execution_open_at = manifest.get("execution_open_at")
+    if generated_at is not None or execution_open_at is not None:
+        if not isinstance(generated_at, str) or not isinstance(execution_open_at, str):
+            raise TechnicalShadowDailyError("persistent_forward_time_binding_incomplete")
+        generated = datetime.fromisoformat(generated_at)
+        execution_open = datetime.fromisoformat(execution_open_at)
+        if generated.tzinfo is None or execution_open.tzinfo is None or generated >= execution_open:
+            raise TechnicalShadowDailyError("persistent_forward_window_not_open")
+        if (
+            plan.get("generated_at") != generated_at
+            or plan.get("execution_open_at") != execution_open_at
+            or plan.get("execution_window_status") != "OPEN"
+            or manifest.get("execution_window_status") != "OPEN"
+        ):
+            raise TechnicalShadowDailyError("persistent_forward_plan_time_mismatch")
+    return manifest, _file_sha256(manifest_path)
+
+
+def _verified_state_chain(
+    state_root: Path, *, expected_config_sha256: str | None = None,
+) -> list[tuple[date, Path, dict[str, Any], str]]:
+    if not state_root.is_dir():
+        raise TechnicalShadowDailyError("persistent_state_not_initialized")
+    children = list(state_root.iterdir())
+    if not children:
+        raise TechnicalShadowDailyError("persistent_state_not_initialized")
+    slots: list[tuple[date, Path, dict[str, Any], str]] = []
+    for child in children:
+        if not child.is_dir():
+            raise TechnicalShadowDailyError("persistent_state_root_unknown_content")
+        try:
+            slot_date = date.fromisoformat(child.name)
+        except ValueError as exc:
+            raise TechnicalShadowDailyError("persistent_state_root_unknown_content") from exc
+        manifest, manifest_sha = _verified_persistent_slot(child)
+        if (
+            expected_config_sha256 is not None
+            and manifest.get("config_sha256") != expected_config_sha256
+        ):
+            raise TechnicalShadowDailyError("persistent_config_sha256_mismatch")
+        slots.append((slot_date, child, manifest, manifest_sha))
+    slots.sort(key=lambda item: item[0])
+    for index, (slot_date, slot, _manifest, _manifest_sha) in enumerate(slots):
+        lineage = _json(slot / "lineage.json")
+        if index == 0:
+            if (
+                slot_date != LEGACY_INITIAL_STATE_DATE
+                or lineage.get("kind") != "verified_legacy_slot_migration"
+                or lineage.get("source_manifest_sha256")
+                != _manifest.get("report_manifest_sha256")
+            ):
+                raise TechnicalShadowDailyError("persistent_genesis_lineage_mismatch")
+            continue
+        previous_date, previous_slot, previous_manifest, previous_manifest_sha = slots[index - 1]
+        state = _json(slot / "state.json")
+        previous_state = _json(previous_slot / "state.json")
+        if (
+            lineage.get("kind") != "previous_persistent_state"
+            or lineage.get("previous_state_date") != previous_date.isoformat()
+            or lineage.get("previous_manifest_sha256") != previous_manifest_sha
+            or lineage.get("previous_state_sha256") != _file_sha256(previous_slot / "state.json")
+            or lineage.get("previous_plan_sha256") != _file_sha256(previous_slot / "next_session_plan.json")
+            or lineage.get("previous_record_sha256") != previous_state.get("record_sha256")
+            or state.get("previous_trading_date") != previous_date.isoformat()
+            or state.get("previous_record_sha256") != previous_state.get("record_sha256")
+            or previous_manifest.get("state_date") != previous_date.isoformat()
+            or _manifest.get("config_sha256") != previous_manifest.get("config_sha256")
+            or lineage.get("previous_config_sha256")
+            != previous_manifest.get("config_sha256")
+        ):
+            raise TechnicalShadowDailyError("persistent_hash_chain_mismatch")
+    return slots
+
+
+def _workspace_relative(path: Path) -> str:
+    resolved = path.resolve()
+    try:
+        return resolved.relative_to(Path.cwd().resolve()).as_posix()
+    except ValueError as exc:
+        raise TechnicalShadowDailyError("migration_source_must_be_inside_workspace") from exc
+
+
+def _write_complete_slot(
+    *, root: Path, payloads: Mapping[str, Any], manifest: Mapping[str, Any],
+    verifier: Callable[[Path], tuple[dict[str, Any], str]],
+) -> tuple[str, bool]:
+    expected = {name: _payload_bytes(value) for name, value in payloads.items()}
+    expected["manifest.json"] = _payload_bytes(manifest)
+    if root.exists():
+        verifier(root)
+        actual = {
+            path.relative_to(root).as_posix()
+            for path in root.rglob("*") if path.is_file()
         }
-    previous_date, previous_root = max(committed)
-    manifest, manifest_sha = _verified_slot(previous_root)
+        if actual != set(expected):
+            raise TechnicalShadowDailyError("immutable_conflict:file_set_changed")
+        for relative, raw in expected.items():
+            if (root / relative).read_bytes() != raw:
+                raise TechnicalShadowDailyError(f"immutable_conflict:{relative}")
+        return _file_sha256(root / "manifest.json"), True
+    root.parent.mkdir(parents=True, exist_ok=True)
+    try:
+        root.mkdir(exist_ok=False)
+    except FileExistsError as exc:
+        raise TechnicalShadowDailyError("daily_slot_reservation_conflict") from exc
+    for relative in sorted(payloads):
+        with (root / relative).open("xb") as stream:
+            stream.write(expected[relative])
+    with (root / "manifest.json").open("xb") as stream:
+        stream.write(expected["manifest.json"])
+    _verified, verified_sha = verifier(root)
+    return verified_sha, False
+
+
+def initialize_persistent_state(
+    *, source_slot: Path, state_root: Path, config: Mapping[str, Any],
+) -> tuple[Path, dict[str, Any]]:
+    if source_slot.name != LEGACY_INITIAL_STATE_DATE.isoformat():
+        raise TechnicalShadowDailyError("migration_requires_controlled_2026_08_25_slot")
+    legacy_manifest, legacy_manifest_sha = _verified_legacy_slot(source_slot)
+    if legacy_manifest.get("config_sha256") != _digest(config):
+        raise TechnicalShadowDailyError("migration_config_sha256_mismatch")
+    legacy_state = _json(source_slot / "state.json")
+    legacy_plan = _json(source_slot / "next_session_plan.json")
+    if (
+        legacy_manifest.get("strategy_date")
+        != LEGACY_INITIAL_STATE_DATE.isoformat()
+        or legacy_state.get("state_date")
+        != LEGACY_INITIAL_STATE_DATE.isoformat()
+        or legacy_plan.get("decision_date")
+        != LEGACY_INITIAL_STATE_DATE.isoformat()
+        or legacy_manifest.get("account_record_sha256")
+        != legacy_state.get("record_sha256")
+        or legacy_plan.get("based_on_account_record_sha256")
+        != legacy_state.get("record_sha256")
+    ):
+        raise TechnicalShadowDailyError("migration_source_date_or_binding_mismatch")
+    target = state_root / LEGACY_INITIAL_STATE_DATE.isoformat()
+    if state_root.exists():
+        children = list(state_root.iterdir())
+        if children and (len(children) != 1 or children[0].resolve() != target.resolve()):
+            raise TechnicalShadowDailyError("migration_requires_empty_persistent_root")
+        if target.exists():
+            manifest, manifest_sha = _verified_persistent_slot(target)
+            lineage = _json(target / "lineage.json")
+            if (
+                lineage.get("source_manifest_sha256") != legacy_manifest_sha
+                or manifest.get("config_sha256") != _digest(config)
+                or any(
+                    _file_sha256(target / name)
+                    != legacy_manifest["artifacts"].get(name)
+                    for name in (
+                        "state.json", "next_session_plan.json",
+                        "prior_plan_application.json",
+                    )
+                )
+            ):
+                raise TechnicalShadowDailyError("immutable_conflict:migration_source_changed")
+            return target, {
+                "status": "already_initialized",
+                "state_date": LEGACY_INITIAL_STATE_DATE.isoformat(),
+                "persistent_state_directory": str(target.resolve()),
+                "manifest_sha256": manifest_sha,
+                "automatic_order_submission": False,
+            }
+    copied_names = (
+        "state.json", "next_session_plan.json", "prior_plan_application.json",
+    )
+    payloads: dict[str, Any] = {}
+    for name in copied_names:
+        raw = (source_slot / name).read_bytes()
+        if sha256(raw).hexdigest() != legacy_manifest["artifacts"].get(name):
+            raise TechnicalShadowDailyError(f"migration_source_changed_after_verify:{name}")
+        payloads[name] = raw
+    lineage = {
+        "schema_version": "technical-shadow-persistent-lineage.v1",
+        "strategy_id": STRATEGY_ID,
+        "shadow_account_id": SHADOW_ACCOUNT_ID,
+        "mode": MODE,
+        "kind": "verified_legacy_slot_migration",
+        "state_date": LEGACY_INITIAL_STATE_DATE.isoformat(),
+        "source_slot": _workspace_relative(source_slot),
+        "source_manifest_sha256": legacy_manifest_sha,
+        "source_manifest_payload_sha256": legacy_manifest["manifest_payload_sha256"],
+        "source_artifacts": legacy_manifest["artifacts"],
+        "source_predecessor": legacy_manifest["predecessor"],
+        "safety": DAILY_SAFETY,
+    }
+    payloads["lineage.json"] = lineage
+    artifacts = {
+        name: sha256(_payload_bytes(value)).hexdigest()
+        for name, value in sorted(payloads.items())
+    }
+    state = _json(source_slot / "state.json")
+    plan = _json(source_slot / "next_session_plan.json")
+    manifest_base = {
+        "schema_version": "technical-shadow-persistent-state-manifest.v1",
+        "strategy_id": STRATEGY_ID,
+        "shadow_account_id": SHADOW_ACCOUNT_ID,
+        "mode": MODE,
+        "state_date": LEGACY_INITIAL_STATE_DATE.isoformat(),
+        "execution_date": plan["execution_date"],
+        "config_sha256": _digest(config),
+        "account_record_sha256": state["record_sha256"],
+        "plan_payload_sha256": plan["plan_payload_sha256"],
+        "previous_trading_date": state["previous_trading_date"],
+        "previous_record_sha256": state["previous_record_sha256"],
+        "lineage_kind": "verified_legacy_slot_migration",
+        "artifacts": artifacts,
+        "report_manifest_kind": "technical-shadow-daily-manifest.v1",
+        "report_manifest_sha256": legacy_manifest_sha,
+        "generated_at": None,
+        "execution_open_at": None,
+        "historical_pit_csi800": False,
+        "automatic_order_submission": False,
+        "safety": DAILY_SAFETY,
+    }
+    manifest = dict(manifest_base)
+    manifest["manifest_payload_sha256"] = _digest(manifest_base)
+    if _file_sha256(source_slot / "manifest.json") != legacy_manifest_sha:
+        raise TechnicalShadowDailyError("migration_source_manifest_changed_after_verify")
+    manifest_sha, _ = _write_complete_slot(
+        root=target, payloads=payloads, manifest=manifest,
+        verifier=_verified_persistent_slot,
+    )
+    return target, {
+        "status": "initialized",
+        "state_date": LEGACY_INITIAL_STATE_DATE.isoformat(),
+        "persistent_state_directory": str(target.resolve()),
+        "manifest_sha256": manifest_sha,
+        "automatic_order_submission": False,
+    }
+
+
+def _load_previous_context(
+    *, strategy_date: date, state_root: Path, previous_session: date,
+    config_sha256: str,
+) -> tuple[dict[str, Any], dict[str, Any], dict[str, Any]]:
+    slots = _verified_state_chain(
+        state_root, expected_config_sha256=config_sha256
+    )
+    if slots[-1][0] > strategy_date:
+        raise TechnicalShadowDailyError("strategy_date_precedes_persistent_head")
+    prior_slots = [item for item in slots if item[0] < strategy_date]
+    if not prior_slots:
+        raise TechnicalShadowDailyError("strategy_date_has_no_persistent_predecessor")
+    previous_date, previous_root, manifest, manifest_sha = prior_slots[-1]
     state = _json(previous_root / "state.json")
     plan = _json(previous_root / "next_session_plan.json")
-    if date.fromisoformat(str(state["state_date"])) != previous_date:
-        raise TechnicalShadowDailyError("previous_state_date_mismatch")
-    if plan.get("decision_date") != previous_date.isoformat():
-        raise TechnicalShadowDailyError("previous_plan_decision_date_mismatch")
-    if plan.get("execution_date") != strategy_date.isoformat():
+    flat_cash_gap = (
+        previous_date != previous_session
+        and state.get("positions") == {}
+        and plan.get("plan_status") == "NO_ACTION_CASH"
+        and date.fromisoformat(str(plan.get("execution_date"))) < strategy_date
+        and plan.get("target_positions") == {}
+        and not any(
+            row.get("action") in {"BUY", "SELL"}
+            for row in plan.get("actions", [])
+        )
+    )
+    if previous_date != previous_session and not flat_cash_gap:
+        raise TechnicalShadowDailyError("daily_state_gap_after_persistent_head")
+    if slots[-1][0] not in {previous_date, strategy_date}:
+        raise TechnicalShadowDailyError("persistent_head_date_conflict")
+    if (
+        plan.get("execution_date") != strategy_date.isoformat()
+        and not flat_cash_gap
+    ):
         raise TechnicalShadowDailyError("daily_state_gap_or_plan_execution_mismatch")
-    if manifest.get("strategy_date") != previous_date.isoformat():
-        raise TechnicalShadowDailyError("previous_manifest_date_mismatch")
     return state, plan, {
-        "kind": "previous_daily_commit",
+        "kind": "previous_persistent_state",
+        "previous_state_date": previous_date.isoformat(),
         "previous_manifest_sha256": manifest_sha,
         "previous_state_sha256": _file_sha256(previous_root / "state.json"),
         "previous_plan_sha256": _file_sha256(previous_root / "next_session_plan.json"),
+        "previous_record_sha256": state["record_sha256"],
+        "previous_manifest_payload_sha256": manifest["manifest_payload_sha256"],
+        "previous_config_sha256": manifest["config_sha256"],
+        "flat_cash_gap": flat_cash_gap,
     }
 
 
@@ -327,9 +669,261 @@ def query_next_baostock_session(*, after_date: date) -> NextSessionEvidence:
             pass
 
 
+def check_baostock_readiness(
+    *, state_date: date, state_record_sha256: str, benchmark_id: str,
+    now: datetime, allow_flat_cash_gap: bool = False,
+    sdk_loader: Callable[[str], Any] = importlib.import_module,
+) -> ReadinessResult:
+    if now.tzinfo is None:
+        raise TechnicalShadowDailyError("readiness_now_timezone_required")
+    checked_at = now.astimezone(CHINA_TZ)
+    completed_through = (
+        checked_at.date()
+        if checked_at.time() >= DECISION_CUTOFF
+        else checked_at.date() - timedelta(days=1)
+    )
+    sdk = sdk_loader("baostock")
+    calendar_fields: list[str] = []
+    calendar_rows: list[list[str]] = []
+    benchmark_fields: list[str] = []
+    benchmark_rows: list[list[str]] = []
+    logged_in = False
+    try:
+        login = sdk.login()
+        BaoStockProvider._check_result(login, "login")
+        logged_in = True
+        calendar_end = max(checked_at.date(), state_date) + timedelta(days=14)
+        calendar_result = sdk.query_trade_dates(
+            start_date=state_date.isoformat(), end_date=calendar_end.isoformat()
+        )
+        calendar_fields, calendar_rows = BaoStockProvider._query_rows(
+            calendar_result, "query_trade_dates:technical_shadow_readiness"
+        )
+        if calendar_fields != ["calendar_date", "is_trading_day"]:
+            raise TechnicalShadowDailyError("baostock_readiness_calendar_contract_changed")
+        benchmark_end = max(state_date, completed_through)
+        benchmark_result = sdk.query_history_k_data_plus(
+            to_baostock_code(benchmark_id),
+            "date,code,close,tradestatus",
+            start_date=state_date.isoformat(),
+            end_date=benchmark_end.isoformat(),
+            frequency="d", adjustflag="3",
+        )
+        benchmark_fields, benchmark_rows = BaoStockProvider._query_rows(
+            benchmark_result, "query_history:technical_shadow_readiness_benchmark"
+        )
+        if benchmark_fields != ["date", "code", "close", "tradestatus"]:
+            raise TechnicalShadowDailyError("baostock_readiness_benchmark_contract_changed")
+    except Exception as exc:
+        receipt = {
+            "schema_version": "technical-shadow-data-readiness-receipt.v1",
+            "provider_id": "baostock", "provider_kind": "real_provider",
+            "state_date": state_date.isoformat(),
+            "state_record_sha256": state_record_sha256,
+            "benchmark_id": benchmark_id,
+            "checked_at": checked_at.isoformat(),
+            "completed_through": completed_through.isoformat(),
+            "request_count": int(logged_in),
+            "error_type": type(exc).__name__,
+            "automatic_order_submission": False,
+        }
+        return ReadinessResult(
+            status="DATA_NOT_READY", state_date=state_date,
+            latest_completed_trading_date=None, latest_benchmark_date=None,
+            strategy_date=None, execution_date=None, checked_at=checked_at,
+            deadline_at=None,
+            reason_codes=("readiness_provider_or_contract_failure",),
+            receipt=receipt,
+        )
+    finally:
+        if logged_in:
+            try:
+                sdk.logout()
+            except Exception:
+                pass
+
+    calendar_dates: list[date] = []
+    all_calendar_dates: list[date] = []
+    seen_calendar: set[date] = set()
+    for raw in calendar_rows:
+        row = dict(zip(calendar_fields, raw, strict=True))
+        day = date.fromisoformat(row["calendar_date"])
+        if day in seen_calendar:
+            raise TechnicalShadowDailyError("readiness_calendar_duplicate_date")
+        seen_calendar.add(day)
+        all_calendar_dates.append(day)
+        if row["is_trading_day"] == "1":
+            calendar_dates.append(day)
+        elif row["is_trading_day"] != "0":
+            raise TechnicalShadowDailyError("readiness_calendar_flag_invalid")
+    if all_calendar_dates != sorted(all_calendar_dates):
+        raise TechnicalShadowDailyError("readiness_calendar_dates_unsorted")
+    if state_date not in calendar_dates:
+        raise TechnicalShadowDailyError("persistent_state_date_not_in_trade_calendar")
+    benchmark_dates: list[date] = []
+    benchmark_status: dict[date, str] = {}
+    benchmark_close: dict[date, str] = {}
+    expected_code = to_baostock_code(benchmark_id)
+    for raw in benchmark_rows:
+        row = dict(zip(benchmark_fields, raw, strict=True))
+        if row["code"] != expected_code:
+            raise TechnicalShadowDailyError("readiness_benchmark_code_mismatch")
+        day = date.fromisoformat(row["date"])
+        if day in benchmark_status:
+            raise TechnicalShadowDailyError("readiness_benchmark_duplicate_date")
+        try:
+            close = float(row["close"])
+        except (TypeError, ValueError) as exc:
+            raise TechnicalShadowDailyError("readiness_benchmark_close_invalid") from exc
+        if not math.isfinite(close) or close <= 0:
+            raise TechnicalShadowDailyError("readiness_benchmark_close_invalid")
+        benchmark_dates.append(day)
+        benchmark_status[day] = row["tradestatus"]
+        benchmark_close[day] = row["close"]
+    if benchmark_dates != sorted(benchmark_dates):
+        raise TechnicalShadowDailyError("readiness_benchmark_dates_unsorted")
+    latest_benchmark = benchmark_dates[-1] if benchmark_dates else None
+    completed_sessions = [day for day in calendar_dates if day <= completed_through]
+    latest_completed = completed_sessions[-1] if completed_sessions else None
+    new_completed = [day for day in completed_sessions if day > state_date]
+    status = "DATA_NOT_READY"
+    strategy_date: date | None = None
+    execution_date: date | None = None
+    reasons: tuple[str, ...]
+    if latest_benchmark is not None and latest_benchmark < state_date:
+        reasons = ("benchmark_behind_persistent_state",)
+    elif not new_completed and latest_benchmark == state_date:
+        status = "ALREADY_PROCESSED"
+        reasons = ("no_new_completed_trading_session",)
+    elif len(new_completed) > 1 and not allow_flat_cash_gap:
+        reasons = ("persistent_state_gap_requires_manual_recovery",)
+    elif new_completed:
+        candidate = new_completed[-1]
+        next_sessions = [day for day in calendar_dates if day > candidate]
+        if latest_benchmark != candidate:
+            reasons = ("benchmark_not_published_for_new_session",)
+        elif candidate not in benchmark_status or benchmark_status[candidate] != "1":
+            reasons = ("benchmark_session_not_trading",)
+        elif not next_sessions:
+            reasons = ("next_trading_session_unavailable",)
+        else:
+            next_session = next_sessions[0]
+            execution_open = datetime.combine(next_session, EXECUTION_OPEN, CHINA_TZ)
+            if checked_at >= execution_open:
+                reasons = ("execution_window_missed_no_old_plan",)
+            else:
+                status = "DATA_READY"
+                strategy_date = candidate
+                execution_date = next_session
+                reasons = ("flat_cash_no_action_gap_skipped",) if len(new_completed) > 1 else (
+                    "calendar_and_benchmark_advanced_one_session",
+                )
+    else:
+        reasons = ("benchmark_or_calendar_state_inconsistent",)
+    receipt = {
+        "schema_version": "technical-shadow-data-readiness-receipt.v1",
+        "provider_id": "baostock", "provider_kind": "real_provider",
+        "state_date": state_date.isoformat(),
+        "state_record_sha256": state_record_sha256,
+        "benchmark_id": benchmark_id,
+        "checked_at": checked_at.isoformat(),
+        "completed_through": completed_through.isoformat(),
+        "latest_completed_trading_date": latest_completed.isoformat() if latest_completed else None,
+        "latest_benchmark_date": latest_benchmark.isoformat() if latest_benchmark else None,
+        "strategy_date": strategy_date.isoformat() if strategy_date else None,
+        "execution_date": execution_date.isoformat() if execution_date else None,
+        "allow_flat_cash_gap": allow_flat_cash_gap,
+        "skipped_completed_sessions": [
+            day.isoformat() for day in new_completed[:-1]
+        ] if status == "DATA_READY" and len(new_completed) > 1 else [],
+        "calendar_request": {
+            "start_date": state_date.isoformat(),
+            "end_date": (max(checked_at.date(), state_date) + timedelta(days=14)).isoformat(),
+        },
+        "benchmark_request": {
+            "instrument_id": benchmark_id,
+            "fields": benchmark_fields,
+            "start_date": state_date.isoformat(),
+            "end_date": max(state_date, completed_through).isoformat(),
+            "frequency": "d", "adjustflag": "3",
+        },
+        "calendar_raw_content_sha256": _digest({"fields": calendar_fields, "rows": calendar_rows}),
+        "benchmark_raw_content_sha256": _digest({"fields": benchmark_fields, "rows": benchmark_rows}),
+        "benchmark_candidate_close": benchmark_close.get(strategy_date) if strategy_date else None,
+        "reason_codes": list(reasons),
+        "automatic_order_submission": False,
+    }
+    return ReadinessResult(
+        status=status, state_date=state_date,
+        latest_completed_trading_date=latest_completed,
+        latest_benchmark_date=latest_benchmark,
+        strategy_date=strategy_date, execution_date=execution_date,
+        checked_at=checked_at, deadline_at=None,
+        reason_codes=reasons, receipt=receipt,
+    )
+
+
+def wait_until_ready(
+    *, check: Callable[[], ReadinessResult], deadline: datetime,
+    poll_interval_seconds: int, max_polls: int,
+    clock: Callable[[], datetime] = lambda: datetime.now(CHINA_TZ),
+    sleeper: Callable[[float], None] = time_module.sleep,
+) -> ReadinessResult:
+    if deadline.tzinfo is None:
+        raise TechnicalShadowDailyError("deadline_timezone_required")
+    if poll_interval_seconds <= 0 or max_polls <= 0:
+        raise TechnicalShadowDailyError("bounded_polling_parameters_invalid")
+    result: ReadinessResult | None = None
+    local_deadline = deadline.astimezone(CHINA_TZ)
+    for index in range(max_polls):
+        before_check = clock().astimezone(CHINA_TZ)
+        if before_check >= local_deadline and result is not None:
+            return ReadinessResult(
+                **{
+                    **result.__dict__, "status": "DATA_NOT_READY",
+                    "deadline_at": local_deadline,
+                    "reason_codes": tuple(result.reason_codes)
+                    + ("deadline_reached",),
+                }
+            )
+        result = check()
+        result = ReadinessResult(
+            **{**result.__dict__, "deadline_at": local_deadline}
+        )
+        after_check = clock().astimezone(CHINA_TZ)
+        if after_check >= local_deadline:
+            return ReadinessResult(
+                **{
+                    **result.__dict__, "status": "DATA_NOT_READY",
+                    "reason_codes": tuple(result.reason_codes)
+                    + ("deadline_reached",),
+                }
+            )
+        if result.status == "DATA_READY":
+            return result
+        remaining = (local_deadline - after_check).total_seconds()
+        if remaining <= 0:
+            return result
+        if index == max_polls - 1:
+            break
+        sleeper(min(float(poll_interval_seconds), remaining))
+    if result is None:
+        raise TechnicalShadowDailyError("bounded_polling_did_not_run")
+    return ReadinessResult(
+        **{
+            **result.__dict__,
+            "status": "DATA_NOT_READY",
+            "deadline_at": local_deadline,
+            "reason_codes": tuple(result.reason_codes) + ("max_polls_reached",),
+        }
+    )
+
+
 def _stable_data_receipt(
     *, captured: CapturedData, strategy_date: date,
     execution_evidence: NextSessionEvidence, config: Mapping[str, Any],
+    generated_at: datetime,
+    readiness_receipt: Mapping[str, Any] | None,
 ) -> dict[str, Any]:
     sessions = tuple(day for day in captured.sessions if day <= strategy_date)[-121:]
     if len(sessions) != 121 or sessions[-1] != strategy_date:
@@ -363,6 +957,10 @@ def _stable_data_receipt(
         "strategy_date": strategy_date.isoformat(),
         "execution_date": execution_evidence.execution_date.isoformat(),
         "execution_window_status": execution_evidence.execution_window_status,
+        "generated_at": generated_at.isoformat(),
+        "execution_open_at": datetime.combine(
+            execution_evidence.execution_date, EXECUTION_OPEN, CHINA_TZ
+        ).isoformat(),
         "decision_cutoff_at": datetime.combine(
             strategy_date, DECISION_CUTOFF, CHINA_TZ
         ).isoformat(),
@@ -377,6 +975,7 @@ def _stable_data_receipt(
         "stock_records": stocks,
         "source_receipt_summaries": receipt_summaries,
         "next_session_calendar_receipt": execution_evidence.receipt,
+        "readiness_receipt": readiness_receipt,
         "universe_basis": config["universe"]["basis"],
         "historical_pit_csi800": False,
     }
@@ -469,6 +1068,70 @@ def _apply_previous_plan(
             "reason_codes": [
                 "controlled_replay_state_already_includes_strategy_date_close"
                 if same_close else "no_prior_daily_plan_no_retrospective_execution"
+            ],
+        }
+
+    plan_status = str(plan.get("plan_status", ""))
+    if plan_status.startswith("CANCELLED_"):
+        return {
+            "cash": cash, "positions": positions, "position_lots": lots,
+            "fills": [], "transaction_cost": Decimal("0.00"),
+        }, {
+            "status": "NOT_APPLIED_CANCELLED_PLAN",
+            "decision_date": plan.get("decision_date"),
+            "execution_date": strategy_date.isoformat(),
+            "opening_cash": _money_text(cash),
+            "opening_positions": dict(sorted(positions.items())),
+            "closing_cash_after_open_execution": _money_text(cash),
+            "closing_positions_after_open_execution": dict(sorted(positions.items())),
+            "fills": [],
+            "transaction_summary": {
+                "commission": "0.00", "stamp_duty": "0.00",
+                "transfer_fee": "0.00", "explicit_fee": "0.00",
+                "slippage_cost": "0.00", "total_transaction_cost": "0.00",
+                "cash_delta": "0.00",
+            },
+            "ledger_fills": [],
+            "reason_codes": ["cancelled_plan_is_non_executable"],
+        }
+    if plan_status not in {"READY", "NO_ACTION_CASH"}:
+        raise TechnicalShadowDailyError("previous_plan_status_not_executable")
+    if (
+        plan_status == "NO_ACTION_CASH"
+        and plan.get("execution_date") != strategy_date.isoformat()
+        and positions == {}
+        and plan.get("target_positions") == {}
+    ):
+        carried_nav = _money_text(_decimal(state["nav"]))
+        return {
+            "cash": cash, "positions": positions, "position_lots": lots,
+            "fills": [], "transaction_cost": Decimal("0.00"),
+        }, {
+            "status": "MISSED_SESSION_CARRY_FORWARD",
+            "decision_date": plan.get("decision_date"),
+            "execution_date": strategy_date.isoformat(),
+            "missed_session_date": plan.get("execution_date"),
+            "generated_late": True,
+            "forward_evidence": False,
+            "state_carry_forward": True,
+            "opening_cash": _money_text(cash),
+            "opening_positions": {},
+            "opening_nav": carried_nav,
+            "closing_cash_after_open_execution": _money_text(cash),
+            "closing_positions_after_open_execution": {},
+            "closing_nav_before_current_close": carried_nav,
+            "fills": [],
+            "orders": [],
+            "transaction_summary": {
+                "commission": "0.00", "stamp_duty": "0.00",
+                "transfer_fee": "0.00", "explicit_fee": "0.00",
+                "slippage_cost": "0.00", "total_transaction_cost": "0.00",
+                "cash_delta": "0.00",
+            },
+            "ledger_fills": [],
+            "reason_codes": [
+                "missed_session_recorded_without_plan_or_retrospective_execution",
+                "flat_cash_account_state_carried_forward_unchanged",
             ],
         }
 
@@ -725,51 +1388,159 @@ def _daily_report(
 
 
 def _payload_bytes(value: Any) -> bytes:
+    if isinstance(value, bytes):
+        return value
     if isinstance(value, str):
         return value.replace("\r\n", "\n").encode("utf-8")
     return _canonical_bytes(value)
 
 
-def _publish_create_only(
-    *, root: Path, payloads: Mapping[str, Any], manifest: Mapping[str, Any]
+REPORT_ARTIFACTS = {
+    "data_receipt.json", "ranking.json", "exposure.json",
+    "portfolio_decision.json", "daily_report.md",
+}
+
+
+def _verified_report_slot(path: Path) -> tuple[dict[str, Any], str]:
+    manifest_path = path / "report_manifest.json"
+    if not manifest_path.is_file():
+        raise TechnicalShadowDailyError(
+            f"partial_report_slot_requires_manual_recovery:{path}"
+        )
+    manifest = _json(manifest_path)
+    if manifest.get("schema_version") != "technical-shadow-daily-report-manifest.v1":
+        raise TechnicalShadowDailyError("daily_report_manifest_schema_mismatch")
+    base = {
+        key: value for key, value in manifest.items()
+        if key != "manifest_payload_sha256"
+    }
+    if manifest.get("manifest_payload_sha256") != _digest(base):
+        raise TechnicalShadowDailyError("daily_report_manifest_payload_sha256_mismatch")
+    artifacts = manifest.get("artifacts")
+    if not isinstance(artifacts, dict) or set(artifacts) != REPORT_ARTIFACTS:
+        raise TechnicalShadowDailyError("daily_report_artifact_contract_mismatch")
+    actual = {
+        item.relative_to(path).as_posix()
+        for item in path.rglob("*") if item.is_file()
+    }
+    if actual != REPORT_ARTIFACTS | {"report_manifest.json"}:
+        raise TechnicalShadowDailyError("daily_report_artifact_set_mismatch")
+    for relative, expected in artifacts.items():
+        if _file_sha256(path / relative) != expected:
+            raise TechnicalShadowDailyError(
+                f"daily_report_artifact_integrity_failed:{relative}"
+            )
+    if (
+        manifest.get("strategy_id") != STRATEGY_ID
+        or manifest.get("mode") != MODE
+        or manifest.get("safety") != DAILY_SAFETY
+        or manifest.get("automatic_order_submission") is not False
+    ):
+        raise TechnicalShadowDailyError("daily_report_identity_or_safety_mismatch")
+    return manifest, _file_sha256(manifest_path)
+
+
+def _roots_are_separate(state_root: Path, report_root: Path) -> bool:
+    state = state_root.resolve()
+    report = report_root.resolve()
+    return state != report and not state.is_relative_to(report) and not report.is_relative_to(state)
+
+
+def _publish_split_create_only(
+    *, persistent_root: Path, report_root: Path,
+    persistent_payloads: Mapping[str, Any], persistent_manifest: Mapping[str, Any],
+    report_payloads: Mapping[str, Any], report_manifest: Mapping[str, Any],
 ) -> tuple[str, bool]:
-    expected = {name: _payload_bytes(value) for name, value in payloads.items()}
-    expected["manifest.json"] = _payload_bytes(manifest)
-    if root.exists():
-        _verified_slot(root)
-        existing_files = {
-            path.relative_to(root).as_posix()
-            for path in root.rglob("*") if path.is_file()
+    if not _roots_are_separate(persistent_root.parent, report_root.parent):
+        raise TechnicalShadowDailyError("persistent_and_report_roots_must_be_separate")
+    expected_persistent = {
+        name: _payload_bytes(value) for name, value in persistent_payloads.items()
+    }
+    expected_persistent["manifest.json"] = _payload_bytes(persistent_manifest)
+    expected_report = {
+        name: _payload_bytes(value) for name, value in report_payloads.items()
+    }
+    expected_report["report_manifest.json"] = _payload_bytes(report_manifest)
+    if not persistent_root.exists() and report_root.exists():
+        _verified_report_slot(report_root)
+        actual_report = {
+            item.relative_to(report_root).as_posix()
+            for item in report_root.rglob("*") if item.is_file()
         }
-        if existing_files != set(expected):
-            raise TechnicalShadowDailyError("immutable_conflict:file_set_changed")
-        for relative, raw in expected.items():
-            if (root / relative).read_bytes() != raw:
-                raise TechnicalShadowDailyError(f"immutable_conflict:{relative}")
-        return _file_sha256(root / "manifest.json"), True
-    root.parent.mkdir(parents=True, exist_ok=True)
+        if actual_report != set(expected_report):
+            raise TechnicalShadowDailyError("immutable_conflict:report_file_set_changed")
+        for relative, raw in expected_report.items():
+            if (report_root / relative).read_bytes() != raw:
+                raise TechnicalShadowDailyError(f"immutable_conflict:report:{relative}")
+    if persistent_root.exists():
+        _verified_persistent_slot(persistent_root)
+        actual = {
+            item.relative_to(persistent_root).as_posix()
+            for item in persistent_root.rglob("*") if item.is_file()
+        }
+        if actual != set(expected_persistent):
+            raise TechnicalShadowDailyError("immutable_conflict:persistent_file_set_changed")
+        for relative, raw in expected_persistent.items():
+            if (persistent_root / relative).read_bytes() != raw:
+                raise TechnicalShadowDailyError(f"immutable_conflict:persistent:{relative}")
+        if report_root.exists():
+            _verified_report_slot(report_root)
+            actual_report = {
+                item.relative_to(report_root).as_posix()
+                for item in report_root.rglob("*") if item.is_file()
+            }
+            if actual_report != set(expected_report):
+                raise TechnicalShadowDailyError("immutable_conflict:report_file_set_changed")
+            for relative, raw in expected_report.items():
+                if (report_root / relative).read_bytes() != raw:
+                    raise TechnicalShadowDailyError(f"immutable_conflict:report:{relative}")
+        return _file_sha256(persistent_root / "manifest.json"), True
+
+    persistent_root.parent.mkdir(parents=True, exist_ok=True)
     try:
-        root.mkdir(exist_ok=False)
+        persistent_root.mkdir(exist_ok=False)
     except FileExistsError as exc:
-        raise TechnicalShadowDailyError("daily_slot_reservation_conflict") from exc
-    try:
-        for relative in sorted(payloads):
-            path = root / relative
-            path.parent.mkdir(parents=True, exist_ok=True)
-            with path.open("xb") as stream:
-                stream.write(expected[relative])
-        with (root / "manifest.json").open("xb") as stream:
-            stream.write(expected["manifest.json"])
-    except Exception:
-        # A partial slot is intentionally retained as fail-closed evidence.
-        raise
-    return _file_sha256(root / "manifest.json"), False
+        raise TechnicalShadowDailyError("persistent_slot_reservation_conflict") from exc
+    for relative in sorted(persistent_payloads):
+        with (persistent_root / relative).open("xb") as stream:
+            stream.write(expected_persistent[relative])
+
+    if report_root.exists():
+        _verified_report_slot(report_root)
+        actual_report = {
+            item.relative_to(report_root).as_posix()
+            for item in report_root.rglob("*") if item.is_file()
+        }
+        if actual_report != set(expected_report):
+            raise TechnicalShadowDailyError("immutable_conflict:report_file_set_changed")
+        for relative, raw in expected_report.items():
+            if (report_root / relative).read_bytes() != raw:
+                raise TechnicalShadowDailyError(f"immutable_conflict:report:{relative}")
+    else:
+        report_root.parent.mkdir(parents=True, exist_ok=True)
+        try:
+            report_root.mkdir(exist_ok=False)
+        except FileExistsError as exc:
+            raise TechnicalShadowDailyError("report_slot_reservation_conflict") from exc
+        for relative in sorted(report_payloads):
+            with (report_root / relative).open("xb") as stream:
+                stream.write(expected_report[relative])
+        with (report_root / "report_manifest.json").open("xb") as stream:
+            stream.write(expected_report["report_manifest.json"])
+
+    with (persistent_root / "manifest.json").open("xb") as stream:
+        stream.write(expected_persistent["manifest.json"])
+    _verified_report_slot(report_root)
+    _verified, verified_sha = _verified_persistent_slot(persistent_root)
+    return verified_sha, False
 
 
 def run_daily(
     *, config: Mapping[str, Any], captured: CapturedData,
-    execution_evidence: NextSessionEvidence, output_root: Path,
-    seed_path: Path = DEFAULT_SEED, allow_test_provider: bool = False,
+    execution_evidence: NextSessionEvidence, state_root: Path,
+    report_root: Path, generated_at: datetime | None = None,
+    readiness_receipt: Mapping[str, Any] | None = None,
+    allow_test_provider: bool = False,
 ) -> tuple[Path, dict[str, Any]]:
     validate_source_provenance(
         provider_id=captured.provider_id,
@@ -789,23 +1560,71 @@ def run_daily(
     strategy_date = captured.sessions[-1]
     if execution_evidence.execution_date <= strategy_date:
         raise TechnicalShadowDailyError("execution_date_must_follow_strategy_date")
-    prior_state, prior_plan, predecessor = _load_previous_context(
-        strategy_date=strategy_date, output_root=output_root,
-        seed_path=seed_path, config=config, previous_session=captured.sessions[-2],
+    config_sha256 = _digest(config)
+    slots = _verified_state_chain(
+        state_root, expected_config_sha256=config_sha256
     )
+    existing = next((item for item in slots if item[0] == strategy_date), None)
+    if existing is not None:
+        existing_generated = existing[2].get("generated_at")
+        if existing_generated is None:
+            raise TechnicalShadowDailyError("persistent_forward_generated_at_missing")
+        generated_at = datetime.fromisoformat(str(existing_generated))
+    elif generated_at is None:
+        if not allow_test_provider:
+            raise TechnicalShadowDailyError("real_forward_generated_at_required")
+        generated_at = datetime.combine(strategy_date, DECISION_CUTOFF, CHINA_TZ)
+    if generated_at.tzinfo is None:
+        raise TechnicalShadowDailyError("generated_at_timezone_required")
+    generated_at = generated_at.astimezone(CHINA_TZ)
+    execution_open_at = datetime.combine(
+        execution_evidence.execution_date, EXECUTION_OPEN, CHINA_TZ
+    )
+    if (
+        execution_evidence.execution_window_status != "OPEN"
+        or generated_at >= execution_open_at
+    ):
+        raise TechnicalShadowDailyError("execution_window_missed_no_old_plan")
+    if readiness_receipt is not None:
+        if (
+            readiness_receipt.get("strategy_date") != strategy_date.isoformat()
+            or readiness_receipt.get("execution_date")
+            != execution_evidence.execution_date.isoformat()
+        ):
+            raise TechnicalShadowDailyError("readiness_full_capture_date_mismatch")
+    prior_state, prior_plan, predecessor = _load_previous_context(
+        strategy_date=strategy_date, state_root=state_root,
+        previous_session=captured.sessions[-2], config_sha256=config_sha256,
+    )
+    prior_date = date.fromisoformat(str(prior_state["state_date"]))
+    skipped_sessions = [
+        day.isoformat() for day in captured.sessions
+        if prior_date < day < strategy_date
+    ]
+    if predecessor.get("flat_cash_gap"):
+        if not skipped_sessions:
+            raise TechnicalShadowDailyError("flat_cash_gap_sessions_missing")
+        if readiness_receipt is None or readiness_receipt.get(
+            "skipped_completed_sessions"
+        ) != skipped_sessions:
+            raise TechnicalShadowDailyError("flat_cash_gap_readiness_binding_mismatch")
+        predecessor["skipped_trading_dates"] = skipped_sessions
+    elif skipped_sessions:
+        raise TechnicalShadowDailyError("unexpected_intervening_trading_sessions")
     prior_state_date = date.fromisoformat(str(prior_state["state_date"]))
     if (
         prior_state_date != strategy_date
         and prior_state_date != captured.sessions[-2]
+        and not predecessor.get("flat_cash_gap")
     ):
         raise TechnicalShadowDailyError(
             "previous_controlled_date_not_previous_session"
         )
-    if prior_plan is not None and predecessor.get("previous_plan_sha256") != _file_sha256(
-        output_root / str(prior_plan["decision_date"]) / "next_session_plan.json"
+    if predecessor.get("previous_plan_sha256") != _file_sha256(
+        state_root / str(prior_plan["decision_date"]) / "next_session_plan.json"
     ):
         raise TechnicalShadowDailyError("previous_plan_hash_mismatch")
-    if prior_plan is not None and prior_plan.get("safety") != DAILY_SAFETY:
+    if prior_plan.get("safety") != DAILY_SAFETY:
         raise TechnicalShadowDailyError("previous_plan_safety_mismatch")
 
     instrument_ids = list(config["universe"]["instrument_ids"])
@@ -816,6 +1635,17 @@ def run_daily(
     benchmark_map = _strict_row_map(
         captured.benchmark_rows, instrument_id=str(config["data"]["benchmark_id"])
     )
+    if readiness_receipt is not None:
+        ready_close = readiness_receipt.get("benchmark_candidate_close")
+        captured_ready = benchmark_map.get(strategy_date)
+        if (
+            ready_close is None
+            or captured_ready is None
+            or captured_ready.get("close") is None
+            or _decimal(ready_close) != _decimal(captured_ready["close"])
+            or captured_ready.get("trading_status") != "traded"
+        ):
+            raise TechnicalShadowDailyError("readiness_full_benchmark_toctou_mismatch")
     sessions = tuple(day for day in captured.sessions if day <= strategy_date)[-121:]
     if len(sessions) != 121 or sessions[-1] != strategy_date:
         raise TechnicalShadowDailyError("daily_121_session_window_unavailable")
@@ -1014,6 +1844,8 @@ def run_daily(
             else "NO_ACTION_CASH" if not has_planned_trade else "READY"
         ),
         "execution_window_status": execution_evidence.execution_window_status,
+        "generated_at": generated_at.isoformat(),
+        "execution_open_at": execution_open_at.isoformat(),
         "decision_date": strategy_date.isoformat(),
         "execution_date": execution_evidence.execution_date.isoformat(),
         "valid_only_for_execution_date": execution_evidence.execution_date.isoformat(),
@@ -1043,6 +1875,8 @@ def run_daily(
         "strategy_id": STRATEGY_ID, "mode": MODE,
         "strategy_date": strategy_date.isoformat(),
         "execution_date": execution_evidence.execution_date.isoformat(),
+        "generated_at": generated_at.isoformat(),
+        "execution_open_at": execution_open_at.isoformat(),
         "current_cash": state["cash"], "current_positions": state["positions"],
         "current_nav": state["nav"], "target_positions": plan["target_positions"],
         "target_gross_exposure": exposure["target_gross_exposure"],
@@ -1056,44 +1890,94 @@ def run_daily(
     data_receipt = _stable_data_receipt(
         captured=captured, strategy_date=strategy_date,
         execution_evidence=execution_evidence, config=config,
+        generated_at=generated_at, readiness_receipt=readiness_receipt,
     )
     report = _daily_report(
         strategy_date=strategy_date, execution_date=execution_evidence.execution_date,
         state=state, exposure=exposure, plan=plan, application=application,
     )
-    payloads: dict[str, Any] = {
+    report_payloads: dict[str, Any] = {
         "data_receipt.json": data_receipt,
         "ranking.json": ranking,
         "exposure.json": exposure,
         "portfolio_decision.json": portfolio_decision,
-        "next_session_plan.json": plan,
-        "state.json": state,
-        "previous_state.json": prior_state,
-        "prior_plan_application.json": application,
         "daily_report.md": report,
     }
-    artifact_hashes = {
+    report_artifacts = {
         name: sha256(_payload_bytes(value)).hexdigest()
-        for name, value in sorted(payloads.items())
+        for name, value in sorted(report_payloads.items())
     }
-    manifest_base = {
-        "schema_version": "technical-shadow-daily-manifest.v1",
+    report_manifest_base = {
+        "schema_version": "technical-shadow-daily-report-manifest.v1",
         "strategy_id": STRATEGY_ID, "shadow_account_id": SHADOW_ACCOUNT_ID,
         "mode": MODE, "strategy_date": strategy_date.isoformat(),
         "execution_date": execution_evidence.execution_date.isoformat(),
+        "generated_at": generated_at.isoformat(),
+        "execution_open_at": execution_open_at.isoformat(),
         "config_sha256": _digest(config),
-        "predecessor": predecessor,
         "account_record_sha256": state["record_sha256"],
-        "artifacts": artifact_hashes,
+        "state_sha256": sha256(_payload_bytes(state)).hexdigest(),
+        "plan_payload_sha256": plan["plan_payload_sha256"],
+        "plan_sha256": sha256(_payload_bytes(plan)).hexdigest(),
+        "artifacts": report_artifacts,
         "provider": data_receipt["provider"],
         "historical_pit_csi800": False,
         "automatic_order_submission": False, "safety": DAILY_SAFETY,
     }
-    manifest = dict(manifest_base)
-    manifest["manifest_payload_sha256"] = _digest(manifest_base)
-    root = output_root / strategy_date.isoformat()
-    manifest_sha, idempotent = _publish_create_only(
-        root=root, payloads=payloads, manifest=manifest,
+    report_manifest = dict(report_manifest_base)
+    report_manifest["manifest_payload_sha256"] = _digest(report_manifest_base)
+    report_manifest_sha = sha256(_payload_bytes(report_manifest)).hexdigest()
+
+    lineage = {
+        "schema_version": "technical-shadow-persistent-lineage.v1",
+        "strategy_id": STRATEGY_ID, "shadow_account_id": SHADOW_ACCOUNT_ID,
+        "mode": MODE, "state_date": strategy_date.isoformat(),
+        **predecessor,
+        "safety": DAILY_SAFETY,
+    }
+    persistent_payloads: dict[str, Any] = {
+        "state.json": state,
+        "next_session_plan.json": plan,
+        "prior_plan_application.json": application,
+        "lineage.json": lineage,
+    }
+    persistent_artifacts = {
+        name: sha256(_payload_bytes(value)).hexdigest()
+        for name, value in sorted(persistent_payloads.items())
+    }
+    persistent_manifest_base = {
+        "schema_version": "technical-shadow-persistent-state-manifest.v1",
+        "strategy_id": STRATEGY_ID, "shadow_account_id": SHADOW_ACCOUNT_ID,
+        "mode": MODE, "state_date": strategy_date.isoformat(),
+        "execution_date": execution_evidence.execution_date.isoformat(),
+        "generated_at": generated_at.isoformat(),
+        "execution_open_at": execution_open_at.isoformat(),
+        "execution_window_status": "OPEN",
+        "config_sha256": _digest(config),
+        "account_record_sha256": state["record_sha256"],
+        "plan_payload_sha256": plan["plan_payload_sha256"],
+        "previous_trading_date": state["previous_trading_date"],
+        "previous_record_sha256": state["previous_record_sha256"],
+        "lineage_kind": "previous_persistent_state",
+        "previous_manifest_sha256": predecessor["previous_manifest_sha256"],
+        "artifacts": persistent_artifacts,
+        "report_manifest_kind": "technical-shadow-daily-report-manifest.v1",
+        "report_manifest_sha256": report_manifest_sha,
+        "provider": data_receipt["provider"],
+        "historical_pit_csi800": False,
+        "automatic_order_submission": False, "safety": DAILY_SAFETY,
+    }
+    persistent_manifest = dict(persistent_manifest_base)
+    persistent_manifest["manifest_payload_sha256"] = _digest(
+        persistent_manifest_base
+    )
+    persistent_slot = state_root / strategy_date.isoformat()
+    report_slot = report_root / strategy_date.isoformat()
+    manifest_sha, idempotent = _publish_split_create_only(
+        persistent_root=persistent_slot, report_root=report_slot,
+        persistent_payloads=persistent_payloads,
+        persistent_manifest=persistent_manifest,
+        report_payloads=report_payloads, report_manifest=report_manifest,
     )
     result = {
         "status": "idempotent_existing" if idempotent else "created",
@@ -1103,59 +1987,226 @@ def run_daily(
         "action_counts": action_counts,
         "current_cash": state["cash"], "current_positions": state["positions"],
         "current_nav": state["nav"], "plan_cost_summary": cost_summary,
-        "output_directory": str(root.resolve()),
+        "execution_window_status": "OPEN",
+        "generated_at": generated_at.isoformat(),
+        "persistent_state_directory": str(persistent_slot.resolve()),
+        "report_directory": str(report_slot.resolve()),
         "manifest_sha256": manifest_sha,
         "idempotent": idempotent,
         "automatic_order_submission": False,
     }
-    return root, result
+    return persistent_slot, result
+
+
+def _head_idempotent_result(
+    *, state_root: Path, config_sha256: str,
+    readiness: ReadinessResult | None = None,
+) -> dict[str, Any]:
+    state_date, slot, manifest, manifest_sha = _verified_state_chain(
+        state_root, expected_config_sha256=config_sha256
+    )[-1]
+    state = _json(slot / "state.json")
+    plan = _json(slot / "next_session_plan.json")
+    action_counts = {
+        action: sum(row.get("action") == action for row in plan.get("actions", []))
+        for action in ("BUY", "SELL", "HOLD", "CASH")
+    }
+    return {
+        "status": "idempotent_existing",
+        "readiness_status": "ALREADY_PROCESSED",
+        "state_date": state_date.isoformat(),
+        "strategy_date": state_date.isoformat(),
+        "execution_date": plan["execution_date"],
+        "execution_window_status": plan["execution_window_status"],
+        "exposure_state": state["exposure_state"],
+        "action_counts": action_counts,
+        "current_cash": state["cash"],
+        "current_positions": state["positions"],
+        "current_nav": state["nav"],
+        "plan_cost_summary": plan["cost_summary"],
+        "persistent_state_directory": str(slot.resolve()),
+        "manifest_sha256": manifest_sha,
+        "generated_at": manifest.get("generated_at"),
+        "readiness_checked_at": (
+            readiness.checked_at.isoformat() if readiness is not None else None
+        ),
+        "idempotent": True,
+        "automatic_order_submission": False,
+    }
+
+
+def _readiness_output(result: ReadinessResult) -> dict[str, Any]:
+    return {
+        "status": result.status,
+        "state_date": result.state_date.isoformat(),
+        "latest_completed_trading_date": (
+            result.latest_completed_trading_date.isoformat()
+            if result.latest_completed_trading_date else None
+        ),
+        "latest_benchmark_date": (
+            result.latest_benchmark_date.isoformat()
+            if result.latest_benchmark_date else None
+        ),
+        "strategy_date": result.strategy_date.isoformat() if result.strategy_date else None,
+        "execution_date": result.execution_date.isoformat() if result.execution_date else None,
+        "checked_at": result.checked_at.isoformat(),
+        "deadline_at": result.deadline_at.isoformat() if result.deadline_at else None,
+        "reason_codes": list(result.reason_codes),
+        "automatic_order_submission": False,
+    }
+
+
+def _parse_deadline(value: str | None, *, start: datetime) -> datetime:
+    if value is None:
+        return start + timedelta(minutes=DEFAULT_READY_WAIT_MINUTES)
+    parsed = datetime.fromisoformat(value)
+    if parsed.tzinfo is None:
+        raise TechnicalShadowDailyError("deadline_timezone_required")
+    parsed = parsed.astimezone(CHINA_TZ)
+    if parsed <= start:
+        raise TechnicalShadowDailyError("deadline_must_be_in_future")
+    return parsed
 
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
-    parser.add_argument("--state-seed", type=Path, default=DEFAULT_SEED)
-    parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
+    parser.add_argument("--state-root", type=Path, default=DEFAULT_STATE_ROOT)
+    parser.add_argument("--report-root", type=Path, default=DEFAULT_REPORT_ROOT)
+    parser.add_argument("--initialize-state-from", type=Path)
+    parser.add_argument("--readiness-only", action="store_true")
+    parser.add_argument("--when-ready", action="store_true")
+    parser.add_argument("--deadline-at")
+    parser.add_argument(
+        "--poll-interval-seconds", type=int,
+        default=DEFAULT_POLL_INTERVAL_SECONDS,
+    )
+    parser.add_argument("--max-polls", type=int, default=DEFAULT_MAX_POLLS)
     return parser
 
 
 def main(argv: Sequence[str] | None = None) -> int:
     args = build_parser().parse_args(argv)
     config = _load_config(args.config)
-    now = datetime.now(CHINA_TZ)
+    if not _roots_are_separate(args.state_root, args.report_root):
+        raise TechnicalShadowDailyError("persistent_and_report_roots_must_be_separate")
+    if args.initialize_state_from is not None:
+        _, result = initialize_persistent_state(
+            source_slot=args.initialize_state_from,
+            state_root=args.state_root,
+            config=config,
+        )
+        print(json.dumps(result, ensure_ascii=False, sort_keys=True))
+        return 0
+
+    config_sha256 = _digest(config)
+    head_slots = _verified_state_chain(
+        args.state_root, expected_config_sha256=config_sha256
+    )
+    state_date, state_slot, _state_manifest, _state_manifest_sha = head_slots[-1]
+    state = _json(state_slot / "state.json")
+    head_plan = _json(state_slot / "next_session_plan.json")
+    allow_flat_cash_gap = (
+        state.get("positions") == {}
+        and head_plan.get("plan_status") == "NO_ACTION_CASH"
+        and head_plan.get("target_positions") == {}
+        and not any(
+            row.get("action") in {"BUY", "SELL"}
+            for row in head_plan.get("actions", [])
+        )
+    )
+    start = datetime.now(CHINA_TZ)
+
+    def readiness_check() -> ReadinessResult:
+        return check_baostock_readiness(
+            state_date=state_date,
+            state_record_sha256=state["record_sha256"],
+            benchmark_id=str(config["data"]["benchmark_id"]),
+            now=datetime.now(CHINA_TZ),
+            allow_flat_cash_gap=allow_flat_cash_gap,
+        )
+
+    if args.when_ready:
+        deadline = _parse_deadline(args.deadline_at, start=start)
+        readiness = wait_until_ready(
+            check=readiness_check, deadline=deadline,
+            poll_interval_seconds=args.poll_interval_seconds,
+            max_polls=args.max_polls,
+        )
+    else:
+        if args.deadline_at is not None:
+            raise TechnicalShadowDailyError("deadline_requires_when_ready")
+        readiness = readiness_check()
+
+    if args.readiness_only:
+        print(json.dumps(_readiness_output(readiness), ensure_ascii=False, sort_keys=True))
+        return 0
+
+    if readiness.status == "ALREADY_PROCESSED":
+        print(json.dumps(
+            _head_idempotent_result(
+                state_root=args.state_root, config_sha256=config_sha256,
+                readiness=readiness,
+            ),
+            ensure_ascii=False, sort_keys=True,
+        ))
+        return 0
+    if readiness.status != "DATA_READY":
+        print(json.dumps(_readiness_output(readiness), ensure_ascii=False, sort_keys=True))
+        return 0
+    if readiness.strategy_date is None or readiness.execution_date is None:
+        raise TechnicalShadowDailyError("data_ready_dates_missing")
+
     source = BaoStockTechnicalShadowSource()
     captured = source.capture(
         instrument_ids=config["universe"]["instrument_ids"],
         benchmark_id=config["data"]["benchmark_id"],
         recent_completed_sessions=1,
         lookback_days=int(config["data"]["calendar_lookback_days"]),
-        now=now,
-        completed_through=(
-            now.astimezone(CHINA_TZ).date()
-            if now.astimezone(CHINA_TZ).time() >= DECISION_CUTOFF
-            else now.astimezone(CHINA_TZ).date() - timedelta(days=1)
-        ),
+        now=datetime.now(CHINA_TZ),
+        completed_through=readiness.strategy_date,
     )
     captured = _latest_data_complete_capture(captured)
-    evidence = query_next_baostock_session(after_date=captured.sessions[-1])
-    local_now = now.astimezone(CHINA_TZ)
-    window_status = (
-        "MISSED"
-        if evidence.execution_date < local_now.date()
-        or (
-            evidence.execution_date == local_now.date()
-            and local_now.time() >= EXECUTION_OPEN
-        )
-        else "OPEN"
+    if captured.sessions[-1] != readiness.strategy_date:
+        raise TechnicalShadowDailyError("full_capture_did_not_end_at_ready_strategy_date")
+    current_head = _verified_state_chain(
+        args.state_root, expected_config_sha256=config_sha256
+    )[-1]
+    current_state = _json(current_head[1] / "state.json")
+    if (
+        current_head[0] != state_date
+        or current_state["record_sha256"] != state["record_sha256"]
+    ):
+        if current_head[0] == readiness.strategy_date:
+            print(json.dumps(
+                _head_idempotent_result(
+                    state_root=args.state_root,
+                    config_sha256=config_sha256,
+                ),
+                ensure_ascii=False, sort_keys=True,
+            ))
+            return 0
+        raise TechnicalShadowDailyError("persistent_head_changed_during_capture")
+    generated_at = datetime.now(CHINA_TZ)
+    execution_open_at = datetime.combine(
+        readiness.execution_date, EXECUTION_OPEN, CHINA_TZ
     )
+    if generated_at >= execution_open_at:
+        raise TechnicalShadowDailyError("execution_window_missed_during_full_capture")
     evidence = NextSessionEvidence(
-        execution_date=evidence.execution_date,
-        receipt=evidence.receipt,
-        execution_window_status=window_status,
+        execution_date=readiness.execution_date,
+        receipt=readiness.receipt,
+        execution_window_status="OPEN",
     )
     _, result = run_daily(
         config=config, captured=captured, execution_evidence=evidence,
-        output_root=args.output_root, seed_path=args.state_seed,
+        state_root=args.state_root, report_root=args.report_root,
+        generated_at=generated_at, readiness_receipt=readiness.receipt,
+    )
+    result["readiness_status"] = readiness.status
+    result["readiness_checked_at"] = readiness.checked_at.isoformat()
+    result["deadline_at"] = (
+        readiness.deadline_at.isoformat() if readiness.deadline_at else None
     )
     print(json.dumps(result, ensure_ascii=False, sort_keys=True))
     return 0
@@ -1166,6 +2217,7 @@ if __name__ == "__main__":
 
 
 __all__ = [
-    "NextSessionEvidence", "TechnicalShadowDailyError", "run_daily",
-    "query_next_baostock_session",
+    "NextSessionEvidence", "ReadinessResult", "TechnicalShadowDailyError",
+    "check_baostock_readiness", "initialize_persistent_state", "run_daily",
+    "wait_until_ready", "query_next_baostock_session",
 ]
