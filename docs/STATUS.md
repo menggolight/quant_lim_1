@@ -4,14 +4,14 @@
 
 ## 快照元数据
 
-- `as_of`：`2026-08-27T14:46:46+08:00`，Asia/Shanghai。
+- `as_of`：`2026-08-27T14:59:47+08:00`，Asia/Shanghai。
 - `branch`：`codex/project-review-20260820`。
 - `remote_base`：`d7e17302b48d7db79e2456532fe9eb71413fb278`（`review/codex/project-review-20260820`）。
-- `local_HEAD_at_snapshot`：`d7e17302b48d7db79e2456532fe9eb71413fb278`；原未推送文档提交 `d8a3821` 已解提交，以便严格重组为 Commit A/B。
-- `worktree_state`：dirty；Commit A 候选仅为 `operations/run_technical_shadow_daily.py`、`tests/test_technical_shadow_daily.py` 和本文。Commit B 候选为独立 retrospective runner、测试及后续本文增量。`docs/DECISIONS.md` 的一行 Tushare 目录补项是无关遗留，明确不纳入两次提交。
+- `local_HEAD_at_snapshot`：`20fc3818fa1a548724144e97a86efa7541c2f3b9`（Commit A：`feat: add persistent technical shadow forward operations`）。
+- `worktree_state`：dirty；目标改动仅为 Commit B 候选 `operations/run_technical_shadow_retrospective.py`、`tests/test_technical_shadow_retrospective.py` 和本文增量。`docs/DECISIONS.md` 的一行 Tushare 目录补项是无关遗留，明确不纳入提交。
 - 自动任务 `Technical Shadow 0827 前向验收`：`PAUSED`；尚未运行、未启用。
 
-## 当前目标与能力边界
+## 当前目标
 
 冻结 `a-share-technical-shadow-mvp-v1` 的 Alpha 公式、Exposure 阈值、组合和成本规则，在不补造历史交易、不自动下单的前提下，把每日运行改成可迁移、可恢复、create-only、轻量 readiness 和有界 `--when-ready` 的前向 Shadow 运营入口。
 
@@ -25,7 +25,9 @@
 - `automatic_order_submission=false`
 - `live_supported=false` / `live_not_supported`
 
-## Commit A 候选：每日前向运营化
+## 本轮完成
+
+### Commit A：每日前向运营化
 
 - 将账户状态真源与临时报表分离：默认持久状态根为 `data/portfolio/technical-shadow-daily/`，临时报表根为 `data/tmp/technical-shadow-daily/`；两者必须互斥。
 - 提供显式一次性迁移入口，只接受已验证的 `2026-08-25` 旧槽，逐文件哈希复制并保留来源 lineage；不自动迁移、删除或覆盖用户数据。
@@ -44,6 +46,25 @@
 - carry-forward 不执行旧计划、不重新初始化1万元账户、不补造开盘成交；随后允许 `2026-08-27` 使用真实收盘数据生成绑定下一官方交易日且窗口为 `OPEN` 的新前向人工计划。
 - 会计口径保持：`reference_price_gross_pnl=77.00`、`slippage_cost=4.00`、`execution_price_gross_pnl=73.00`、`explicit_fee=15.80`、`net_pnl=57.20`；只允许 `77.00-4.00-15.80=57.20` 或 `73.00-15.80=57.20`，不得重复扣滑点。
 
+### Commit B 候选：隔离回溯决策
+
+- 新增独立 `retrospective_replay` 入口，固定 `strategy_date=2026-08-26`、`execution_date=2026-08-27`，从已验证的 `2026-08-25` 正式状态读取账户和 Exposure 迟滞状态；不创建账户、不写正式状态、不并入前向账本或策略绩效。
+- 决策采集截止日物理限制为 `2026-08-26`；Alpha、Exposure、组合和人工计划完成并固化哈希后，才允许独立查询 `2026-08-27` 真实开盘用于 retrospective execution，禁止把 D+1 信息反馈到决策。
+- 输出到 create-only 的 `data/tmp/technical-shadow-retrospective/2026-08-26/<run_id>/`，固定包含 data receipt、完整 ranking、Exposure、portfolio decision、独立 execution、Markdown report 和 manifest。
+- 所有产物固定 `strategy_signal=false`、`alpha_evidence=false`、`forward_evidence=false`、`trade_recommendation=false`、`paper_eligibility=false`、`trade_eligibility=false`、`real_money_list_allowed=false`、`automatic_order_submission=false`、`state_mutation_allowed=false`、`live_supported=false`。
+- 本次真实 BaoStock 回溯运行结果：Exposure `RISK_OFF`、目标总仓位 `0.0`、`BUY/SELL/HOLD/CASH=0/0/0/1`；虽有6只 Alpha entry 候选，但 `benchmark_trend=-0.036352` 命中 `risk_off_rule`，因此 `simulated_fills=[]`、`execution_result=NO_ACTION`。
+- 真实输出目录为 `data/tmp/technical-shadow-retrospective/2026-08-26/20260827T114520+0800-7f6daa74/`，manifest 文件 SHA-256 为 `b16b38fa32ea276c8ff26a96178896eee7397b0092469b885f42220c8c89894a`。正式状态树运行前后 SHA-256 均为 `97349797e8a88cbea6221d880005e0b729a5c1d19b7a0898846bafcf7bac19bd`，`formal_state_chain_modified=false`。
+- 产物在 `2026-08-27T11:45:20+08:00` 生成时，完整收盘数据尚不可用，因此 `close_valuation_status=PENDING`；这是生成时点证据，不外推为当前行情结论。
+- 无需新增共享模块；Commit B 复用 Commit A 的受控状态验证入口及已有 daily 纯计算辅助函数，避免扩大变更面。
+
+## 关键变更文件
+
+- [每日前向运营入口](../operations/run_technical_shadow_daily.py)
+- [每日前向运营专项测试](../tests/test_technical_shadow_daily.py)
+- [隔离回溯入口](../operations/run_technical_shadow_retrospective.py)
+- [隔离回溯专项测试](../tests/test_technical_shadow_retrospective.py)
+- [冻结 Technical Shadow 配置](../configs/a_share_technical_shadow_mvp.v1.json)
+
 ## 真实状态与运行证据
 
 - 正式持久状态当前只有 `data/portfolio/technical-shadow-daily/2026-08-25/`：现金/NAV `10000.00/10000.00`、持仓 `{}`、Exposure `RISK_OFF`；manifest SHA-256 `84f9cb34757c15131047cdd27dc1ad4972dfe58975b4c462b3e2e34b039037d7`。
@@ -51,11 +72,11 @@
 - `2026-08-27` 前向验收：`not run`。没有 `2026-08-27` 正式状态槽；一次性任务仍为 `PAUSED`。
 - 已有10/20日真实 BaoStock 回放、120日 Exposure 诊断及自然 BUY/SELL 路径保持不变；它们仅证明业务闭环和模拟执行可复核，不证明正式 Alpha 或可交易性。
 
-## 当前验证证据
+## 验证证据
 
 - 状态缺口定向测试：`test_missed_session_carry_forward_preserves_account_and_allows_current_plan`，`Ran 1 test`，退出码0，`OK`。
-- Technical Shadow 全专项：`python -m unittest discover -s tests -p "test_technical_shadow*.py" -v`，`Ran 48 tests in 3.623s`，退出码0，`OK`。
-- 安全全仓回归：先枚举86个 `test_*.py` 模块，精确排除 `test_strategy_workspace_admission`、`test_strategy_workspace_evaluation`、`test_strategy_workspace_experiment`、`test_strategy_workspace_top_decile_backtest`，实际运行82个模块；`Ran 947 tests in 158.123s`，退出码0，`OK (skipped=4)`。四个禁止模块未导入、未运行。
+- Technical Shadow 全专项：`python -m unittest discover -s tests -p "test_technical_shadow*.py" -q`，`Ran 48 tests in 3.873s`，退出码0，`OK`。
+- 安全全仓回归：先枚举86个 `test_*.py` 模块，精确排除 `test_strategy_workspace_admission`、`test_strategy_workspace_evaluation`、`test_strategy_workspace_experiment`、`test_strategy_workspace_top_decile_backtest`，实际运行82个模块；首次运行发现本文缺少固定交接标题并失败，修复标题契约后从头重跑，最终 `Ran 947 tests in 167.028s`，退出码0，`OK (skipped=4)`。四个禁止模块在两次运行中均未导入、未运行。
 - `python -m compileall -q agent research trading operations integrations tests`：退出码0。
 - `git diff --check`：退出码0，仅有 LF→CRLF 提示，无 whitespace error。
 - Markdown 本地链接检查：43个 tracked/nonignored Markdown 文件，`MARKDOWN_LINKS_OK`；检查标准 inline 本地目标是否存在，外链、纯锚点和 Obsidian wikilink不在此检查范围。
@@ -69,6 +90,23 @@
 - Tushare 只有单 HTTP `trade_cal` 诊断成功，整体 capability 未判定、未正式准入；本轮未修改 Tushare。
 - 正式 PIT、样本外统计、Paper admission、交易和真实资金准入均未完成。
 
-## 下一步与审查范围
+## 安全状态
 
-Commit A 仅审查 daily runner、daily tests 和本文对应部分；Commit B 再单独审查 retrospective runner、retrospective tests、隔离产物契约和本文 retrospective 增量。推送前逐 commit 执行 cached diff 检查，并确认 `data/tmp/`、`data/portfolio/`、任务卡、缓存及无关 `DECISIONS.md` 均未进入 Git。
+- `paper_eligibility=false`
+- `trade_eligibility=false`
+- `real_money_list_allowed=false`
+- `automatic_order_submission=false`
+- `live_supported=false` / `live_not_supported`
+- 本轮没有接入券商、生成自动订单、修改 Alpha/Exposure/组合规则、运行 Locked Test 或提升任何准入。
+
+## 待决策
+
+- 无策略参数或准入决策；`2026-08-27` 前向真实运行仍须等待代码推送固定及一次性任务界面确认“不重复”。
+
+## 下一步
+
+逐 commit 核对、推送至 `review/codex/project-review-20260820` 并验证远端与本地 ahead/behind 为 `0/0`。仅在这些条件满足且任务界面确认“不重复”后，才允许启用一次性前向验收任务。
+
+## 建议外部审查范围
+
+Commit A 已固定为 `20fc3818fa1a548724144e97a86efa7541c2f3b9`，仅审查 daily runner、daily tests 和本文对应部分。Commit B 仅审查 retrospective runner、retrospective tests、隔离产物契约和本文增量。推送前执行 cached diff 检查，并确认 `data/tmp/`、`data/portfolio/`、任务卡、缓存及无关 `DECISIONS.md` 均未进入 Git。远端推送并核验 ahead/behind 为 `0/0` 之前，一次性前向验收任务继续保持 `PAUSED`；`2026-08-27` 前向真实运行仍为 `not run`。
