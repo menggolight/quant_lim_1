@@ -97,11 +97,35 @@ class TushareEndpointPayloadError(TushareCapabilityError):
     failure_code = "invalid_payload"
 
 
+class TusharePositiveOrNegativeInfinityError(TushareEndpointPayloadError):
+    """Raised when an endpoint cell contains positive or negative infinity."""
+
+    failure_code = "positive_or_negative_infinity"
+
+
+class TushareUnsupportedScalarError(TushareEndpointPayloadError):
+    """Raised when an endpoint cell cannot be reduced to a safe JSON scalar."""
+
+    failure_code = "unsupported_scalar"
+
+
+class TushareDataFrameShapeError(TushareEndpointPayloadError):
+    """Raised when an SDK response does not have the frozen DataFrame shape."""
+
+    failure_code = "dataframe_shape_invalid"
+
+
+class TushareResponseRowLimitExceededError(TushareEndpointPayloadError):
+    """Raised when an endpoint response exceeds its configured evidence cap."""
+
+    failure_code = "response_row_limit_exceeded"
+
+
 class TushareEndpointSchemaError(TushareEndpointPayloadError):
     """Raised when the upstream response shape lacks frozen required fields."""
 
     status = "schema_drift"
-    failure_code = "schema_drift"
+    failure_code = "schema_required_fields_missing"
 
 
 class TusharePermissionDeniedError(RuntimeError):
@@ -590,6 +614,33 @@ class EndpointSpec:
         }
 
 
+def requested_fields_for(spec: EndpointSpec) -> tuple[str, ...]:
+    """Return the code-owned, deterministic SDK field projection for a spec.
+
+    The config may define the versioned field contract, but it cannot provide
+    an SDK ``fields`` kwarg.  Selection and ordering are fixed here as required
+    fields, then new date fields, then new candidate-primary-key fields.
+    """
+
+    if type(spec) is not EndpointSpec:
+        raise TushareCapabilityConfigError(
+            "requested fields require the exact EndpointSpec type"
+        )
+    selected: list[str] = []
+    seen: set[str] = set()
+    for field_name in (
+        *spec.required_fields,
+        *spec.date_fields,
+        *spec.candidate_primary_key,
+    ):
+        if field_name not in seen:
+            selected.append(field_name)
+            seen.add(field_name)
+    if not selected:
+        raise TushareCapabilityConfigError("requested fields must not be empty")
+    return tuple(selected)
+
+
 _CONFIG_FIELDS = frozenset(
     {
         "schema_version",
@@ -808,8 +859,33 @@ def load_probe_config(path: Path | str) -> ProbeConfig:
     return _config_from_mapping(value)
 
 
-def _normalized_cell(value: Any, field_name: str) -> Any:
+_KNOWN_OPTIONAL_MISSING_SCALAR_TYPES = frozenset(
+    {
+        ("pandas._libs.missing", "NAType"),
+        ("pandas._libs.tslibs.nattype", "NaTType"),
+        ("pandas.api.typing", "NAType"),
+        ("pandas.api.typing", "NaTType"),
+    }
+)
+
+
+def _is_known_optional_missing_scalar(value: Any) -> bool:
+    """Recognize supported missing scalars without importing pandas/numpy."""
+
     if value is None:
+        return True
+    if isinstance(value, float):
+        return math.isnan(value)
+    if isinstance(value, Decimal):
+        return value.is_nan()
+    value_type = type(value)
+    return (value_type.__module__, value_type.__name__) in (
+        _KNOWN_OPTIONAL_MISSING_SCALAR_TYPES
+    )
+
+
+def _normalized_cell(value: Any, field_name: str) -> Any:
+    if _is_known_optional_missing_scalar(value):
         return None
     # Normalize common numpy scalar types without importing numpy.  The item()
     # result is still passed through this strict function.
@@ -818,7 +894,7 @@ def _normalized_cell(value: Any, field_name: str) -> Any:
         try:
             extracted = item()
         except Exception as exc:
-            raise TushareEndpointPayloadError(
+            raise TushareUnsupportedScalarError(
                 f"field {field_name} contains an unsupported scalar"
             ) from exc
         if extracted is not value:
@@ -828,15 +904,15 @@ def _normalized_cell(value: Any, field_name: str) -> Any:
     if isinstance(value, int):
         return value
     if isinstance(value, Decimal):
-        if not value.is_finite():
-            raise TushareEndpointPayloadError(
-                f"field {field_name} contains a non-finite number"
+        if value.is_infinite():
+            raise TusharePositiveOrNegativeInfinityError(
+                f"field {field_name} contains positive or negative infinity"
             )
         return decimal_text(value, field_name)
     if isinstance(value, float):
-        if not math.isfinite(value):
-            raise TushareEndpointPayloadError(
-                f"field {field_name} contains a non-finite number"
+        if math.isinf(value):
+            raise TusharePositiveOrNegativeInfinityError(
+                f"field {field_name} contains positive or negative infinity"
             )
         return decimal_text(value, field_name)
     if isinstance(value, datetime):
@@ -844,19 +920,29 @@ def _normalized_cell(value: Any, field_name: str) -> Any:
     if isinstance(value, date):
         return value.isoformat()
     if isinstance(value, str):
-        text = value.strip()
-        if not text:
-            return None
-        if text.casefold() in {"nan", "+nan", "-nan", "inf", "+inf", "-inf", "infinity", "+infinity", "-infinity"}:
-            raise TushareEndpointPayloadError(
-                f"field {field_name} contains a non-finite sentinel"
-            )
-        if _CONTROL_RE.search(text):
+        if _CONTROL_RE.search(value):
             raise TushareEndpointPayloadError(
                 f"field {field_name} contains control characters"
             )
+        text = value.strip()
+        if not text:
+            return None
+        if text.casefold() in {
+            "nan",
+            "+nan",
+            "-nan",
+            "inf",
+            "+inf",
+            "-inf",
+            "infinity",
+            "+infinity",
+            "-infinity",
+        }:
+            raise TushareEndpointPayloadError(
+                f"field {field_name} contains a non-finite sentinel"
+            )
         return text
-    raise TushareEndpointPayloadError(
+    raise TushareUnsupportedScalarError(
         f"field {field_name} contains unsupported value {type(value).__name__}"
     )
 
@@ -896,6 +982,7 @@ class NormalizedEndpointResult:
     raw_payload_sha256: str
     diagnostics: Mapping[str, Any]
     diagnostic_failure_code: str | None
+    normalization_events: tuple[str, ...]
     response_shape: str = "dataframe_records"
 
     @property
@@ -1163,31 +1250,34 @@ def normalize_endpoint_result(
             "parameters are not one of the frozen calls for this endpoint"
         )
     if response is None:
-        raise TushareEndpointPayloadError("endpoint returned null instead of a DataFrame")
+        raise TushareDataFrameShapeError(
+            "endpoint returned null instead of a DataFrame"
+        )
     if isinstance(response, (str, bytes, bytearray, Mapping, Sequence)):
-        raise TushareEndpointPayloadError(
+        raise TushareDataFrameShapeError(
             "endpoint returned a non-DataFrame payload"
         )
     if not hasattr(response, "columns") or not callable(getattr(response, "to_dict", None)):
-        raise TushareEndpointPayloadError(
+        raise TushareDataFrameShapeError(
             "endpoint returned an unsupported response object"
         )
     try:
         raw_rows = response.to_dict(orient="records")
     except Exception as exc:
-        raise TushareEndpointPayloadError(
+        raise TushareDataFrameShapeError(
             "endpoint DataFrame could not be converted to records"
         ) from exc
     if not isinstance(raw_rows, list) or any(not isinstance(row, Mapping) for row in raw_rows):
-        raise TushareEndpointPayloadError(
+        raise TushareDataFrameShapeError(
             "endpoint DataFrame records are malformed"
         )
     if len(raw_rows) > spec.max_rows:
-        raise TushareEndpointPayloadError(
+        raise TushareResponseRowLimitExceededError(
             "endpoint response exceeds the frozen maximum row count"
         )
     rows: list[Mapping[str, Any]] = []
     field_union: set[str] = set()
+    normalization_events: set[str] = set()
     for index, raw_row in enumerate(raw_rows):
         row: dict[str, Any] = {}
         for raw_key, raw_value in raw_row.items():
@@ -1199,7 +1289,10 @@ def normalize_endpoint_result(
                 raise TushareEndpointPayloadError(
                     f"row {index} contains a duplicate field"
                 )
-            row[raw_key] = _normalized_cell(raw_value, raw_key)
+            normalized_value = _normalized_cell(raw_value, raw_key)
+            if normalized_value is None:
+                normalization_events.add("missing_scalar_normalized")
+            row[raw_key] = normalized_value
             field_union.add(raw_key)
         rows.append(MappingProxyType(dict(sorted(row.items()))))
     fields = tuple(sorted(field_union))
@@ -1274,6 +1367,7 @@ def normalize_endpoint_result(
         raw_payload_sha256=sha256_bytes(raw_payload),
         diagnostics=diagnostics,
         diagnostic_failure_code=diagnostic_failure,
+        normalization_events=tuple(sorted(normalization_events)),
     )
 
 
@@ -1406,7 +1500,10 @@ def classify_endpoint_error(error: Exception) -> ClassifiedEndpointError:
         )
     if isinstance(error, TushareEndpointSchemaError):
         return ClassifiedEndpointError(
-            "schema_drift", "observed_available", "schema", "schema_drift"
+            "schema_drift",
+            "observed_available",
+            "schema",
+            error.failure_code,
         )
     if isinstance(error, TushareEndpointPayloadError):
         return ClassifiedEndpointError(
@@ -1420,6 +1517,8 @@ def classify_endpoint_error(error: Exception) -> ClassifiedEndpointError:
         "not authorized",
         "无权限",
         "没有访问该接口的权限",
+        "没有权限访问该接口",
+        "抱歉，您没有权限访问该接口",
         "积分不足",
     )
     rate_markers = (
@@ -1438,13 +1537,24 @@ def classify_endpoint_error(error: Exception) -> ClassifiedEndpointError:
         return ClassifiedEndpointError(
             "rate_limited", "unknown", "rate_limit", "rate_limited"
         )
+    invalid_parameter_markers = (
+        "invalid parameter",
+        "parameter error",
+        "参数错误",
+        "参数不正确",
+        "请检查参数",
+    )
+    if any(marker in redacted for marker in invalid_parameter_markers):
+        return ClassifiedEndpointError(
+            "invalid_payload", "unknown", "payload", "invalid_parameter"
+        )
     provider_error = classify_unexpected_error(error)
     if isinstance(provider_error, NetworkBlockedError):
         return ClassifiedEndpointError(
             "network_blocked", "unknown", "network", "network_blocked"
         )
     return ClassifiedEndpointError(
-        "failed", "unknown", "unexpected", "endpoint_failed"
+        "failed", "unknown", "unexpected", "unexpected_endpoint_failure"
     )
 
 
@@ -1882,7 +1992,11 @@ class EndpointResultV1:
             self.request_count != 1
             or self.row_count <= 0
             or not self.missing_required_fields
-            or self.failure_code != "required_fields_missing"
+            or self.failure_code
+            not in {
+                "required_fields_missing",
+                "schema_required_fields_missing",
+            }
             or self.rate_limit_or_error_class != "schema"
             or self.failure_stage != "endpoint_request"
         ):
@@ -2140,7 +2254,7 @@ def build_endpoint_result(
             failure_stage = "endpoint_request"
         elif selected_status == "schema_drift":
             error_class = "schema"
-            failure_code = "required_fields_missing"
+            failure_code = "schema_required_fields_missing"
             failure_stage = "endpoint_request"
         else:
             error_class = "payload"
@@ -3231,10 +3345,14 @@ __all__ = [
     "TushareCapabilityConfigError",
     "TushareCapabilityError",
     "TushareCapabilityReceiptV1",
+    "TushareDataFrameShapeError",
     "TushareEndpointPayloadError",
     "TushareEndpointSchemaError",
+    "TusharePositiveOrNegativeInfinityError",
     "TusharePermissionDeniedError",
     "TushareRateLimitedError",
+    "TushareResponseRowLimitExceededError",
+    "TushareUnsupportedScalarError",
     "build_capability_receipt",
     "build_cross_validation_outcome",
     "build_endpoint_result",
@@ -3244,6 +3362,7 @@ __all__ = [
     "load_probe_config",
     "normalize_endpoint_result",
     "normalize_parameters",
+    "requested_fields_for",
     "replay_capability_receipt",
     "replay_endpoint_raw",
     "strict_json_loads",

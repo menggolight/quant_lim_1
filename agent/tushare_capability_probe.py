@@ -56,16 +56,18 @@ from research.market_data.tushare_capability import (
     normalize_endpoint_result,
     normalize_parameters,
     replay_endpoint_raw,
+    requested_fields_for,
     sha256_bytes,
     strict_json_loads,
     verify_capability_receipt,
 )
 
 
-PROBE_VERSION = "tushare-capability-probe-v1"
-PLAN_SCHEMA_VERSION = "tushare-capability-plan-v1"
+PROBE_VERSION = "tushare-capability-probe-v2"
+PLAN_SCHEMA_VERSION = "tushare-capability-plan-v2"
 MANIFEST_SCHEMA_VERSION = "tushare-capability-raw-manifest-v1"
-IMPLEMENTATION_BUNDLE_VERSION = "tushare-capability-implementation-bundle-v1"
+IMPLEMENTATION_BUNDLE_VERSION = "tushare-capability-implementation-bundle-v2"
+REQUESTED_FIELDS_EVIDENCE_VERSION = "tushare-requested-fields-evidence-v1"
 REPOSITORY_ROOT = Path(__file__).resolve().parents[1]
 DEFAULT_CONFIG_PATH = REPOSITORY_ROOT / "configs" / "tushare_capability_probe.v1.json"
 DEFAULT_OUTPUT_ROOT = REPOSITORY_ROOT / "data" / "tmp" / "tushare-capability"
@@ -384,6 +386,29 @@ def _parameter_sets(spec: Any) -> tuple[Mapping[str, str], ...]:
     return tuple(normalized)
 
 
+def _requested_fields_evidence(spec: Any) -> tuple[tuple[str, ...], str, tuple[str, str]]:
+    fields = requested_fields_for(spec)
+    fields_csv = ",".join(fields)
+    evidence_sha256 = sha256_bytes(
+        canonical_json_bytes(
+            {
+                "schema_version": REQUESTED_FIELDS_EVIDENCE_VERSION,
+                "endpoint": _endpoint_name(spec),
+                "requested_fields": list(fields),
+            }
+        )
+    )
+    notes = (
+        f"requested_fields={fields_csv}",
+        f"requested_fields_sha256={evidence_sha256}",
+    )
+    if any(len(note) > 500 for note in notes):
+        raise TushareCapabilityProbeError(
+            "requested field evidence exceeds the endpoint note bound"
+        )
+    return fields, evidence_sha256, notes
+
+
 def _require_tushare_probe_policy(policy: ProviderAccessPolicy) -> None:
     tushare = policy.tushare
     if (
@@ -419,12 +444,17 @@ def build_plan(
                 "daily raw units differ from the fixed cross-validation conversion"
             )
         parameters = _parameter_sets(spec)
+        requested_fields, requested_fields_sha256, _ = _requested_fields_evidence(
+            spec
+        )
         planned_tushare_requests += len(parameters)
         endpoints.append(
             {
                 "endpoint": _endpoint_name(spec),
                 "sdk_method": _sdk_method_name(spec),
                 "parameters": [dict(item) for item in parameters],
+                "requested_fields": list(requested_fields),
+                "requested_fields_sha256": requested_fields_sha256,
                 "max_calls": int(spec.max_calls),
                 "max_rows": int(spec.max_rows),
                 "required_probe": bool(spec.required_probe),
@@ -1252,6 +1282,10 @@ def run_live_probe(
         for spec in config.endpoints:
             endpoint_name = _endpoint_name(spec)
             method_name = _sdk_method_name(spec)
+            requested_fields, _, requested_fields_notes = (
+                _requested_fields_evidence(spec)
+            )
+            requested_fields_csv = ",".join(requested_fields)
             for call_index, parameters in enumerate(_parameter_sets(spec), start=1):
                 requested_at = _aware_now(clock)
                 if global_stop or request_count >= endpoint_budget:
@@ -1281,7 +1315,10 @@ def run_live_probe(
                             raise DependencyMissingError(
                                 f"fixed Tushare SDK endpoint {endpoint_name} is unavailable"
                             )
-                        response = method(**dict(parameters))
+                        response = method(
+                            fields=requested_fields_csv,
+                            **dict(parameters),
+                        )
                         return normalize_endpoint_result(
                             spec,
                             response,
@@ -1330,7 +1367,16 @@ def run_live_probe(
                         request_count=1,
                         normalized=normalized,
                         notes=(
+                            *requested_fields_notes,
                             f"raw_evidence_path={relative_path}",
+                            *(
+                                (
+                                    "normalization=missing_scalar_normalized",
+                                )
+                                if "missing_scalar_normalized"
+                                in normalized.normalization_events
+                                else ()
+                            ),
                             *(
                                 ("sdk_stdout_stderr_suppressed",)
                                 if output_suppressed
@@ -1360,6 +1406,7 @@ def run_live_probe(
                         sanitized_parameters=parameters,
                         request_count=1,
                         error=sanitized,
+                        notes=requested_fields_notes,
                     )
                     endpoint_results.append(result)
                     status = _result_status(result)
@@ -1870,6 +1917,77 @@ def _verify_cross_validation_replay(
         )
 
 
+def _verify_requested_fields_result_notes(
+    receipt: TushareCapabilityReceiptV1,
+    *,
+    config: ProbeConfig,
+) -> None:
+    planned_calls = config.planned_calls()
+    if len(receipt.endpoint_results) != len(planned_calls):
+        raise TushareCapabilityProbeError(
+            "endpoint results differ from the requested-fields plan"
+        )
+    prefixes = ("requested_fields=", "requested_fields_sha256=")
+    for result, (spec, parameters) in zip(
+        receipt.endpoint_results,
+        planned_calls,
+        strict=True,
+    ):
+        if (
+            result.endpoint is not spec.endpoint
+            or dict(result.sanitized_parameters) != dict(parameters)
+        ):
+            raise TushareCapabilityProbeError(
+                "endpoint result order differs from the requested-fields plan"
+            )
+        _, _, expected_notes = _requested_fields_evidence(spec)
+        actual_notes = tuple(
+            note for note in result.notes if note.startswith(prefixes)
+        )
+        normalization_notes = tuple(
+            note for note in result.notes if note.startswith("normalization=")
+        )
+        if result.request_count == 1:
+            if actual_notes != expected_notes:
+                raise TushareCapabilityProbeError(
+                    "attempted endpoint requested-fields evidence is invalid"
+                )
+        elif actual_notes:
+            raise TushareCapabilityProbeError(
+                "unattempted endpoint claims requested fields were sent"
+            )
+        if result.raw_payload_sha256 is None and normalization_notes:
+            raise TushareCapabilityProbeError(
+                "endpoint without raw evidence claims normalization evidence"
+            )
+
+
+def _verify_requested_fields_plan(
+    plan: Mapping[str, Any],
+    *,
+    config: ProbeConfig,
+) -> None:
+    endpoints = plan.get("endpoints")
+    if not isinstance(endpoints, list) or len(endpoints) != len(config.endpoints):
+        raise TushareCapabilityProbeError(
+            "plan endpoints differ from the requested-fields contract"
+        )
+    for planned, spec in zip(endpoints, config.endpoints, strict=True):
+        if not isinstance(planned, Mapping):
+            raise TushareCapabilityProbeError(
+                "plan requested-fields endpoint is malformed"
+            )
+        fields, evidence_sha256, _ = _requested_fields_evidence(spec)
+        if (
+            planned.get("endpoint") != _endpoint_name(spec)
+            or planned.get("requested_fields") != list(fields)
+            or planned.get("requested_fields_sha256") != evidence_sha256
+        ):
+            raise TushareCapabilityProbeError(
+                "plan requested-fields evidence is invalid"
+            )
+
+
 def verify_probe_run(
     run_directory: Path | str,
     *,
@@ -1908,6 +2026,7 @@ def verify_probe_run(
         raise TushareCapabilityProbeError(
             "persisted plan differs from current config and access policy"
         )
+    _verify_requested_fields_plan(plan, config=config)
     expected_manifest_fields = {
         "schema_version",
         "probe_version",
@@ -2036,6 +2155,7 @@ def verify_probe_run(
         receipt_raw,
         config=config,
     )
+    _verify_requested_fields_result_notes(receipt, config=config)
     receipt_payload = _object_dict(receipt, "capability receipt")
     if receipt_payload.get("raw_evidence_manifest_sha256") != sha256_bytes(manifest_raw):
         raise TushareCapabilityProbeError("receipt manifest binding mismatch")
@@ -2077,11 +2197,25 @@ def verify_probe_run(
             raise TushareCapabilityProbeError(
                 "endpoint result raw hash differs from manifest evidence"
             )
-        replay_endpoint_raw(
+        replayed = replay_endpoint_raw(
             config.spec_for(result.endpoint),
             artifact_bytes[str(artifact["path"])],
             expected_result=result,
         )
+        expected_normalization_notes = (
+            ("normalization=missing_scalar_normalized",)
+            if "missing_scalar_normalized" in replayed.normalization_events
+            else ()
+        )
+        actual_normalization_notes = tuple(
+            note
+            for note in result.notes
+            if note.startswith("normalization=")
+        )
+        if actual_normalization_notes != expected_normalization_notes:
+            raise TushareCapabilityProbeError(
+                "endpoint normalization evidence differs from raw replay"
+            )
     if set(tushare_artifacts) != {
         index
         for index, result in enumerate(receipt.endpoint_results)

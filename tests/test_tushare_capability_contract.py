@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from copy import deepcopy
 from datetime import datetime, timedelta, timezone
+from decimal import Decimal
 import json
 from pathlib import Path
 import tempfile
@@ -11,6 +12,7 @@ from research.market_data.providers.base import (
     ProviderNotConfiguredError,
 )
 from research.market_data.tushare_capability import (
+    ALLOWED_PARAMETER_KEYS,
     ClassifiedEndpointError,
     ENDPOINT_ORDER,
     SDK_METHOD_BY_ENDPOINT,
@@ -33,6 +35,7 @@ from research.market_data.tushare_capability import (
     load_probe_config,
     normalize_endpoint_result,
     normalize_parameters,
+    requested_fields_for,
     replay_capability_receipt,
     replay_endpoint_raw,
     strict_json_loads,
@@ -65,6 +68,23 @@ class FakeDataFrame:
         if orient != "records":
             raise AssertionError("probe must request records orientation")
         return [dict(row) for row in self._rows]
+
+
+class NumpyLikeMissingScalar:
+    def item(self):
+        return float("nan")
+
+
+PandasEquivalentNA = type(
+    "NAType",
+    (),
+    {"__module__": "pandas.api.typing"},
+)
+PandasEquivalentNaT = type(
+    "NaTType",
+    (),
+    {"__module__": "pandas.api.typing"},
+)
 
 
 def _normalize(endpoint: str, rows: list[dict[str, object]], call: int = 0):
@@ -244,6 +264,86 @@ class ProbeConfigContractTests(unittest.TestCase):
         with self.assertRaises(TushareCapabilityConfigError):
             normalize_parameters("daily", {"fields": "ts_code,trade_date"})
 
+    def test_requested_fields_are_code_owned_ordered_and_not_parameter_injectable(
+        self,
+    ) -> None:
+        config = load_probe_config(CONFIG_PATH)
+        self.assertTrue(
+            all("fields" not in allowed for allowed in ALLOWED_PARAMETER_KEYS.values())
+        )
+        self.assertEqual(
+            requested_fields_for(config.spec_for("stock_basic")),
+            (
+                "ts_code",
+                "symbol",
+                "name",
+                "area",
+                "industry",
+                "market",
+                "exchange",
+                "list_status",
+                "list_date",
+                "delist_date",
+            ),
+        )
+        self.assertEqual(
+            requested_fields_for(config.spec_for("stk_limit")),
+            ("ts_code", "trade_date", "pre_close", "up_limit", "down_limit"),
+        )
+        self.assertIn(
+            "actual_date",
+            requested_fields_for(config.spec_for("disclosure_date")),
+        )
+        for endpoint in (
+            "income",
+            "income_vip",
+            "balancesheet",
+            "balancesheet_vip",
+            "cashflow",
+            "cashflow_vip",
+        ):
+            self.assertEqual(
+                requested_fields_for(config.spec_for(endpoint)),
+                (
+                    "ts_code",
+                    "ann_date",
+                    "f_ann_date",
+                    "end_date",
+                    "report_type",
+                    "comp_type",
+                ),
+            )
+        self.assertEqual(
+            requested_fields_for(config.spec_for("dividend")),
+            (
+                "ts_code",
+                "end_date",
+                "ann_date",
+                "div_proc",
+                "record_date",
+                "ex_date",
+                "pay_date",
+            ),
+        )
+        for spec in config.endpoints:
+            requested_fields = requested_fields_for(spec)
+            self.assertEqual(
+                len(requested_fields),
+                len(set(requested_fields)),
+                spec.endpoint.value,
+            )
+
+        payload = json.loads(CONFIG_PATH.read_text(encoding="utf-8"))
+        payload["endpoints"][0]["requested_fields"] = ["token"]
+        with tempfile.TemporaryDirectory() as directory:
+            path = Path(directory) / "bad-requested-fields.json"
+            path.write_text(json.dumps(payload), encoding="utf-8")
+            with self.assertRaisesRegex(
+                TushareCapabilityConfigError,
+                "fields differ",
+            ):
+                load_probe_config(path)
+
     def test_strict_json_rejects_duplicate_keys_and_nonfinite_constants(self) -> None:
         with self.assertRaisesRegex(TushareCapabilityError, "duplicate JSON key"):
             strict_json_loads('{"a":1,"a":2}')
@@ -315,7 +415,7 @@ class EndpointNormalizationTests(unittest.TestCase):
                 with self.assertRaises(TushareEndpointPayloadError):
                     normalize_endpoint_result(spec, bad, spec.parameters[0])
 
-    def test_missing_column_duplicate_key_null_key_invalid_date_and_nan(self) -> None:
+    def test_missing_column_duplicate_key_null_key_invalid_date_and_infinity(self) -> None:
         base = {
             "ts_code": "000333.SZ",
             "trade_date": "20260804",
@@ -330,7 +430,17 @@ class EndpointNormalizationTests(unittest.TestCase):
         missing = dict(base)
         missing.pop("pre_close")
         spec, normalized = _normalize("daily", [missing])
-        self.assertEqual(_build(spec, normalized).status, "schema_drift")
+        schema_result = _build(spec, normalized)
+        self.assertEqual(schema_result.status, "schema_drift")
+        self.assertEqual(
+            schema_result.failure_code,
+            "schema_required_fields_missing",
+        )
+        legacy_payload = schema_result.to_dict()
+        legacy_payload["failure_code"] = "required_fields_missing"
+        legacy_result = EndpointResultV1.from_dict(legacy_payload)
+        self.assertEqual(legacy_result.status, "schema_drift")
+        self.assertEqual(legacy_result.failure_code, "required_fields_missing")
 
         _, duplicate = _normalize("daily", [dict(base), dict(base)])
         duplicate_result = _build(spec, duplicate)
@@ -352,10 +462,178 @@ class EndpointNormalizationTests(unittest.TestCase):
         invalid_date["trade_date"] = "20260230"
         with self.assertRaisesRegex(TushareEndpointPayloadError, "invalid date"):
             _normalize("daily", [invalid_date])
-        nonfinite = dict(base)
-        nonfinite["close"] = float("nan")
-        with self.assertRaisesRegex(TushareEndpointPayloadError, "non-finite"):
-            _normalize("daily", [nonfinite])
+        for infinity in (float("inf"), float("-inf"), Decimal("Infinity")):
+            nonfinite = dict(base)
+            nonfinite["close"] = infinity
+            with self.subTest(infinity=str(infinity)):
+                with self.assertRaises(TushareEndpointPayloadError) as raised:
+                    _normalize("daily", [nonfinite])
+                classified = classify_endpoint_error(raised.exception)
+                self.assertEqual(
+                    classified.failure_code,
+                    "positive_or_negative_infinity",
+                )
+
+    def test_supported_missing_scalars_become_json_null_with_exact_rates(self) -> None:
+        rows = [
+            {
+                "ts_code": "000333.SZ",
+                "ann_date": "20250430",
+                "f_ann_date": PandasEquivalentNaT(),
+                "end_date": "20241231",
+                "report_type": "1",
+                "comp_type": "1",
+                "python_none": None,
+                "float_nan": float("nan"),
+                "decimal_nan": Decimal("NaN"),
+                "numpy_like_nan": NumpyLikeMissingScalar(),
+                "pandas_na": PandasEquivalentNA(),
+                "business_text": "N/A Holdings",
+            },
+            {
+                "ts_code": "000333.SZ",
+                "ann_date": "20250501",
+                "f_ann_date": "20250502",
+                "end_date": "20241231",
+                "report_type": "1",
+                "comp_type": "1",
+                "python_none": "present",
+                "float_nan": "present",
+                "decimal_nan": "present",
+                "numpy_like_nan": "present",
+                "pandas_na": "present",
+                "business_text": "NaN Holdings",
+            },
+        ]
+        spec, normalized = _normalize("income", rows)
+        result = _build(spec, normalized)
+
+        self.assertEqual(result.status, "passed")
+        self.assertEqual(
+            normalized.normalization_events,
+            ("missing_scalar_normalized",),
+        )
+        for field_name in (
+            "f_ann_date",
+            "python_none",
+            "float_nan",
+            "decimal_nan",
+            "numpy_like_nan",
+            "pandas_na",
+        ):
+            self.assertIsNone(normalized.rows[0][field_name])
+            self.assertEqual(result.null_rates[field_name], "0.5")
+        self.assertEqual(normalized.rows[0]["business_text"], "N/A Holdings")
+        self.assertEqual(normalized.rows[1]["business_text"], "NaN Holdings")
+        self.assertEqual(result.min_date, "2024-12-31")
+        self.assertEqual(result.max_date, "2025-05-02")
+
+        raw = json.loads(normalized.raw_payload.decode("utf-8"))
+        for field_name in (
+            "f_ann_date",
+            "python_none",
+            "float_nan",
+            "decimal_nan",
+            "numpy_like_nan",
+            "pandas_na",
+        ):
+            self.assertIsNone(raw["rows"][0][field_name])
+        replayed = replay_endpoint_raw(
+            spec,
+            normalized.raw_payload,
+            expected_result=result,
+        )
+        self.assertEqual(
+            replayed.normalization_events,
+            ("missing_scalar_normalized",),
+        )
+
+    def test_actual_pandas_missing_scalars_are_optional_dependency_compatible(self) -> None:
+        try:
+            import pandas as pd
+        except ModuleNotFoundError:
+            self.skipTest("pandas is optional at the domain boundary")
+        rows = [
+            {
+                "ts_code": "000333.SZ",
+                "ann_date": "20250430",
+                "f_ann_date": pd.NaT,
+                "end_date": "20241231",
+                "report_type": "1",
+                "comp_type": "1",
+                "metric": pd.NA,
+            }
+        ]
+        _, normalized = _normalize("income", rows)
+        self.assertIsNone(normalized.rows[0]["f_ann_date"])
+        self.assertIsNone(normalized.rows[0]["metric"])
+
+    def test_unsupported_scalar_shape_row_limit_and_control_characters_are_distinct(
+        self,
+    ) -> None:
+        config = load_probe_config(CONFIG_PATH)
+        daily = config.spec_for("daily")
+
+        with self.assertRaises(TushareEndpointPayloadError) as shape_error:
+            normalize_endpoint_result(daily, None, daily.parameters[0])
+        self.assertEqual(
+            classify_endpoint_error(shape_error.exception).failure_code,
+            "dataframe_shape_invalid",
+        )
+
+        too_many = [
+            {
+                "ts_code": f"{index:06d}.SZ",
+                "trade_date": "20260804",
+                "open": 1,
+                "high": 1,
+                "low": 1,
+                "close": 1,
+                "pre_close": 1,
+                "vol": 1,
+                "amount": 1,
+            }
+            for index in range(daily.max_rows + 1)
+        ]
+        with self.assertRaises(TushareEndpointPayloadError) as row_limit:
+            normalize_endpoint_result(
+                daily,
+                FakeDataFrame(too_many),
+                daily.parameters[0],
+            )
+        self.assertEqual(
+            classify_endpoint_error(row_limit.exception).failure_code,
+            "response_row_limit_exceeded",
+        )
+
+        unsupported = {
+            "ts_code": "000333.SZ",
+            "trade_date": "20260804",
+            "open": object(),
+            "high": 1,
+            "low": 1,
+            "close": 1,
+            "pre_close": 1,
+            "vol": 1,
+            "amount": 1,
+        }
+        with self.assertRaises(TushareEndpointPayloadError) as scalar_error:
+            _normalize("daily", [unsupported])
+        self.assertEqual(
+            classify_endpoint_error(scalar_error.exception).failure_code,
+            "unsupported_scalar",
+        )
+
+        for unsafe_text in ("unsafe\n", "\tunsafe", "unsafe\rtext"):
+            controlled = dict(unsupported)
+            controlled["open"] = 1
+            controlled["provider_note"] = unsafe_text
+            with self.subTest(unsafe_text=repr(unsafe_text)):
+                with self.assertRaisesRegex(
+                    TushareEndpointPayloadError,
+                    "control characters",
+                ):
+                    _normalize("daily", [controlled])
 
     def test_index_basic_candidates_and_index_weight_snapshot_diagnostics(self) -> None:
         index_rows = [
@@ -489,7 +767,10 @@ class ErrorAndReceiptContractTests(unittest.TestCase):
                 "network_blocked", "unknown", "network", "network_blocked"
             ),
             ClassifiedEndpointError(
-                "failed", "unknown", "unexpected", "endpoint_failed"
+                "failed",
+                "unknown",
+                "unexpected",
+                "unexpected_endpoint_failure",
             ),
         )
         for classified in cases:
@@ -646,6 +927,24 @@ class ErrorAndReceiptContractTests(unittest.TestCase):
         self.assertEqual(
             classify_endpoint_error(ConnectionError("network down")).status,
             "network_blocked",
+        )
+        chinese_permission = classify_endpoint_error(
+            RuntimeError("抱歉，您没有权限访问该接口，权限的具体详情请查看文档")
+        )
+        self.assertEqual(chinese_permission.status, "permission_denied")
+        self.assertEqual(chinese_permission.failure_code, "permission_denied")
+        invalid_parameter = classify_endpoint_error(
+            RuntimeError("输入参数错误，请检查参数")
+        )
+        self.assertEqual(invalid_parameter.status, "invalid_payload")
+        self.assertEqual(invalid_parameter.failure_code, "invalid_parameter")
+        unexpected = classify_endpoint_error(
+            RuntimeError("unclassified upstream endpoint failure")
+        )
+        self.assertEqual(unexpected.status, "failed")
+        self.assertEqual(
+            unexpected.failure_code,
+            "unexpected_endpoint_failure",
         )
 
     def test_receipt_schema_hash_and_canonical_semantic_replay(self) -> None:

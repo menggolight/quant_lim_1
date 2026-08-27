@@ -28,7 +28,7 @@ Provider 原始响应
 |---|---|---|---|
 | BaoStock | 沪深市场不复权日线、交易日历、证券基础信息 | 默认主源；完整合格批次可标为 `validated_research_only` | SDK 为可选依赖；是否安装、网络是否可达必须以本机真实探针为准。不是官方真值认证 |
 | Choice | 历史代码支持`EmQuantAPI`沪深A股`qfq`日线、白名单`000300.SH`不复权日线、交易日历和隔离候选证据 | 当前访问已到期；新网络、诊断session及新的正式离线研究消费均失败关闭 | 在SDK导入、初始化或登录前固定返回`provider_access_expired`；旧raw/quarantine/validated/诊断证据保留但不自动消费，也不触发其他Provider fallback |
-| Tushare | 现有V1只支持指定证券不复权日线独立核验；扩展接口位于隔离的capability probe与诊断runner | 可选核验/能力候选，不阻塞BaoStock且不形成正式dataset | 37/37统一失败只证明公共诊断不足；旧single-endpoint runner以`capability_probe_bug`封存；新授权链只允许一次HTTP `trade_cal`并必须形成可重放终态receipt，运行前Tushare capability继续`unknown` |
+| Tushare | 现有V1只支持指定证券不复权日线独立核验；扩展接口位于隔离的capability probe与诊断runner | 可选核验/能力候选，不阻塞BaoStock且不形成正式dataset | 2000积分账户的一次22-call probe已观察到部分核心接口可访问；标准财务权限因旧runner缺失值规范化缺陷仍未判定；显式fields与合法缺失值兼容正在修复，`formal_data_admission=false` |
 | AKShare | 受控扩展骨架，没有已配置数据集 | 禁用、未准入 | 不提供任意函数执行；Eastmoney 上游或 `*_em` 接口只能是 `diagnostic_only/not_admitted` |
 | Eastmoney Legacy | 既有历史行情和行业榜探针 | 仅 Legacy 诊断；不是默认源、验证源或 fallback | Registry 不把旧缓存适配为 validated batch。东方财富研报公开样本来源与行情诊断是两条独立链路 |
 

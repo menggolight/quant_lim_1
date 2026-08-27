@@ -39,6 +39,7 @@ from research.market_data.tushare_capability import load_probe_config
 from research.market_data.tushare_capability import (
     canonical_json_bytes,
     canonical_sha256,
+    requested_fields_for,
     sha256_bytes,
 )
 
@@ -310,6 +311,35 @@ class TushareCapabilityProbeTest(unittest.TestCase):
             result["global_maximum_request_count"],
         )
 
+    def test_plan_v2_binds_deterministic_requested_fields_and_hashes(self):
+        from agent import tushare_capability_probe as module
+
+        plan = build_plan(self.config)
+        self.assertEqual(plan["schema_version"], "tushare-capability-plan-v2")
+        self.assertEqual(plan["probe_version"], "tushare-capability-probe-v2")
+        self.assertEqual(len(plan["endpoints"]), len(self.config.endpoints))
+        for planned, spec in zip(
+            plan["endpoints"],
+            self.config.endpoints,
+            strict=True,
+        ):
+            expected_fields = requested_fields_for(spec)
+            expected_sha256 = sha256_bytes(
+                canonical_json_bytes(
+                    {
+                        "schema_version": module.REQUESTED_FIELDS_EVIDENCE_VERSION,
+                        "endpoint": spec.endpoint.value,
+                        "requested_fields": list(expected_fields),
+                    }
+                )
+            )
+            self.assertEqual(planned["requested_fields"], list(expected_fields))
+            self.assertEqual(
+                planned["requested_fields_sha256"],
+                expected_sha256,
+            )
+            self.assertNotIn(SECRET, ",".join(planned["requested_fields"]))
+
     def test_no_mode_defaults_to_offline_plan(self):
         stdout = io.StringIO()
         with patch(
@@ -341,6 +371,141 @@ class TushareCapabilityProbeTest(unittest.TestCase):
         self.assertEqual(set(called), {item.sdk_method for item in self.config.endpoints})
         self.assertFalse(result["formal_data_admission"])
         self.assertFalse(result["trade_eligibility"])
+
+    def test_every_sdk_call_receives_exact_fields_outside_business_parameters(self):
+        result, client, _ = self.run_fixture(run_id="explicit-requested-fields")
+        self.assertEqual(len(client.calls), len(self.config.planned_calls()))
+        for index, ((method_name, kwargs), (spec, parameters)) in enumerate(
+            zip(
+                client.calls,
+                self.config.planned_calls(),
+                strict=True,
+            )
+        ):
+            self.assertEqual(method_name, spec.sdk_method)
+            sent = dict(kwargs)
+            self.assertEqual(
+                sent.pop("fields"),
+                ",".join(requested_fields_for(spec)),
+            )
+            self.assertEqual(sent, dict(parameters))
+            self.assertNotIn(
+                "fields",
+                result["endpoint_results"][index]["sanitized_parameters"],
+            )
+
+        calls_by_endpoint = {
+            endpoint: kwargs
+            for endpoint, kwargs in client.calls
+        }
+        self.assertIn("exchange", calls_by_endpoint["stock_basic"]["fields"])
+        self.assertIn("list_status", calls_by_endpoint["stock_basic"]["fields"])
+        self.assertIn("delist_date", calls_by_endpoint["stock_basic"]["fields"])
+        self.assertIn("pre_close", calls_by_endpoint["stk_limit"]["fields"])
+        self.assertIn("actual_date", calls_by_endpoint["disclosure_date"]["fields"])
+        for endpoint in (
+            "income",
+            "income_vip",
+            "balancesheet",
+            "balancesheet_vip",
+            "cashflow",
+            "cashflow_vip",
+        ):
+            self.assertEqual(
+                calls_by_endpoint[endpoint]["fields"],
+                "ts_code,ann_date,f_ann_date,end_date,report_type,comp_type",
+            )
+
+    def test_requested_fields_and_missing_normalization_are_receipt_bound(self):
+        def router(endpoint, parameters):
+            if endpoint == "daily":
+                return FakeFrame(
+                    [daily_record(extra={"nullable_metric": float("nan")})]
+                )
+            return FakeFrame([])
+
+        result, _, _ = self.run_fixture(
+            FakeClient(router),
+            run_id="requested-fields-evidence",
+        )
+        for item, (spec, _) in zip(
+            result["endpoint_results"],
+            self.config.planned_calls(),
+            strict=True,
+        ):
+            expected_fields = ",".join(requested_fields_for(spec))
+            self.assertEqual(item["notes"][0], f"requested_fields={expected_fields}")
+            self.assertTrue(item["notes"][1].startswith("requested_fields_sha256="))
+            self.assertNotIn(SECRET, json.dumps(item["notes"]))
+        daily = next(
+            item for item in result["endpoint_results"] if item["endpoint"] == "daily"
+        )
+        self.assertIn("normalization=missing_scalar_normalized", daily["notes"])
+        raw_path = (
+            self.run_directory("requested-fields-evidence")
+            / "raw"
+            / "daily.01.json"
+        )
+        raw = json.loads(raw_path.read_text(encoding="utf-8"))
+        self.assertIsNone(raw["rows"][0]["nullable_metric"])
+        verify_probe_run(
+            self.run_directory("requested-fields-evidence"),
+            config=self.config,
+            secret=SECRET,
+        )
+
+    def test_resigned_requested_fields_note_tamper_fails_verification(self):
+        self.run_fixture(run_id="requested-fields-note-tamper")
+        directory = self.run_directory("requested-fields-note-tamper")
+        receipt_path = directory / "receipt.json"
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        receipt["endpoint_results"][0]["notes"][0] = "requested_fields=ts_code"
+        receipt_path.write_bytes(canonical_json_bytes(receipt))
+        self.resign_manifest_and_receipt(directory)
+        with self.assertRaisesRegex(
+            TushareCapabilityProbeError,
+            "requested-fields evidence",
+        ):
+            verify_probe_run(directory, config=self.config, secret=SECRET)
+
+    def test_resigned_missing_normalization_note_tamper_fails_verification(self):
+        def router(endpoint, parameters):
+            if endpoint == "income":
+                return FakeFrame(
+                    [
+                        {
+                            "ts_code": "000333.SZ",
+                            "ann_date": "20250430",
+                            "f_ann_date": "20250501",
+                            "end_date": "20241231",
+                            "report_type": "1",
+                            "comp_type": "1",
+                            "nullable_metric": float("nan"),
+                        }
+                    ]
+                )
+            return FakeFrame([])
+
+        self.run_fixture(
+            FakeClient(router),
+            run_id="normalization-note-tamper",
+        )
+        directory = self.run_directory("normalization-note-tamper")
+        receipt_path = directory / "receipt.json"
+        receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
+        income = next(
+            item
+            for item in receipt["endpoint_results"]
+            if item["endpoint"] == "income"
+        )
+        income["notes"].remove("normalization=missing_scalar_normalized")
+        receipt_path.write_bytes(canonical_json_bytes(receipt))
+        self.resign_manifest_and_receipt(directory)
+        with self.assertRaisesRegex(
+            TushareCapabilityProbeError,
+            "normalization evidence",
+        ):
+            verify_probe_run(directory, config=self.config, secret=SECRET)
 
     def test_probe_receipt_cannot_unlock_experiment_v3_or_formal_alpha(self):
         from research.strategy_workspace.alpha_engine_v2 import (
@@ -962,10 +1127,22 @@ else:
         with self.assertRaisesRegex(TushareCapabilityProbeError, "raw units"):
             build_plan(drifted)
 
-    def test_run_directory_is_create_only(self):
+    def test_run_directory_is_create_only_and_preserves_receipt_bytes(self):
         self.run_fixture()
-        with self.assertRaisesRegex(TushareCapabilityProbeError, "overwrite"):
-            self.run_fixture()
+        receipt_path = self.run_directory() / "receipt.json"
+        receipt_before = receipt_path.read_bytes()
+        with patch(
+            "agent.tushare_capability_probe._read_tushare_token",
+            side_effect=AssertionError(
+                "existing run must fail before credential access"
+            ),
+        ), self.assertRaisesRegex(TushareCapabilityProbeError, "overwrite"):
+            self.run_fixture(
+                sdk_loader=lambda: self.fail(
+                    "existing run must fail before SDK loading"
+                )
+            )
+        self.assertEqual(receipt_path.read_bytes(), receipt_before)
 
     def test_windows_device_and_trailing_alias_run_ids_fail_before_credentials(self):
         unsafe = (

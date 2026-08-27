@@ -7,10 +7,8 @@
 - 用户已确认 Choice 接口权限到期。新的 Choice 网络访问必须在 SDK 导入、初始化和登录前以 `provider_access_expired` 失败关闭。
 - 既有 Choice raw、quarantine、validated、诊断和归档证据继续保留；在许可证后续使用边界经人工确认前，不得把旧数据送入新的正式研究消费。保留文件和校验哈希不等于仍拥有新的使用授权。
 - BaoStock 继续是 `market_data.v1` 的默认主源。Tushare 仍只保留现有 `daily_bar` 独立核验职责；本轮不创建 `market_data.v2`，也不把任何探针接口注册为正式 dataset。
-- Tushare 5000 只描述待验证的账户能力假设。官方文档列出接口或积分门槛，不证明当前 Token 有权访问，也不证明历史覆盖、时点字段和返回 Schema 满足本项目要求。
 - capability receipt 固定为 `capability_probe_only_not_admitted`；成功、自哈希或重放通过均不能授予正式 MarketDataBatch、Factor Registry、Experiment V3、Daily Alpha、Paper、交易或 LIVE 权限。
-- 首次37次真实请求全部统一落入`unexpected`，只判为公共入口诊断不足。随后唯一一次`trade_cal` SDK/HTTP诊断在receipt发布前发生runner failure；marker-bound sealed postmortem V3结论为`capability_probe_bug`，runtime参数及两通道结果均不可用，因此Tushare能力继续`unknown`，本轮不重跑、不启用`daily`。
-- 用户已另行授权一个不可复用的新轮次：只允许直接HTTP调用一次`trade_cal`，`max_requests=1`；不运行SDK、`daily`或22接口。该轮次必须以create-only哈希链持久化请求预留、网络开始、响应收到和终态，失败前缀只允许离线replay补终态receipt，不能借恢复重发。
+- 2000 积分账户已观察到部分核心接口可访问；标准财务权限因 probe normalization 缺陷仍未判定；显式 `fields` 与合法缺失值兼容正在修复；`formal_data_admission=false` 保持不变。
 
 ## Probe 与正式 Provider 的区别
 
