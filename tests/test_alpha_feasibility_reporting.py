@@ -199,7 +199,7 @@ class AlphaFeasibilityReportingTests(unittest.TestCase):
         data = _blocked_data()
         data["data_status"] = "BLOCKED_ADAPTER_PROTOCOL"
         data["pit_months_observed"] = 0
-        data["remaining_blockers"] = ["response_root_fields_differ_from_contract"]
+        data["remaining_blockers"] = ["semantic_core_missing"]
         report = reporting.build_blocked_alpha_feasibility_report(
             commit_sha=COMMIT_SHA,
             data_summary=data,
@@ -211,6 +211,45 @@ class AlphaFeasibilityReportingTests(unittest.TestCase):
         self.assertIsNone(report["validation_metrics"])
         self.assertIsNone(report["concentration_metrics"])
         reporting.verify_alpha_feasibility_report(report, experiment=self.experiment)
+
+    def test_protocol_blocker_codes_are_exact_and_upstream_errors_remain_data_blocks(self) -> None:
+        expected = {
+            "duplicate_json_key",
+            "semantic_core_missing",
+            "semantic_core_type_invalid",
+            "response_body_too_large",
+            "transport_extensions_too_large",
+            "transport_extensions_too_deep",
+            "transport_extension_secret_detected",
+            "data_payload_invalid",
+            "unknown_non_json_value",
+        }
+        self.assertEqual(set(reporting.ADAPTER_PROTOCOL_BLOCKERS), expected)
+
+        for blocker in (
+            "upstream_permission_error",
+            "upstream_rate_limit_error",
+            "upstream_authentication_account_error",
+            "upstream_invalid_parameter_error",
+            "upstream_server_internal_error",
+            "upstream_unknown_error",
+        ):
+            with self.subTest(blocker=blocker):
+                data = _blocked_data()
+                data["data_status"] = "BLOCKED_DATA"
+                data["remaining_blockers"] = [blocker]
+                report = reporting.build_blocked_alpha_feasibility_report(
+                    commit_sha=COMMIT_SHA,
+                    data_summary=data,
+                    experiment=self.experiment,
+                    generated_at=GENERATED_AT,
+                )
+                self.assertEqual(report["terminal_status"], "BLOCKED_DATA")
+                self.assertEqual(report["remaining_blockers"], [blocker])
+                reporting.verify_alpha_feasibility_report(
+                    report,
+                    experiment=self.experiment,
+                )
 
     def test_blocked_report_requires_a_real_blocker(self) -> None:
         data = _blocked_data()

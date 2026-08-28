@@ -15,7 +15,15 @@
 
 PIT 通过后，只对73个月合法截面的成员并集回填。所有请求在本地形成不含 Token 的参数指纹、started claim、规范化响应哈希和 create-only 产物；完整任务离线重放，已开始但没有持久化响应的远端调用按歧义失败关闭，不自动重发。上游响应或错误字段一旦出现 `2024-01-01` 及以后日期，在进入消费者前隔离且不保存原始正文。
 
-Tushare HTTP 成功包络的必需根字段固定为 `code/msg/data`，只允许额外传输元数据 `request_id`。`request_id` 必须是1至160字符的保守ASCII opaque ID；完整值不写入normalized rows、PIT manifest或Experiment内容哈希，只在v2 transport receipt中记录存在性和可选SHA-256。任何其他根字段、缺失必需字段、重复JSON key、非对象根、非法类型或放松后的data内部结构都会失败关闭。根字段不匹配的quarantine只保存HTTP状态、字节数、响应SHA-256、安全化字段清单、缺失/未知字段、Token泄漏检查和稳定失败码，不保存正文、Token、Authorization、Cookie或完整request_id。
+Tushare HTTP 根包络分为严格 `semantic_core` 与受控 `transport_extensions`。`semantic_core` 必须且只能按语义解释 `code/msg/data`：根必须是无重复key的JSON object，`code`必须是int且不接受bool，`msg`只能是string或null；`code=0`时`data`必须是object，`code!=0`时`data`只能是null或受控错误object。缺少核心字段或类型漂移一律失败关闭。非零`code`仍须按结构化code、msg和HTTP状态进入权限、限频、账户认证、参数、服务端或未知上游错误分类；扩展字段存在不能绕过非零`code`。
+
+除三项核心字段外的所有顶层字段统一进入 `transport_extensions`，不维护 `request_id/detail/...` 固定可选白名单。安全非空字段名及其合法JSON标量、数组或object可被接受，因此 `request_id`、string/object/array形态的`detail`和未来`trace_id`本身不会触发 `BLOCKED_ADAPTER_PROTOCOL`；但扩展及其嵌套key仍须通过控制字符、secret-like key、当前`TUSHARE_TOKEN`精确内容、非有限数和纯JSON类型检查。完整响应最多2 MiB，扩展规范化对象最多256 KiB，扩展最多64个根字段、4096个总元素、8层嵌套，单字符串最多65536字符。任何上限或secret检查失败都在解释上游错误前失败关闭。
+
+传输与内容身份分成三层：`raw_transport_sha256`绑定完整原始响应正文，`transport_extensions_sha256`绑定扩展规范化对象，`normalized_content_sha256`只绑定经严格`fields/items`和领域规则规范化后的data内容。相同data仅改变扩展时，前两层按实际字节/扩展变化，`normalized_content_sha256`及PIT截面内容身份必须保持不变；`request_id`、`detail`及未来扩展不得进入normalized rows、PIT manifest或Experiment内容哈希。
+
+普通transport receipt只保存观察到的根字段、三项核心字段、扩展字段名/JSON类型/逐值SHA-256、扩展整体SHA-256与字节数、完整传输SHA-256及Token泄漏检查，不保存扩展原值。完整原始正文只有通过严格Token/secret扫描后才允许进入忽略Git的create-only原始证据目录；存在扩展时，普通重放证据使用剥离扩展后的规范化core/data包络。已封存的v2 `request_id`-only receipt只允许原位只读重放，不升级或改写；更旧或不匹配的receipt继续拒绝。quarantine同样只保存安全化元数据、稳定失败码和受控上游分类，不输出完整`detail`、request ID、Token、Authorization或Cookie。
+
+适配器协议阻断稳定码固定为九类：`duplicate_json_key`、`semantic_core_missing`、`semantic_core_type_invalid`、`response_body_too_large`、`transport_extensions_too_large`、`transport_extensions_too_deep`、`transport_extension_secret_detected`、`data_payload_invalid`、`unknown_non_json_value`。`upstream_permission_error`、`upstream_rate_limit_error`、`upstream_authentication_account_error`、`upstream_invalid_parameter_error`、`upstream_server_internal_error`和`upstream_unknown_error`表示核心与扩展契约已经通过后的上游拒绝，归入`BLOCKED_DATA`而不是适配器协议漂移。
 
 历史完整性要求：
 

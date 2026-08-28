@@ -50,7 +50,7 @@
         "redirects_allowed": {"const": false},
         "automatic_retries": {"const": 0},
         "request_timeout_seconds": {"type": "integer", "minimum": 1, "maximum": 60},
-        "maximum_response_bytes": {"type": "integer", "minimum": 1024},
+        "maximum_response_bytes": {"type": "integer", "minimum": 1024, "maximum": 2097152},
         "minimum_request_interval_seconds": {"type": "string", "pattern": "^[0-9]+(?:\\.[0-9]+)?$"},
         "token_persistence_forbidden": {"const": true},
         "field_level_fallback_forbidden": {"const": true},

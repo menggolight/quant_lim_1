@@ -1,0 +1,88 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tushare_alpha_feasibility_task_response.v3.json",
+  "title": "Tushare Alpha Feasibility Task Response V3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "state",
+    "task_id",
+    "endpoint",
+    "plan_sha256",
+    "raw_response_sha256",
+    "wire_response_sha256",
+    "transport_receipt",
+    "raw_response_persisted",
+    "normalized_rows_sha256",
+    "normalized_content_sha256",
+    "row_count",
+    "isolated_future_delist_date_count",
+    "isolated_non_union_row_count",
+    "rows",
+    "locked_test_status",
+    "locked_test_consumed",
+    "response_artifact_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "tushare-alpha-feasibility-task-response.v3"},
+    "state": {"const": "RESPONSE_VALIDATED"},
+    "task_id": {"type": "string", "pattern": "^[a-z_]+-[0-9a-f]{64}$"},
+    "endpoint": {"enum": ["trade_cal", "index_weight", "daily", "adj_factor", "index_daily", "suspend_d", "stock_basic"]},
+    "plan_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+    "raw_response_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+    "wire_response_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+    "transport_receipt": {"$ref": "#/$defs/transport_receipt"},
+    "raw_response_persisted": {"type": "boolean"},
+    "normalized_rows_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+    "normalized_content_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+    "row_count": {"type": "integer", "minimum": 0},
+    "isolated_future_delist_date_count": {"type": "integer", "minimum": 0},
+    "isolated_non_union_row_count": {"type": "integer", "minimum": 0},
+    "rows": {"type": "array", "items": {"type": "object"}},
+    "locked_test_status": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/locked"},
+    "locked_test_consumed": {"const": false},
+    "response_artifact_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"}
+  },
+  "$defs": {
+    "json_type": {
+      "enum": ["null", "boolean", "integer", "number", "string", "array", "object"]
+    },
+    "transport_receipt": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "observed_root_fields",
+        "semantic_core_fields",
+        "transport_extension_field_names",
+        "transport_extension_type_by_field",
+        "transport_extension_value_sha256_by_field",
+        "transport_extensions_sha256",
+        "transport_extensions_byte_count",
+        "raw_transport_sha256",
+        "token_leak_check"
+      ],
+      "properties": {
+        "observed_root_fields": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+        "semantic_core_fields": {"const": ["code", "data", "msg"]},
+        "transport_extension_field_names": {"type": "array", "maxItems": 64, "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9._:-]{0,127}$"}, "uniqueItems": true},
+        "transport_extension_type_by_field": {
+          "type": "object",
+          "maxProperties": 64,
+          "propertyNames": {"pattern": "^[A-Za-z_][A-Za-z0-9._:-]{0,127}$"},
+          "additionalProperties": {"$ref": "#/$defs/json_type"}
+        },
+        "transport_extension_value_sha256_by_field": {
+          "type": "object",
+          "maxProperties": 64,
+          "propertyNames": {"pattern": "^[A-Za-z_][A-Za-z0-9._:-]{0,127}$"},
+          "additionalProperties": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"}
+        },
+        "transport_extensions_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+        "transport_extensions_byte_count": {"type": "integer", "minimum": 2, "maximum": 262144},
+        "raw_transport_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+        "token_leak_check": {"const": "PASSED"}
+      }
+    }
+  }
+}

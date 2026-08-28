@@ -47,6 +47,7 @@ def response_bytes(
     rows: list[list[object]],
     *,
     request_id: object = _REQUEST_ID_UNSET,
+    extensions: dict[str, object] | None = None,
 ) -> bytes:
     payload = {
         "code": 0,
@@ -55,6 +56,8 @@ def response_bytes(
     }
     if request_id is not _REQUEST_ID_UNSET:
         payload["request_id"] = request_id
+    if extensions:
+        payload.update(extensions)
     return json.dumps(
         payload,
         ensure_ascii=False,
@@ -100,12 +103,14 @@ class InMemoryCompletedStore:
             response_artifact_sha256=row_hash,
             transport_receipt=MappingProxyType(
                 {
-                    "http_status": 200,
-                    "response_byte_count": 1,
-                    "response_body_sha256": row_hash,
-                    "accepted_root_fields": ["code", "data", "msg"],
-                    "request_id_present": False,
-                    "request_id_sha256": None,
+                    "observed_root_fields": ["code", "data", "msg"],
+                    "semantic_core_fields": ["code", "data", "msg"],
+                    "transport_extension_field_names": [],
+                    "transport_extension_type_by_field": {},
+                    "transport_extension_value_sha256_by_field": {},
+                    "transport_extensions_sha256": hashlib.sha256(b"{}").hexdigest(),
+                    "transport_extensions_byte_count": 2,
+                    "raw_transport_sha256": row_hash,
                     "token_leak_check": "PASSED",
                 }
             ),
@@ -190,168 +195,401 @@ class TushareResponseEnvelopeTests(unittest.TestCase):
         payload.update(changes)
         return json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
-    def test_required_root_only_and_optional_request_id_both_pass(self):
-        without = self._validate(response_bytes("trade_cal", self.rows))
-        with_request = self._validate(
-            response_bytes("trade_cal", self.rows, request_id="req-201712-abc123")
-        )
-        self.assertEqual(without.accepted_root_fields, ("code", "data", "msg"))
-        self.assertFalse(without.request_id_present)
-        self.assertIsNone(without.request_id_sha256)
+    def _assert_data_failure(self, raw: bytes, category: str):
+        with self.assertRaises(AlphaFeasibilityDataError) as raised:
+            self._validate(raw)
+        self.assertEqual(raised.exception.code, "data_payload_invalid")
         self.assertEqual(
-            with_request.accepted_root_fields,
-            ("code", "data", "msg", "request_id"),
+            raised.exception.diagnostic["data_failure_category"], category
         )
-        self.assertTrue(with_request.request_id_present)
-        self.assertRegex(with_request.request_id_sha256, r"^[0-9a-f]{64}$")
+        return raised.exception
 
-        opaque_current_request_date = self._validate(
-            response_bytes(
-                "trade_cal",
-                self.rows,
-                request_id="req-20260828-abc",
-            )
+    def test_semantic_core_and_controlled_extension_shapes_pass(self):
+        cases = (
+            ({}, (), {}),
+            ({"request_id": "req-201712-abc123"}, ("request_id",), {"request_id": "string"}),
+            ({"detail": "provider detail"}, ("detail",), {"detail": "string"}),
+            ({"detail": {"status": "ok", "attempt": 1}}, ("detail",), {"detail": "object"}),
+            ({"detail": ["ok", 1, None]}, ("detail",), {"detail": "array"}),
+            (
+                {"request_id": "req-pair", "detail": {"status": "ok"}},
+                ("detail", "request_id"),
+                {"detail": "object", "request_id": "string"},
+            ),
+            (
+                {"trace_id": "trace-2025-01-02-future-extension"},
+                ("trace_id",),
+                {"trace_id": "string"},
+            ),
         )
-        self.assertTrue(opaque_current_request_date.request_id_present)
-
-    def test_invalid_request_id_types_empty_length_control_and_path_are_rejected(self):
-        invalid = (
-            7,
-            {},
-            [],
-            "",
-            "x" * 161,
-            "control\nvalue",
-            "../request",
-            "folder/request",
-            "folder\\request",
-            "C:temp",
-        )
-        for request_id in invalid:
-            with self.subTest(request_id=repr(request_id)):
-                code = (
-                    "response_request_id_type_invalid"
-                    if type(request_id) is not str
-                    else "response_request_id_format_invalid"
+        normalized_hash = None
+        for extensions, expected_names, expected_types in cases:
+            with self.subTest(extensions=extensions):
+                validated = self._validate(self._payload(**extensions))
+                self.assertEqual(validated.semantic_core_fields, ("code", "data", "msg"))
+                self.assertEqual(
+                    validated.observed_root_fields,
+                    tuple(sorted({"code", "msg", "data", *extensions})),
                 )
-                with self.assertRaisesRegex(AlphaFeasibilityDataError, code):
-                    self._validate(
-                        response_bytes(
-                            "trade_cal",
-                            self.rows,
-                            request_id=request_id,
-                        )
-                    )
-
-    def test_unknown_and_missing_root_fields_fail_with_safe_diagnostics(self):
-        unknown = self._payload(trace_id="not-accepted")
-        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
-            store = CreateOnlyTaskStore(temporary)
-            transport = FakeTransport(lambda **_kwargs: unknown)
-            with self.assertRaisesRegex(
-                AlphaFeasibilityDataError,
-                "response_root_fields_differ_from_contract",
-            ):
-                store.execute(
-                    self.task,
-                    token=TOKEN,
-                    transport=transport,
-                    timeout_seconds=1,
-                    maximum_response_bytes=8_388_608,
+                self.assertEqual(
+                    validated.transport_extension_field_names, expected_names
                 )
-            evidence = json.loads(
-                store.quarantine_path(self.task).read_text(encoding="utf-8")
-            )
-        self.assertEqual(evidence["http_status"], 200)
-        self.assertEqual(evidence["response_byte_count"], len(unknown))
-        self.assertEqual(
-            evidence["response_body_sha256"], hashlib.sha256(unknown).hexdigest()
-        )
-        self.assertEqual(
-            evidence["sorted_observed_root_fields"],
-            ["code", "data", "msg", "trace_id"],
-        )
-        self.assertEqual(evidence["missing_required_root_fields"], [])
-        self.assertEqual(evidence["unexpected_root_fields"], ["trace_id"])
-        self.assertEqual(evidence["token_leak_check"], "PASSED")
-        self.assertEqual(
-            evidence["failure_code"],
-            "response_root_fields_differ_from_contract",
-        )
-        self.assertNotIn("not-accepted", json.dumps(evidence, sort_keys=True))
-        self.assertNotIn(TOKEN, json.dumps(evidence, sort_keys=True))
+                self.assertEqual(
+                    dict(validated.transport_extension_type_by_field), expected_types
+                )
+                self.assertRegex(validated.transport_extensions_sha256, r"^[0-9a-f]{64}$")
+                if normalized_hash is None:
+                    normalized_hash = validated.normalized_content_sha256
+                self.assertEqual(validated.normalized_content_sha256, normalized_hash)
 
-        for missing_field in ("code", "data"):
-            payload = json.loads(self._payload().decode("utf-8"))
+    def test_missing_semantic_core_and_core_types_fail_closed(self):
+        for missing_field in ("code", "msg", "data"):
+            payload = json.loads(self._payload(trace_id="safe-extension").decode("utf-8"))
             payload.pop(missing_field)
             raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
             with self.subTest(missing_field=missing_field):
                 with self.assertRaises(AlphaFeasibilityDataError) as raised:
                     self._validate(raw)
+                self.assertEqual(raised.exception.code, "semantic_core_missing")
                 self.assertEqual(
-                    raised.exception.code,
-                    "response_root_fields_differ_from_contract",
-                )
-                self.assertEqual(
-                    raised.exception.diagnostic["missing_required_root_fields"],
+                    raised.exception.diagnostic["missing_semantic_core_fields"],
                     [missing_field],
                 )
 
-    def test_code_and_data_types_are_strict_and_nonzero_null_is_controlled(self):
-        with self.assertRaisesRegex(
-            AlphaFeasibilityDataError, "response_code_type_invalid"
-        ):
-            self._validate(self._payload(code=True))
-        with self.assertRaisesRegex(
-            AlphaFeasibilityDataError, "response_message_type_invalid"
-        ):
-            self._validate(self._payload(msg=7))
-        with self.assertRaisesRegex(
-            AlphaFeasibilityDataError, "response_data_not_object"
-        ):
-            self._validate(self._payload(data=None))
-        with self.assertRaisesRegex(
-            AlphaFeasibilityDataError, "upstream_response_not_success"
-        ):
-            self._validate(self._payload(code=-2001, msg="permission denied", data=None))
-        with self.assertRaisesRegex(
-            AlphaFeasibilityDataError, "response_error_data_type_invalid"
-        ):
-            self._validate(self._payload(code=-2001, data=[]))
-        with self.assertRaisesRegex(
-            AlphaFeasibilityDataError, "credential_echo_in_response"
-        ):
+        invalid = (
+            (self._payload(code=True), "bool code"),
+            (self._payload(msg=7), "non-string msg"),
+            (self._payload(data=None), "null success data"),
+            (self._payload(code=-1, msg="permission denied", data=[]), "array error data"),
+            (b"[]", "non-object root"),
+        )
+        for raw, label in invalid:
+            with self.subTest(label=label):
+                with self.assertRaises(AlphaFeasibilityDataError) as raised:
+                    self._validate(raw)
+                self.assertEqual(raised.exception.code, "semantic_core_type_invalid")
+
+    def test_duplicate_json_keys_and_malformed_json_fail_closed(self):
+        with self.assertRaises(AlphaFeasibilityDataError) as duplicate:
+            self._validate(b'{"code":0,"code":0,"msg":null,"data":{}}')
+        self.assertEqual(duplicate.exception.code, "duplicate_json_key")
+        with self.assertRaises(AlphaFeasibilityDataError) as malformed:
+            self._validate(b'{"code":0')
+        self.assertEqual(malformed.exception.code, "unknown_non_json_value")
+
+    def test_nonzero_code_is_classified_and_extensions_do_not_bypass_it(self):
+        classifications = (
+            (2002, "opaque upstream text", "permission"),
+            (-1, "permission denied snapshot 2024-01-02", "permission"),
+            (-1, "invalid parameter supplied", "invalid_parameter"),
+            (-1, "too many requests", "rate_limit"),
+            (-1, "service unavailable", "server_internal"),
+        )
+        for code, message, category in classifications:
+            with self.subTest(category=category):
+                raw = self._payload(
+                    code=code,
+                    msg=message,
+                    data={"reason": "controlled error object"},
+                    request_id="error-request",
+                    detail={"provider": "opaque error detail"},
+                    trace_id="future-extension",
+                )
+                with self.assertRaises(AlphaFeasibilityDataError) as raised:
+                    self._validate(raw)
+                self.assertEqual(raised.exception.code, f"upstream_{category}_error")
+                self.assertEqual(raised.exception.diagnostic["upstream_code"], code)
+                self.assertEqual(
+                    raised.exception.diagnostic["upstream_error_category"], category
+                )
+                diagnostic = json.dumps(
+                    dict(raised.exception.diagnostic), sort_keys=True
+                )
+                self.assertNotIn(message, diagnostic)
+                self.assertNotIn("controlled error object", diagnostic)
+                self.assertNotIn("opaque error detail", diagnostic)
+
+    def test_data_internal_contract_keeps_stable_outer_code_and_diagnostic_subclass(self):
+        invalid_payloads = (
+            (
+                self._payload(data={"fields": list(self.task.fields), "items": self.rows, "extra": 1}),
+                "response_data_fields_differ_from_contract",
+            ),
+            (
+                self._payload(
+                    data={
+                        "fields": ["exchange", "cal_date", "is_open", "is_open"],
+                        "items": self.rows,
+                    }
+                ),
+                "response_fields_not_unique_string_array",
+            ),
+            (
+                self._payload(data={"fields": list(reversed(self.task.fields)), "items": self.rows}),
+                "response_fields_differ_from_contract",
+            ),
+            (
+                self._payload(data={"fields": list(self.task.fields), "items": {}}),
+                "response_items_not_array",
+            ),
+            (
+                self._payload(data={"fields": list(self.task.fields), "items": [["SSE"]]}),
+                "response_row_shape_invalid",
+            ),
+            (
+                self._payload(data={"fields": list(self.task.fields), "items": self.rows * 2}),
+                "duplicate_response_primary_key",
+            ),
+        )
+        for raw, category in invalid_payloads:
+            with self.subTest(category=category):
+                self._assert_data_failure(raw, category)
+
+    def test_secret_keys_and_token_values_fail_without_persisting_original_values(self):
+        secret_cases = (
+            ({"secret": "top-level-secret-value"}, "top-level-secret-value"),
+            ({"Token": "mixed-case-token-value"}, "mixed-case-token-value"),
+            (
+                {"detail": {"credential": "nested-credential-value"}},
+                "nested-credential-value",
+            ),
+        )
+        for extensions, forbidden in secret_cases:
+            with self.subTest(extensions=tuple(extensions)):
+                with self.assertRaises(AlphaFeasibilityDataError) as raised:
+                    self._validate(self._payload(**extensions))
+                self.assertEqual(
+                    raised.exception.code, "transport_extension_secret_detected"
+                )
+                serialized = json.dumps(
+                    dict(raised.exception.diagnostic), sort_keys=True
+                )
+                self.assertNotIn(forbidden, serialized)
+                self.assertNotIn(TOKEN, serialized)
+
+        raw = self._payload(detail={"note": TOKEN})
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            store = CreateOnlyTaskStore(temporary)
+            with self.assertRaises(AlphaFeasibilityDataError) as raised:
+                store.execute(
+                    self.task,
+                    token=TOKEN,
+                    transport=FakeTransport(lambda **_kwargs: raw),
+                    timeout_seconds=1,
+                    maximum_response_bytes=taf.MAXIMUM_RESPONSE_BYTES,
+                )
+            self.assertEqual(
+                raised.exception.code, "transport_extension_secret_detected"
+            )
+            self.assertFalse(store.raw_path(self.task).exists())
+            self.assertFalse(store.response_path(self.task).exists())
+            quarantine = store.quarantine_path(self.task).read_bytes()
+            self.assertNotIn(TOKEN.encode("utf-8"), quarantine)
+            evidence = json.loads(quarantine)
+            self.assertIsNone(evidence["raw_transport_sha256"])
+            self.assertEqual(evidence["token_leak_check"], "RAW_LEAK_REJECTED")
+
+    def test_nan_infinity_control_characters_and_invalid_json_values_are_rejected(self):
+        lone_surrogate = self._payload(detail="safe").replace(
+            b'"detail":"safe"', b'"detail":"\\ud800"'
+        )
+        invalid = (
+            self._payload(detail=float("nan")),
+            self._payload(detail=float("inf")),
+            self._payload(detail=float("-inf")),
+            self._payload(detail="control\nvalue"),
+            self._payload(**{"bad\nfield": "value"}),
+            lone_surrogate,
+        )
+        for raw in invalid:
+            with self.subTest(raw=raw[-40:]):
+                with self.assertRaises(AlphaFeasibilityDataError) as raised:
+                    self._validate(raw)
+                self.assertEqual(raised.exception.code, "unknown_non_json_value")
+
+    def test_high_precision_decimal_extensions_keep_distinct_hash_identity(self):
+        numbers = (
+            b"0.1234567890123456789012345678901",
+            b"0.1234567890123456789012345678902",
+        )
+        validated = []
+        for number in numbers:
+            raw = self._payload(detail=0).replace(b'"detail":0', b'"detail":' + number)
+            validated.append(self._validate(raw))
+        self.assertNotEqual(
+            validated[0].transport_extension_value_sha256_by_field["detail"],
+            validated[1].transport_extension_value_sha256_by_field["detail"],
+        )
+        self.assertNotEqual(
+            validated[0].transport_extensions_sha256,
+            validated[1].transport_extensions_sha256,
+        )
+        self.assertEqual(
+            validated[0].normalized_content_sha256,
+            validated[1].normalized_content_sha256,
+        )
+
+    def test_extreme_json_nesting_has_stable_protocol_error(self):
+        depth = 1_100
+        deeply_nested = self._payload(detail=0).replace(
+            b'"detail":0',
+            b'"detail":' + (b"[" * depth) + b"0" + (b"]" * depth),
+        )
+        with self.assertRaises(AlphaFeasibilityDataError) as raised:
+            self._validate(deeply_nested)
+        # This stdlib build parses 1,100 levels, so the controlled extension
+        # depth guard wins. A parser RecursionError is separately normalized
+        # to unknown_non_json_value by strict_json_loads.
+        self.assertEqual(raised.exception.code, "transport_extensions_too_deep")
+
+    def test_response_and_extension_byte_limits_are_inclusive(self):
+        response_limit = taf.MAXIMUM_RESPONSE_BYTES
+        empty_message = self._payload(msg="")
+        exact = self._payload(msg="m" * (response_limit - len(empty_message)))
+        self.assertEqual(len(exact), response_limit)
+        self._validate(exact)
+        with self.assertRaises(AlphaFeasibilityDataError) as oversized_response:
+            self._validate(exact + b" ")
+        self.assertEqual(
+            oversized_response.exception.code, "response_body_too_large"
+        )
+
+        extension_limit = taf.MAXIMUM_TRANSPORT_EXTENSIONS_BYTES
+        empty_values = {field: "" for field in ("a", "b", "c", "d")}
+        overhead = len(
+            json.dumps(
+                empty_values, sort_keys=True, separators=(",", ":")
+            ).encode("utf-8")
+        )
+        remaining = extension_limit - overhead
+        lengths = [taf.MAXIMUM_TRANSPORT_EXTENSION_STRING_LENGTH] * 3
+        lengths.append(remaining - sum(lengths))
+        extensions = {
+            field: "x" * length
+            for field, length in zip(("a", "b", "c", "d"), lengths)
+        }
+        accepted = self._validate(self._payload(**extensions))
+        self.assertEqual(accepted.transport_extensions_byte_count, extension_limit)
+        extensions["d"] += "x"
+        with self.assertRaises(AlphaFeasibilityDataError) as oversized_extensions:
+            self._validate(self._payload(**extensions))
+        self.assertEqual(
+            oversized_extensions.exception.code, "transport_extensions_too_large"
+        )
+
+    def test_extension_depth_and_field_count_limits_are_inclusive(self):
+        def nested_object(depth: int) -> object:
+            value: object = "leaf"
+            for _ in range(depth):
+                value = {"node": value}
+            return value
+
+        accepted_depth = self._validate(
+            self._payload(detail=nested_object(taf.MAXIMUM_TRANSPORT_EXTENSION_DEPTH))
+        )
+        self.assertEqual(
+            accepted_depth.transport_extension_type_by_field["detail"], "object"
+        )
+        with self.assertRaises(AlphaFeasibilityDataError) as too_deep:
             self._validate(
-                response_bytes("trade_cal", self.rows, request_id=TOKEN)
+                self._payload(
+                    detail=nested_object(taf.MAXIMUM_TRANSPORT_EXTENSION_DEPTH + 1)
+                )
+            )
+        self.assertEqual(too_deep.exception.code, "transport_extensions_too_deep")
+
+        fields = {
+            f"extension_{index:02d}": index
+            for index in range(taf.MAXIMUM_TRANSPORT_EXTENSION_FIELDS)
+        }
+        accepted_fields = self._validate(self._payload(**fields))
+        self.assertEqual(
+            len(accepted_fields.transport_extension_field_names),
+            taf.MAXIMUM_TRANSPORT_EXTENSION_FIELDS,
+        )
+        fields["one_more_extension"] = 65
+        with self.assertRaises(AlphaFeasibilityDataError) as too_many_fields:
+            self._validate(self._payload(**fields))
+        self.assertEqual(
+            too_many_fields.exception.code, "transport_extensions_too_large"
+        )
+        too_many_raw = self._payload(**fields)
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            store = CreateOnlyTaskStore(temporary)
+            with self.assertRaises(AlphaFeasibilityDataError) as quarantined:
+                store.execute(
+                    self.task,
+                    token=TOKEN,
+                    transport=FakeTransport(lambda **_kwargs: too_many_raw),
+                    timeout_seconds=1,
+                    maximum_response_bytes=taf.MAXIMUM_RESPONSE_BYTES,
+                )
+            self.assertEqual(
+                quarantined.exception.code, "transport_extensions_too_large"
+            )
+            evidence = json.loads(
+                store.quarantine_path(self.task).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                evidence["failure_code"], "transport_extensions_too_large"
+            )
+            self.assertLessEqual(
+                len(evidence["transport_extension_field_names"]),
+                taf.MAXIMUM_TRANSPORT_EXTENSION_FIELDS,
             )
 
-    def test_data_internal_contract_duplicate_json_keys_and_nonobject_root_remain_strict(self):
-        duplicate_fields = self._payload(
-            data={
-                "fields": ["exchange", "cal_date", "is_open", "is_open"],
-                "items": self.rows,
-            }
+    def test_extension_element_and_string_limits_are_inclusive(self):
+        accepted_elements = self._validate(
+            self._payload(
+                detail=[0] * (taf.MAXIMUM_TRANSPORT_EXTENSION_ELEMENTS - 1)
+            )
         )
-        with self.assertRaisesRegex(
-            AlphaFeasibilityDataError,
-            "response_fields_not_unique_string_array",
-        ):
-            self._validate(duplicate_fields)
-        with self.assertRaisesRegex(AlphaFeasibilityDataError, "duplicate_json_key"):
-            self._validate(b'{"code":0,"code":0,"msg":null,"data":{}}')
-        with self.assertRaisesRegex(
-            AlphaFeasibilityDataError, "response_root_not_object"
-        ):
-            self._validate(b"[]")
+        self.assertEqual(
+            accepted_elements.transport_extension_type_by_field["detail"], "array"
+        )
+        with self.assertRaises(AlphaFeasibilityDataError) as too_many_elements:
+            self._validate(
+                self._payload(detail=[0] * taf.MAXIMUM_TRANSPORT_EXTENSION_ELEMENTS)
+            )
+        self.assertEqual(
+            too_many_elements.exception.code, "transport_extensions_too_large"
+        )
 
-    def test_request_id_changes_transport_hash_but_not_normalized_identity(self):
-        first_id = "req-first-opaque"
-        second_id = "req-second-opaque"
+        accepted_string = self._validate(
+            self._payload(
+                detail="x" * taf.MAXIMUM_TRANSPORT_EXTENSION_STRING_LENGTH
+            )
+        )
+        self.assertEqual(
+            accepted_string.transport_extension_type_by_field["detail"], "string"
+        )
+        with self.assertRaises(AlphaFeasibilityDataError) as too_long:
+            self._validate(
+                self._payload(
+                    detail="x"
+                    * (taf.MAXIMUM_TRANSPORT_EXTENSION_STRING_LENGTH + 1)
+                )
+            )
+        self.assertEqual(too_long.exception.code, "unknown_non_json_value")
+
+    def test_three_hash_layers_change_independently_and_receipts_omit_values(self):
+        extension_sets = (
+            {
+                "request_id": "req-first-opaque",
+                "detail": {"provider_note": "opaque-first-value"},
+            },
+            {
+                "request_id": "req-second-opaque",
+                "detail": ["opaque-second-value", 2],
+            },
+        )
         results = []
         roots = []
         response_artifacts = []
-        for request_id in (first_id, second_id):
-            raw = response_bytes("trade_cal", self.rows, request_id=request_id)
+        for extensions in extension_sets:
+            raw = response_bytes(
+                "trade_cal", self.rows, extensions=dict(extensions)
+            )
             root = tempfile.TemporaryDirectory(dir=ROOT)
             self.addCleanup(root.cleanup)
             roots.append(Path(root.name))
@@ -367,15 +605,66 @@ class TushareResponseEnvelopeTests(unittest.TestCase):
             response_artifacts.append(
                 json.loads(store.response_path(self.task).read_text(encoding="utf-8"))
             )
-            self.assertNotIn(request_id.encode("utf-8"), store.raw_path(self.task).read_bytes())
-            self.assertNotIn(
-                request_id.encode("utf-8"), store.response_path(self.task).read_bytes()
+            receipt = dict(result.transport_receipt)
+            self.assertEqual(
+                set(receipt),
+                {
+                    "observed_root_fields",
+                    "semantic_core_fields",
+                    "transport_extension_field_names",
+                    "transport_extension_type_by_field",
+                    "transport_extension_value_sha256_by_field",
+                    "transport_extensions_sha256",
+                    "transport_extensions_byte_count",
+                    "raw_transport_sha256",
+                    "token_leak_check",
+                },
             )
-            self.assertNotIn(TOKEN.encode("utf-8"), store.response_path(self.task).read_bytes())
+            self.assertEqual(
+                receipt["transport_extension_field_names"], ["detail", "request_id"]
+            )
+            artifact_bytes = b"\n".join(
+                path.read_bytes()
+                for path in Path(root.name).rglob("*")
+                if path.is_file()
+            )
+            detail_value = extensions["detail"]
+            detail_text = (
+                detail_value["provider_note"]
+                if isinstance(detail_value, dict)
+                else detail_value[0]
+            )
+            for original in (extensions["request_id"], detail_text, TOKEN):
+                self.assertNotIn(str(original).encode("utf-8"), artifact_bytes)
 
         self.assertNotEqual(
             results[0].raw_transport_sha256,
             results[1].raw_transport_sha256,
+        )
+        self.assertNotEqual(
+            results[0].transport_extensions_sha256,
+            results[1].transport_extensions_sha256,
+        )
+        self.assertEqual(
+            results[0].normalized_content_sha256,
+            results[1].normalized_content_sha256,
+        )
+        expected_normalized_content_sha256 = canonical_sha256(
+            {
+                "fields": list(self.task.fields),
+                "items": [
+                    [row[field] for field in self.task.fields]
+                    for row in results[0].rows
+                ],
+            }
+        )
+        self.assertEqual(
+            results[0].normalized_content_sha256,
+            expected_normalized_content_sha256,
+        )
+        self.assertNotEqual(
+            results[0].normalized_content_sha256,
+            canonical_sha256([dict(row) for row in results[0].rows]),
         )
         self.assertEqual(
             canonical_sha256([dict(row) for row in results[0].rows]),
@@ -389,13 +678,25 @@ class TushareResponseEnvelopeTests(unittest.TestCase):
             response_artifacts[0]["normalized_rows_sha256"],
             response_artifacts[1]["normalized_rows_sha256"],
         )
+        self.assertEqual(
+            response_artifacts[0]["normalized_content_sha256"],
+            expected_normalized_content_sha256,
+        )
+        self.assertEqual(
+            response_artifacts[0]["normalized_content_sha256"],
+            response_artifacts[1]["normalized_content_sha256"],
+        )
         self.assertNotEqual(
-            results[0].transport_receipt["request_id_sha256"],
-            results[1].transport_receipt["request_id_sha256"],
+            results[0].transport_receipt[
+                "transport_extension_value_sha256_by_field"
+            ]["request_id"],
+            results[1].transport_receipt[
+                "transport_extension_value_sha256_by_field"
+            ]["request_id"],
         )
         normalized = canonical_json_bytes([dict(row) for row in results[0].rows])
-        self.assertNotIn(first_id.encode("utf-8"), normalized)
-        self.assertNotIn(second_id.encode("utf-8"), normalized)
+        for extensions in extension_sets:
+            self.assertNotIn(extensions["request_id"].encode("utf-8"), normalized)
         self.assertNotIn(TOKEN.encode("utf-8"), normalized)
 
         coverage = taf.HistoryCoverageResult(
@@ -450,8 +751,11 @@ class TushareResponseEnvelopeTests(unittest.TestCase):
         )
         self.assertEqual(history_manifests[0], history_manifests[1])
 
-    def test_adapter_protocol_terminal_stops_after_first_request(self):
-        raw = self._payload(trace_id="unexpected")
+    def test_semantic_protocol_failure_stops_after_first_request(self):
+        raw = json.dumps(
+            {"code": 0, "msg": None, "trace_id": "safe-extension"},
+            separators=(",", ":"),
+        ).encode("utf-8")
         transport = FakeTransport(lambda **_kwargs: raw)
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             result = run_backfill(
@@ -537,6 +841,14 @@ class TushareResponseEnvelopeTests(unittest.TestCase):
             executions[0].raw_transport_sha256,
             executions[1].raw_transport_sha256,
         )
+        self.assertNotEqual(
+            executions[0].transport_extensions_sha256,
+            executions[1].transport_extensions_sha256,
+        )
+        self.assertEqual(
+            executions[0].normalized_content_sha256,
+            executions[1].normalized_content_sha256,
+        )
         self.assertEqual(manifests[0], manifests[1])
         serialized = canonical_json_bytes(manifests[0])
         for request_id in request_ids:
@@ -560,6 +872,15 @@ class TushareCreateOnlyTests(unittest.TestCase):
             timeout_seconds=source["request_timeout_seconds"],
             maximum_response_bytes=source["maximum_response_bytes"],
         )
+
+    def _assert_execute_data_failure(self, store, task, transport, category):
+        with self.assertRaises(AlphaFeasibilityDataError) as raised:
+            self._execute(store, task, transport)
+        self.assertEqual(raised.exception.code, "data_payload_invalid")
+        self.assertEqual(
+            raised.exception.diagnostic["data_failure_category"], category
+        )
+        return raised.exception
 
     def test_complete_task_resumes_offline_and_token_never_appears_in_artifacts(self):
         task = self._trade_calendar_task()
@@ -586,7 +907,70 @@ class TushareCreateOnlyTests(unittest.TestCase):
                     self.assertNotIn(TOKEN.encode("utf-8"), path.read_bytes())
             self.assertEqual(first.raw_response_sha256, hashlib.sha256(raw).hexdigest())
 
-    def test_legacy_sealed_receipt_is_rejected_read_only_and_never_modified(self):
+    def test_v2_request_id_only_receipt_replays_read_only_without_rewrite(self):
+        task = self._trade_calendar_task()
+        rows_on_wire = [["SSE", "20170701", 0, "20170630"]]
+        request_id = "sealed-v2-request-id"
+        wire = response_bytes("trade_cal", rows_on_wire, request_id=request_id)
+        persisted = response_bytes("trade_cal", rows_on_wire)
+        rows = [dict(row) for row in taf.validate_response_bytes(task, wire).rows]
+        receipt = {
+            "http_status": 200,
+            "response_byte_count": len(wire),
+            "response_body_sha256": hashlib.sha256(wire).hexdigest(),
+            "accepted_root_fields": ["code", "data", "msg", "request_id"],
+            "request_id_present": True,
+            "request_id_sha256": hashlib.sha256(request_id.encode("utf-8")).hexdigest(),
+            "token_leak_check": "PASSED",
+        }
+        sealed = {
+            "schema_version": "tushare-alpha-feasibility-task-response.v2",
+            "state": "RESPONSE_VALIDATED",
+            "task_id": task.task_id,
+            "endpoint": task.endpoint,
+            "plan_sha256": task.plan_sha256,
+            "raw_response_sha256": hashlib.sha256(persisted).hexdigest(),
+            "wire_response_sha256": hashlib.sha256(wire).hexdigest(),
+            "transport_receipt": receipt,
+            "raw_response_persisted": True,
+            "normalized_rows_sha256": canonical_sha256(rows),
+            "row_count": len(rows),
+            "isolated_future_delist_date_count": 0,
+            "isolated_non_union_row_count": 0,
+            "rows": rows,
+            "locked_test_status": dict(LOCKED_TEST_STATUS),
+            "locked_test_consumed": False,
+        }
+        sealed["response_artifact_sha256"] = canonical_sha256(sealed)
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            store = CreateOnlyTaskStore(temporary)
+            store.started_path(task).parent.mkdir(parents=True)
+            store.raw_path(task).parent.mkdir(parents=True)
+            store.started_path(task).write_bytes(
+                canonical_json_bytes(taf._started_payload(task))
+            )
+            store.raw_path(task).write_bytes(persisted)
+            store.response_path(task).write_bytes(canonical_json_bytes(sealed))
+            before = {
+                path: (path.read_bytes(), path.stat().st_mtime_ns)
+                for path in (
+                    store.started_path(task),
+                    store.raw_path(task),
+                    store.response_path(task),
+                )
+            }
+            never = FakeTransport(
+                lambda **_kwargs: self.fail("sealed v2 receipt must not resend")
+            )
+            replay = self._execute(store, task, never)
+            self.assertTrue(replay.replayed)
+            self.assertTrue(replay.request_id_present)
+            self.assertEqual(replay.raw_transport_sha256, hashlib.sha256(wire).hexdigest())
+            self.assertEqual(never.calls, [])
+            for path, expected in before.items():
+                self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), expected)
+
+    def test_v1_sealed_receipt_is_rejected_read_only_and_never_modified(self):
         task = self._trade_calendar_task()
         raw = response_bytes("trade_cal", [["SSE", "20170701", 0, "20170630"]])
         rows = [dict(row) for row in taf.validate_response_bytes(task, raw).rows]
@@ -623,7 +1007,7 @@ class TushareCreateOnlyTests(unittest.TestCase):
                     store.response_path(task),
                 )
             }
-            never = FakeTransport(lambda **_kwargs: self.fail("legacy receipt must not resend"))
+            never = FakeTransport(lambda **_kwargs: self.fail("v1 receipt must not resend"))
             with self.assertRaisesRegex(
                 AlphaFeasibilityDataError,
                 "response_artifact_fields_mismatch",
@@ -660,13 +1044,21 @@ class TushareCreateOnlyTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             store = CreateOnlyTaskStore(temporary)
-            with self.assertRaisesRegex(AlphaFeasibilityDataError, "post_cutoff_response_date"):
-                self._execute(store, task, FakeTransport(lambda **_kwargs: raw))
+            self._assert_execute_data_failure(
+                store,
+                task,
+                FakeTransport(lambda **_kwargs: raw),
+                "post_cutoff_response_date",
+            )
             self.assertFalse(store.raw_path(task).exists())
             self.assertFalse(store.response_path(task).exists())
             quarantine = store.quarantine_path(task).read_text(encoding="utf-8")
             self.assertNotIn("20240102", quarantine)
             self.assertIn(hashlib.sha256(raw).hexdigest(), quarantine)
+            self.assertEqual(
+                json.loads(quarantine)["data_failure_category"],
+                "post_cutoff_response_date",
+            )
 
     def test_post_cutoff_date_hidden_in_message_is_quarantined_without_raw(self):
         task = self._trade_calendar_task()
@@ -681,8 +1073,12 @@ class TushareCreateOnlyTests(unittest.TestCase):
         raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             store = CreateOnlyTaskStore(temporary)
-            with self.assertRaisesRegex(AlphaFeasibilityDataError, "post_cutoff_response_date"):
-                self._execute(store, task, FakeTransport(lambda **_kwargs: raw))
+            self._assert_execute_data_failure(
+                store,
+                task,
+                FakeTransport(lambda **_kwargs: raw),
+                "post_cutoff_response_date",
+            )
             self.assertFalse(store.raw_path(task).exists())
             self.assertNotIn(b"2024-01-02", store.quarantine_path(task).read_bytes())
 
@@ -695,8 +1091,12 @@ class TushareCreateOnlyTests(unittest.TestCase):
         transport = FakeTransport(lambda **_kwargs: raw)
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             store = CreateOnlyTaskStore(temporary)
-            with self.assertRaisesRegex(AlphaFeasibilityDataError, "post_cutoff_response_date"):
-                self._execute(store, suspend, transport)
+            self._assert_execute_data_failure(
+                store,
+                suspend,
+                transport,
+                "post_cutoff_response_date",
+            )
             self.assertEqual(len(transport.calls), 1)
             self.assertFalse(store.raw_path(suspend).exists())
             self.assertFalse(store.response_path(suspend).exists())
@@ -715,8 +1115,12 @@ class TushareCreateOnlyTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             store = CreateOnlyTaskStore(temporary)
-            with self.assertRaisesRegex(AlphaFeasibilityDataError, "post_cutoff_response_date"):
-                self._execute(store, stock, FakeTransport(lambda **_kwargs: stock_raw))
+            self._assert_execute_data_failure(
+                store,
+                stock,
+                FakeTransport(lambda **_kwargs: stock_raw),
+                "post_cutoff_response_date",
+            )
             self.assertFalse(store.raw_path(stock).exists())
             self.assertFalse(store.response_path(stock).exists())
 
@@ -748,12 +1152,12 @@ class TushareCreateOnlyTests(unittest.TestCase):
         )
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             store = CreateOnlyTaskStore(temporary)
-            with self.assertRaisesRegex(AlphaFeasibilityDataError, "post_cutoff_response_date"):
-                self._execute(
-                    store,
-                    task,
-                    FakeTransport(lambda **_kwargs: union_future),
-                )
+            self._assert_execute_data_failure(
+                store,
+                task,
+                FakeTransport(lambda **_kwargs: union_future),
+                "post_cutoff_response_date",
+            )
             self.assertFalse(store.raw_path(task).exists())
             self.assertFalse(store.response_path(task).exists())
 
@@ -782,8 +1186,11 @@ class TushareCreateOnlyTests(unittest.TestCase):
         self.assertNotIn(TOKEN.encode("utf-8"), raw)
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
             store = CreateOnlyTaskStore(temporary)
-            with self.assertRaisesRegex(AlphaFeasibilityDataError, "credential_echo_in_response"):
+            with self.assertRaises(AlphaFeasibilityDataError) as raised:
                 self._execute(store, task, FakeTransport(lambda **_kwargs: raw))
+            self.assertEqual(
+                raised.exception.code, "transport_extension_secret_detected"
+            )
             self.assertFalse(store.raw_path(task).exists())
             self.assertFalse(store.response_path(task).exists())
             quarantine = store.quarantine_path(task).read_bytes()
@@ -826,10 +1233,12 @@ class TushareCreateOnlyTests(unittest.TestCase):
             [["600000.SH", "600000", "浦发银行", "SSE", "D", "19991110", "20231201"]],
         )
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
-            with self.assertRaisesRegex(AlphaFeasibilityDataError, "stock_status_not_requested"):
-                self._execute(
-                    CreateOnlyTaskStore(temporary), task, FakeTransport(lambda **_kwargs: raw)
-                )
+            self._assert_execute_data_failure(
+                CreateOnlyTaskStore(temporary),
+                task,
+                FakeTransport(lambda **_kwargs: raw),
+                "stock_status_not_requested",
+            )
 
     def test_raw_json_decimal_numbers_are_normalized_without_float_round_trip(self):
         task = next(task for task in self.history if task.endpoint == "daily")
@@ -851,12 +1260,12 @@ class TushareCreateOnlyTests(unittest.TestCase):
             "trade_cal", [["SSE", "20170703", True, "20170630"]]
         )
         with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
-            with self.assertRaisesRegex(AlphaFeasibilityDataError, "invalid_is_open"):
-                self._execute(
-                    CreateOnlyTaskStore(temporary),
-                    task,
-                    FakeTransport(lambda **_kwargs: raw),
-                )
+            self._assert_execute_data_failure(
+                CreateOnlyTaskStore(temporary),
+                task,
+                FakeTransport(lambda **_kwargs: raw),
+                "invalid_is_open",
+            )
 
     def test_forged_future_task_and_scope_mismatch_never_reach_transport(self):
         valid = next(task for task in self.history if task.endpoint == "daily")
@@ -1056,7 +1465,7 @@ class TushareCreateOnlyTests(unittest.TestCase):
             )
             artifact = json.loads(store.response_path(stock).read_text(encoding="utf-8"))
             artifact["wire_response_sha256"] = "f" * 64
-            artifact["transport_receipt"]["response_body_sha256"] = "f" * 64
+            artifact["transport_receipt"]["raw_transport_sha256"] = "f" * 64
             unsigned = dict(artifact)
             unsigned.pop("response_artifact_sha256")
             artifact["response_artifact_sha256"] = canonical_sha256(unsigned)

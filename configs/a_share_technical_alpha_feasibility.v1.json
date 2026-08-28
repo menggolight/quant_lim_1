@@ -39,7 +39,7 @@
     "redirects_allowed": false,
     "automatic_retries": 0,
     "request_timeout_seconds": 30,
-    "maximum_response_bytes": 8388608,
+    "maximum_response_bytes": 2097152,
     "minimum_request_interval_seconds": "0.13",
     "token_persistence_forbidden": true,
     "field_level_fallback_forbidden": true,

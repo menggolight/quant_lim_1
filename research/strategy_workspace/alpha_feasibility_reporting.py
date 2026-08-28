@@ -57,22 +57,14 @@ ALLOWED_ENDPOINTS = (
 ADAPTER_PROTOCOL_BLOCKERS = frozenset(
     {
         "duplicate_json_key",
-        "invalid_response_json",
-        "response_root_not_object",
-        "response_root_fields_differ_from_contract",
-        "response_code_type_invalid",
-        "response_message_type_invalid",
-        "response_request_id_type_invalid",
-        "response_request_id_format_invalid",
-        "response_error_data_type_invalid",
-        "response_data_not_object",
-        "response_data_fields_differ_from_contract",
-        "response_fields_not_unique_string_array",
-        "response_fields_differ_from_contract",
-        "response_items_not_array",
-        "response_row_shape_invalid",
-        "transport_response_envelope_invalid",
-        "blocked_adapter_protocol",
+        "semantic_core_missing",
+        "semantic_core_type_invalid",
+        "response_body_too_large",
+        "transport_extensions_too_large",
+        "transport_extensions_too_deep",
+        "transport_extension_secret_detected",
+        "data_payload_invalid",
+        "unknown_non_json_value",
     }
 )
 
@@ -164,7 +156,7 @@ GATE = {
 # It makes otherwise loose object sections in the JSON Schema fail closed too,
 # while remaining insensitive to whitespace and object key ordering.
 EXPECTED_EXPERIMENT_CANONICAL_SHA256 = (
-    "3f0a763b2460252ce6767234d8e3efc52ccb5ad047decf8019d8fed4b12d10cd"
+    "a053b92fdb4d3bcd2f8a636db6388b508d52777300043d2a25ab968fbbeb364b"
 )
 
 METRIC_FIELDS = (

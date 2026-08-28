@@ -30,6 +30,7 @@ import re
 import ssl
 import tempfile
 import time
+import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal, InvalidOperation
@@ -38,6 +39,7 @@ from types import MappingProxyType
 from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 
 from research.market_data.validation import SchemaValidationError, validate_json_schema
+from research.market_data.tushare_diagnostic import classify_message_category
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
@@ -51,11 +53,18 @@ ABSOLUTE_CUTOFF = date(2023, 12, 31)
 PLAN_SCHEMA_VERSION = "tushare-alpha-feasibility-plan.v1"
 TASK_SCHEMA_VERSION = "tushare-alpha-feasibility-task.v1"
 STARTED_SCHEMA_VERSION = "tushare-alpha-feasibility-task-started.v1"
-RESPONSE_SCHEMA_VERSION = "tushare-alpha-feasibility-task-response.v2"
-QUARANTINE_SCHEMA_VERSION = "tushare-alpha-feasibility-quarantine.v2"
+RESPONSE_SCHEMA_VERSION = "tushare-alpha-feasibility-task-response.v3"
+LEGACY_RESPONSE_SCHEMA_VERSION = "tushare-alpha-feasibility-task-response.v2"
+QUARANTINE_SCHEMA_VERSION = "tushare-alpha-feasibility-quarantine.v3"
 PIT_REPORT_SCHEMA_VERSION = "pit-membership-coverage-report.v1"
 PIT_MANIFEST_SCHEMA_VERSION = "pit-membership-manifest.v1"
 HISTORY_MANIFEST_SCHEMA_VERSION = "tushare-alpha-feasibility-manifest.v1"
+RESPONSE_SCHEMA_PATH = (
+    REPOSITORY_ROOT / "schemas" / "tushare_alpha_feasibility_task_response.v3.json"
+)
+QUARANTINE_SCHEMA_PATH = (
+    REPOSITORY_ROOT / "schemas" / "tushare_alpha_feasibility_quarantine.v3.json"
+)
 
 ALLOWED_ENDPOINTS = (
     "trade_cal",
@@ -149,28 +158,29 @@ _FORBIDDEN_PARAM_KEY = re.compile(
 _EMBEDDED_DATE = re.compile(
     r"(?<!\d)(20\d{2})[-/]?(0[1-9]|1[0-2])[-/]?(0[1-9]|[12]\d|3[01])(?!\d)"
 )
-_REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
 REQUIRED_RESPONSE_ROOT_FIELDS = frozenset({"code", "msg", "data"})
-OPTIONAL_RESPONSE_ROOT_FIELDS = frozenset({"request_id"})
-MAX_REQUEST_ID_LENGTH = 160
+_SAFE_TRANSPORT_EXTENSION_FIELD = re.compile(r"^[A-Za-z_][A-Za-z0-9._:-]{0,127}$")
+_SECRET_TRANSPORT_KEY = re.compile(
+    r"(?:token|secret|password|passwd|cookie|authorization|api[_-]?key|access[_-]?key|credential)",
+    re.IGNORECASE,
+)
+MAXIMUM_RESPONSE_BYTES = 2 * 1024 * 1024
+MAXIMUM_TRANSPORT_EXTENSIONS_BYTES = 256 * 1024
+MAXIMUM_TRANSPORT_EXTENSION_DEPTH = 8
+MAXIMUM_TRANSPORT_EXTENSION_FIELDS = 64
+MAXIMUM_TRANSPORT_EXTENSION_ELEMENTS = 4096
+MAXIMUM_TRANSPORT_EXTENSION_STRING_LENGTH = 65_536
 ADAPTER_PROTOCOL_FAILURES = frozenset(
     {
         "duplicate_json_key",
-        "invalid_response_json",
-        "response_root_not_object",
-        "response_root_fields_differ_from_contract",
-        "response_code_type_invalid",
-        "response_message_type_invalid",
-        "response_request_id_type_invalid",
-        "response_request_id_format_invalid",
-        "response_error_data_type_invalid",
-        "response_data_not_object",
-        "response_data_fields_differ_from_contract",
-        "response_fields_not_unique_string_array",
-        "response_fields_differ_from_contract",
-        "response_items_not_array",
-        "response_row_shape_invalid",
-        "transport_response_envelope_invalid",
+        "semantic_core_missing",
+        "semantic_core_type_invalid",
+        "response_body_too_large",
+        "transport_extensions_too_large",
+        "transport_extensions_too_deep",
+        "transport_extension_secret_detected",
+        "data_payload_invalid",
+        "unknown_non_json_value",
     }
 )
 
@@ -211,9 +221,9 @@ class TushareHttpResponse:
 
     def __post_init__(self) -> None:
         if type(self.http_status) is not int or not 100 <= self.http_status <= 599:
-            raise AlphaFeasibilityDataError("http_status_invalid")
+            raise AlphaFeasibilityDataError("unknown_non_json_value")
         if not isinstance(self.body, bytes):
-            raise AlphaFeasibilityDataError("transport_response_not_bytes")
+            raise AlphaFeasibilityDataError("unknown_non_json_value")
 
 
 class TushareTransport(Protocol):
@@ -252,7 +262,13 @@ def strict_json_loads(raw: bytes | str, *, label: str = "json") -> Any:
         )
     except AlphaFeasibilityDataError:
         raise
-    except (UnicodeDecodeError, json.JSONDecodeError, TypeError, ValueError) as exc:
+    except (
+        UnicodeDecodeError,
+        json.JSONDecodeError,
+        RecursionError,
+        TypeError,
+        ValueError,
+    ) as exc:
         raise AlphaFeasibilityDataError(f"invalid_{label}_json") from exc
 
 
@@ -293,6 +309,178 @@ def canonical_json_bytes(value: Any) -> bytes:
 
 def canonical_sha256(value: Any) -> str:
     return hashlib.sha256(canonical_json_bytes(value)).hexdigest()
+
+
+def _contains_control_character(value: str) -> bool:
+    return any(unicodedata.category(character) == "Cc" for character in value)
+
+
+def _contains_unicode_surrogate(value: Any) -> bool:
+    """Reject lone UTF-16 surrogate code points accepted by Python's JSON parser."""
+
+    pending = [value]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, Mapping):
+            for key, item in current.items():
+                pending.extend((key, item))
+        elif isinstance(current, (list, tuple)):
+            pending.extend(current)
+        elif type(current) is str and any(
+            unicodedata.category(character) == "Cs" for character in current
+        ):
+            return True
+    return False
+
+
+def _transport_json_type(value: Any) -> str:
+    if value is None:
+        return "null"
+    if type(value) is bool:
+        return "boolean"
+    if type(value) is int:
+        return "integer"
+    if isinstance(value, Decimal):
+        return "number"
+    if type(value) is str:
+        return "string"
+    if isinstance(value, list):
+        return "array"
+    if isinstance(value, Mapping):
+        return "object"
+    raise AlphaFeasibilityDataError("unknown_non_json_value")
+
+
+def _canonical_decimal_number(value: Decimal) -> str:
+    if not value.is_finite():
+        raise AlphaFeasibilityDataError("unknown_non_json_value")
+    if value == 0:
+        return "0"
+    sign, digits_tuple, exponent = value.as_tuple()
+    digits = "".join(str(digit) for digit in digits_tuple)
+    while len(digits) > 1 and digits.endswith("0"):
+        digits = digits[:-1]
+        exponent += 1
+    if len(digits) > MAXIMUM_TRANSPORT_EXTENSION_STRING_LENGTH:
+        raise AlphaFeasibilityDataError("transport_extensions_too_large")
+    prefix = "-" if sign else ""
+    return prefix + digits + (f"e{exponent}" if exponent else "")
+
+
+def _canonical_transport_json_bytes(value: Any) -> bytes:
+    """Canonicalize untrusted JSON while preserving number/string identity."""
+
+    value_type = _transport_json_type(value)
+    if value_type == "null":
+        return b"null"
+    if value_type == "boolean":
+        return b"true" if value else b"false"
+    if value_type == "integer":
+        return _canonical_decimal_number(Decimal(value)).encode("ascii")
+    if value_type == "number":
+        return _canonical_decimal_number(value).encode("ascii")
+    if value_type == "string":
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+    if value_type == "array":
+        return b"[" + b",".join(_canonical_transport_json_bytes(item) for item in value) + b"]"
+    if any(type(key) is not str for key in value):
+        raise AlphaFeasibilityDataError("unknown_non_json_value")
+    items = []
+    for key in sorted(value):
+        if type(key) is not str:
+            raise AlphaFeasibilityDataError("unknown_non_json_value")
+        encoded_key = json.dumps(key, ensure_ascii=False, separators=(",", ":")).encode("utf-8")
+        items.append(encoded_key + b":" + _canonical_transport_json_bytes(value[key]))
+    return b"{" + b",".join(items) + b"}"
+
+
+@dataclass(frozen=True, slots=True)
+class TransportExtensionsMetadata:
+    field_names: tuple[str, ...]
+    type_by_field: Mapping[str, str]
+    value_sha256_by_field: Mapping[str, str]
+    sha256: str
+    byte_count: int
+
+
+def _validate_transport_extensions(
+    extensions: Mapping[str, Any],
+    *,
+    token: str | None,
+) -> TransportExtensionsMetadata:
+    if not isinstance(extensions, Mapping):
+        raise AlphaFeasibilityDataError("unknown_non_json_value")
+    if len(extensions) > MAXIMUM_TRANSPORT_EXTENSION_FIELDS:
+        raise AlphaFeasibilityDataError("transport_extensions_too_large")
+
+    element_count = 0
+
+    def validate_value(value: Any, *, depth: int) -> None:
+        nonlocal element_count
+        element_count += 1
+        if element_count > MAXIMUM_TRANSPORT_EXTENSION_ELEMENTS:
+            raise AlphaFeasibilityDataError("transport_extensions_too_large")
+        value_type = _transport_json_type(value)
+        if value_type == "string":
+            if (
+                len(value) > MAXIMUM_TRANSPORT_EXTENSION_STRING_LENGTH
+                or len(value.encode("utf-8")) > MAXIMUM_TRANSPORT_EXTENSION_STRING_LENGTH
+                or _contains_control_character(value)
+            ):
+                raise AlphaFeasibilityDataError("unknown_non_json_value")
+            if token and token in value:
+                raise AlphaFeasibilityDataError("transport_extension_secret_detected")
+            return
+        if value_type in {"null", "boolean", "integer", "number"}:
+            return
+        if depth > MAXIMUM_TRANSPORT_EXTENSION_DEPTH:
+            raise AlphaFeasibilityDataError("transport_extensions_too_deep")
+        if value_type == "array":
+            for item in value:
+                validate_value(item, depth=depth + 1)
+            return
+        for key, item in value.items():
+            if (
+                type(key) is not str
+                or not key
+                or len(key) > MAXIMUM_TRANSPORT_EXTENSION_STRING_LENGTH
+                or len(key.encode("utf-8")) > MAXIMUM_TRANSPORT_EXTENSION_STRING_LENGTH
+                or _contains_control_character(key)
+            ):
+                raise AlphaFeasibilityDataError("unknown_non_json_value")
+            if _SECRET_TRANSPORT_KEY.search(key) is not None:
+                raise AlphaFeasibilityDataError("transport_extension_secret_detected")
+            validate_value(item, depth=depth + 1)
+
+    names = tuple(sorted(extensions))
+    type_by_field: dict[str, str] = {}
+    value_sha256_by_field: dict[str, str] = {}
+    for field in names:
+        if (
+            type(field) is not str
+            or _SAFE_TRANSPORT_EXTENSION_FIELD.fullmatch(field) is None
+            or _contains_control_character(field)
+            or field in REQUIRED_RESPONSE_ROOT_FIELDS
+        ):
+            raise AlphaFeasibilityDataError("unknown_non_json_value")
+        if _SECRET_TRANSPORT_KEY.search(field) is not None:
+            raise AlphaFeasibilityDataError("transport_extension_secret_detected")
+        value = extensions[field]
+        validate_value(value, depth=1)
+        canonical_value = _canonical_transport_json_bytes(value)
+        type_by_field[field] = _transport_json_type(value)
+        value_sha256_by_field[field] = hashlib.sha256(canonical_value).hexdigest()
+
+    canonical_extensions = _canonical_transport_json_bytes(extensions)
+    if len(canonical_extensions) > MAXIMUM_TRANSPORT_EXTENSIONS_BYTES:
+        raise AlphaFeasibilityDataError("transport_extensions_too_large")
+    return TransportExtensionsMetadata(
+        field_names=names,
+        type_by_field=MappingProxyType(type_by_field),
+        value_sha256_by_field=MappingProxyType(value_sha256_by_field),
+        sha256=hashlib.sha256(canonical_extensions).hexdigest(),
+        byte_count=len(canonical_extensions),
+    )
 
 
 def _parse_date(value: Any, label: str) -> date:
@@ -340,48 +528,55 @@ def _month_bounds(month: str) -> tuple[date, date]:
 
 
 def _scan_date_literals(value: Any) -> None:
-    if isinstance(value, Mapping):
-        for _key, item in value.items():
-            _scan_date_literals(item)
-        return
-    if isinstance(value, (list, tuple)):
-        for item in value:
-            _scan_date_literals(item)
-        return
-    if type(value) is str and (_DATE8.fullmatch(value) or _DATE10.fullmatch(value)):
-        if _parse_date(value, "config_date") > ABSOLUTE_CUTOFF:
-            raise AlphaFeasibilityDataError("post_cutoff_config_date")
+    pending = [value]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, Mapping):
+            pending.extend(current.values())
+        elif isinstance(current, (list, tuple)):
+            pending.extend(current)
+        elif type(current) is str and (
+            _DATE8.fullmatch(current) or _DATE10.fullmatch(current)
+        ):
+            if _parse_date(current, "config_date") > ABSOLUTE_CUTOFF:
+                raise AlphaFeasibilityDataError("post_cutoff_config_date")
 
 
 def _reject_embedded_post_cutoff_date(value: Any, code: str) -> None:
-    if isinstance(value, Mapping):
-        for key, item in value.items():
-            _reject_embedded_post_cutoff_date(key, code)
-            _reject_embedded_post_cutoff_date(item, code)
-        return
-    if isinstance(value, (list, tuple)):
-        for item in value:
-            _reject_embedded_post_cutoff_date(item, code)
-        return
-    if type(value) is str:
-        for match in _EMBEDDED_DATE.finditer(value):
-            try:
-                parsed = date(int(match.group(1)), int(match.group(2)), int(match.group(3)))
-            except ValueError:
-                continue
-            if parsed > ABSOLUTE_CUTOFF:
-                raise AlphaFeasibilityDataError(code)
+    pending = [value]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, Mapping):
+            for key, item in current.items():
+                pending.extend((key, item))
+        elif isinstance(current, (list, tuple)):
+            pending.extend(current)
+        elif type(current) is str:
+            for match in _EMBEDDED_DATE.finditer(current):
+                try:
+                    parsed = date(
+                        int(match.group(1)),
+                        int(match.group(2)),
+                        int(match.group(3)),
+                    )
+                except ValueError:
+                    continue
+                if parsed > ABSOLUTE_CUTOFF:
+                    raise AlphaFeasibilityDataError(code)
 
 
 def _contains_decoded_text(value: Any, needle: str) -> bool:
-    if isinstance(value, Mapping):
-        return any(
-            _contains_decoded_text(key, needle) or _contains_decoded_text(item, needle)
-            for key, item in value.items()
-        )
-    if isinstance(value, (list, tuple)):
-        return any(_contains_decoded_text(item, needle) for item in value)
-    return type(value) is str and needle in value
+    pending = [value]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, Mapping):
+            for key, item in current.items():
+                pending.extend((key, item))
+        elif isinstance(current, (list, tuple)):
+            pending.extend(current)
+        elif type(current) is str and needle in current:
+            return True
+    return False
 
 
 def _reject_response_post_cutoff_dates(
@@ -392,14 +587,14 @@ def _reject_response_post_cutoff_dates(
 
     ``stock_basic.delist_date`` is the sole field-aware exception: the frozen
     contract explicitly isolates a post-cutoff delisting date to ``null`` and
-    persists only the sanitized envelope. ``request_id`` is opaque transport
-    metadata and is never interpreted as a market date. Every content string,
-    including security names and suspension timing, is scanned recursively.
+    persists only the sanitized envelope. Transport extensions are excluded
+    from market-data cutoff checks and normalized consumer identity; only the
+    validated ``data`` payload enters either path.
     """
 
     if task.endpoint != "stock_basic":
         _reject_embedded_post_cutoff_date(
-            {key: value for key, value in root.items() if key != "request_id"},
+            root["data"],
             "post_cutoff_response_date",
         )
         return
@@ -407,14 +602,6 @@ def _reject_response_post_cutoff_dates(
     fields = data["fields"]
     items = data["items"]
     delist_index = fields.index("delist_date")
-    _reject_embedded_post_cutoff_date(
-        {
-            key: value
-            for key, value in root.items()
-            if key not in {"data", "request_id"}
-        },
-        "post_cutoff_response_date",
-    )
     _reject_embedded_post_cutoff_date(
         {key: value for key, value in data.items() if key != "items"},
         "post_cutoff_response_date",
@@ -526,7 +713,7 @@ def validate_experiment_config(
     ):
         raise AlphaFeasibilityDataError("unsafe_request_timeout")
     if type(source.get("maximum_response_bytes")) is not int or not (
-        1_024 <= source["maximum_response_bytes"] <= 16_777_216
+        1_024 <= source["maximum_response_bytes"] <= MAXIMUM_RESPONSE_BYTES
     ):
         raise AlphaFeasibilityDataError("unsafe_response_limit")
     for key in (
@@ -965,9 +1152,10 @@ class HttpsTushareTransport:
                 raise AlphaFeasibilityDataError("http_redirect_forbidden")
             if response.status != 200:
                 raise AlphaFeasibilityDataError("http_status_not_success")
-            raw = response.read(maximum_response_bytes + 1)
-            if len(raw) > maximum_response_bytes:
-                raise AlphaFeasibilityDataError("response_size_limit_exceeded")
+            effective_maximum = min(maximum_response_bytes, MAXIMUM_RESPONSE_BYTES)
+            raw = response.read(effective_maximum + 1)
+            if len(raw) > effective_maximum:
+                raise AlphaFeasibilityDataError("response_body_too_large")
             return TushareHttpResponse(http_status=response.status, body=raw)
         except AlphaFeasibilityDataError:
             raise
@@ -1051,8 +1239,9 @@ def _normalize_response_row(
         ):
             raise AlphaFeasibilityDataError("invalid_is_open")
         result["is_open"] = int(is_open)
-        if result["pretrade_date"] not in {None, ""}:
-            pretrade = _parse_date(result["pretrade_date"], "pretrade_date")
+        pretrade_value = result["pretrade_date"]
+        if pretrade_value is not None and pretrade_value != "":
+            pretrade = _parse_date(pretrade_value, "pretrade_date")
             if pretrade > parsed or pretrade > ABSOLUTE_CUTOFF:
                 raise AlphaFeasibilityDataError("invalid_pretrade_date")
             result["pretrade_date"] = _compact(pretrade)
@@ -1088,7 +1277,7 @@ def _normalize_response_row(
             raise AlphaFeasibilityDataError("post_cutoff_list_date")
         result["list_date"] = _compact(listed)
         delisted = result["delist_date"]
-        if delisted in {None, ""}:
+        if delisted is None or delisted == "":
             result["delist_date"] = None
         else:
             delisted_date = _parse_date(delisted, "delist_date")
@@ -1182,18 +1371,50 @@ class ValidatedResponse:
     rows: tuple[Mapping[str, Any], ...]
     raw_response_sha256: str
     normalized_content_sha256: str
-    accepted_root_fields: tuple[str, ...]
-    request_id_present: bool
-    request_id_sha256: str | None
+    observed_root_fields: tuple[str, ...]
+    semantic_core_fields: tuple[str, ...]
+    transport_extension_field_names: tuple[str, ...]
+    transport_extension_type_by_field: Mapping[str, str]
+    transport_extension_value_sha256_by_field: Mapping[str, str]
+    transport_extensions_sha256: str
+    transport_extensions_byte_count: int
     response_byte_count: int
     isolated_future_delist_date_count: int
     isolated_non_union_row_count: int
+
+    @property
+    def accepted_root_fields(self) -> tuple[str, ...]:
+        """Compatibility alias for callers that only need observed field names."""
+
+        return self.observed_root_fields
+
+    @property
+    def request_id_present(self) -> bool:
+        return "request_id" in self.transport_extension_field_names
+
+    @property
+    def request_id_sha256(self) -> str | None:
+        return self.transport_extension_value_sha256_by_field.get("request_id")
+
+
+def _normalized_content_sha256(
+    task: CollectionTask,
+    rows: Sequence[Mapping[str, Any]],
+) -> str:
+    """Bind normalized identity to the endpoint's fixed fields and item values."""
+
+    return canonical_sha256(
+        {
+            "fields": list(task.fields),
+            "items": [[row[field] for field in task.fields] for row in rows],
+        }
+    )
 
 
 def _safe_diagnostic_root_field(value: str) -> str:
     if (
         re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", value) is not None
-        and _FORBIDDEN_PARAM_KEY.search(value) is None
+        and _SECRET_TRANSPORT_KEY.search(value) is None
     ):
         return value
     return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
@@ -1206,30 +1427,35 @@ def _response_diagnostic(
     response_byte_count: int,
     http_status: int,
     token_leak_check: str,
+    extensions: TransportExtensionsMetadata | None = None,
 ) -> dict[str, Any]:
     observed = set(root)
     missing = REQUIRED_RESPONSE_ROOT_FIELDS - observed
-    unexpected = observed - REQUIRED_RESPONSE_ROOT_FIELDS - OPTIONAL_RESPONSE_ROOT_FIELDS
-    request_id = root.get("request_id")
-    request_id_sha256 = (
-        hashlib.sha256(request_id.encode("utf-8")).hexdigest()
-        if type(request_id) is str and request_id
-        else None
-    )
+    extension_fields = observed - REQUIRED_RESPONSE_ROOT_FIELDS
+    safe_extension_fields = sorted(
+        _safe_diagnostic_root_field(key) for key in extension_fields
+    )[:MAXIMUM_TRANSPORT_EXTENSION_FIELDS]
     return {
         "http_status": http_status,
         "response_byte_count": response_byte_count,
-        "response_body_sha256": raw_sha256,
-        "sorted_observed_root_fields": sorted(
+        "raw_transport_sha256": raw_sha256,
+        "observed_root_fields": sorted(
             _safe_diagnostic_root_field(key) for key in observed
         ),
-        "missing_required_root_fields": sorted(missing),
-        "unexpected_root_fields": sorted(
-            _safe_diagnostic_root_field(key) for key in unexpected
+        "semantic_core_fields": sorted(REQUIRED_RESPONSE_ROOT_FIELDS & observed),
+        "missing_semantic_core_fields": sorted(missing),
+        "transport_extension_field_names": safe_extension_fields,
+        "transport_extension_type_by_field": (
+            dict(extensions.type_by_field) if extensions is not None else {}
+        ),
+        "transport_extension_value_sha256_by_field": (
+            dict(extensions.value_sha256_by_field) if extensions is not None else {}
+        ),
+        "transport_extensions_sha256": extensions.sha256 if extensions is not None else None,
+        "transport_extensions_byte_count": (
+            extensions.byte_count if extensions is not None else None
         ),
         "token_leak_check": token_leak_check,
-        "request_id_present": "request_id" in observed,
-        "request_id_sha256": request_id_sha256,
     }
 
 
@@ -1245,28 +1471,37 @@ def validate_response_bytes(
     raw: bytes,
     *,
     token: str | None = None,
-    maximum_response_bytes: int = 8_388_608,
+    maximum_response_bytes: int = MAXIMUM_RESPONSE_BYTES,
     http_status: int = 200,
 ) -> ValidatedResponse:
     """Validate bounded response bytes before any body can be persisted."""
 
     if not isinstance(raw, bytes):
-        raise AlphaFeasibilityDataError("transport_response_not_bytes")
+        raise AlphaFeasibilityDataError("unknown_non_json_value")
     if type(http_status) is not int or not 100 <= http_status <= 599:
-        raise AlphaFeasibilityDataError("http_status_invalid")
+        raise AlphaFeasibilityDataError("unknown_non_json_value")
     if http_status != 200:
         raise AlphaFeasibilityDataError("http_status_not_success")
-    if len(raw) > maximum_response_bytes:
-        raise AlphaFeasibilityDataError("response_size_limit_exceeded")
+    if type(maximum_response_bytes) is not int or maximum_response_bytes <= 0:
+        raise AlphaFeasibilityDataError("unknown_non_json_value")
+    if len(raw) > min(maximum_response_bytes, MAXIMUM_RESPONSE_BYTES):
+        raise AlphaFeasibilityDataError("response_body_too_large")
     if token is not None and token.encode("utf-8") in raw:
         # Do not even compute a digest of a credential-bearing response.
-        raise AlphaFeasibilityDataError("credential_echo_in_response")
+        raise AlphaFeasibilityDataError("transport_extension_secret_detected")
     raw_sha = hashlib.sha256(raw).hexdigest()
-    root = strict_json_loads(raw, label="response")
+    try:
+        root = strict_json_loads(raw, label="response")
+    except AlphaFeasibilityDataError as exc:
+        if exc.code == "duplicate_json_key":
+            raise
+        raise AlphaFeasibilityDataError("unknown_non_json_value") from exc
     if not isinstance(root, Mapping):
-        raise AlphaFeasibilityDataError("response_root_not_object")
+        raise AlphaFeasibilityDataError("semantic_core_type_invalid")
+    if _contains_unicode_surrogate(root):
+        raise AlphaFeasibilityDataError("unknown_non_json_value")
     if token is not None and _contains_decoded_text(root, token):
-        raise AlphaFeasibilityDataError("credential_echo_in_response")
+        raise AlphaFeasibilityDataError("transport_extension_secret_detected")
     diagnostic = _response_diagnostic(
         root,
         raw_sha256=raw_sha,
@@ -1275,84 +1510,131 @@ def validate_response_bytes(
         token_leak_check="PASSED",
     )
     observed = set(root)
-    if (
-        not REQUIRED_RESPONSE_ROOT_FIELDS.issubset(observed)
-        or observed - REQUIRED_RESPONSE_ROOT_FIELDS - OPTIONAL_RESPONSE_ROOT_FIELDS
-    ):
-        _raise_response_error("response_root_fields_differ_from_contract", diagnostic)
+    if not REQUIRED_RESPONSE_ROOT_FIELDS.issubset(observed):
+        _raise_response_error("semantic_core_missing", diagnostic)
     code = root["code"]
     if type(code) is not int:
-        _raise_response_error("response_code_type_invalid", diagnostic)
+        _raise_response_error("semantic_core_type_invalid", diagnostic)
     if root["msg"] is not None and type(root["msg"]) is not str:
-        _raise_response_error("response_message_type_invalid", diagnostic)
-    request_id = root.get("request_id")
-    if "request_id" in root and type(request_id) is not str:
-        _raise_response_error("response_request_id_type_invalid", diagnostic)
-    if "request_id" in root and (
-        not 1 <= len(request_id) <= MAX_REQUEST_ID_LENGTH
-        or _REQUEST_ID.fullmatch(request_id) is None
-        or ".." in request_id
-        or re.match(r"^[A-Za-z]:", request_id) is not None
-    ):
-        _raise_response_error("response_request_id_format_invalid", diagnostic)
-    _reject_embedded_post_cutoff_date(
-        {"msg": root["msg"]},
-        "post_cutoff_response_date",
-    )
+        _raise_response_error("semantic_core_type_invalid", diagnostic)
     data = root["data"]
+    if code == 0 and not isinstance(data, Mapping):
+        _raise_response_error("semantic_core_type_invalid", diagnostic)
+    if code != 0 and data is not None and not isinstance(data, Mapping):
+        _raise_response_error("semantic_core_type_invalid", diagnostic)
+
+    transport_extensions = {
+        key: value for key, value in root.items() if key not in REQUIRED_RESPONSE_ROOT_FIELDS
+    }
+    try:
+        extension_metadata = _validate_transport_extensions(
+            transport_extensions,
+            token=token,
+        )
+    except AlphaFeasibilityDataError as exc:
+        if exc.code in ADAPTER_PROTOCOL_FAILURES:
+            raise AlphaFeasibilityDataError(exc.code, diagnostic=diagnostic) from exc
+        raise AlphaFeasibilityDataError("unknown_non_json_value", diagnostic=diagnostic) from exc
+    diagnostic = _response_diagnostic(
+        root,
+        raw_sha256=raw_sha,
+        response_byte_count=len(raw),
+        http_status=http_status,
+        token_leak_check="PASSED",
+        extensions=extension_metadata,
+    )
     if code != 0:
-        if data is not None and not isinstance(data, Mapping):
-            _raise_response_error("response_error_data_type_invalid", diagnostic)
-        _raise_response_error("upstream_response_not_success", diagnostic)
-    if not isinstance(data, Mapping):
-        _raise_response_error("response_data_not_object", diagnostic)
-    if set(data) != {"fields", "items"}:
-        _raise_response_error("response_data_fields_differ_from_contract", diagnostic)
-    fields = data["fields"]
-    items = data["items"]
-    if (
-        not isinstance(fields, list)
-        or any(type(field) is not str for field in fields)
-        or len(fields) != len(set(fields))
-    ):
-        _raise_response_error("response_fields_not_unique_string_array", diagnostic)
-    if tuple(fields) != task.fields:
-        _raise_response_error("response_fields_differ_from_contract", diagnostic)
-    if not isinstance(items, list):
-        _raise_response_error("response_items_not_array", diagnostic)
-    _reject_response_post_cutoff_dates(task, root)
-    if len(items) >= POTENTIAL_TRUNCATION_LIMIT[task.endpoint]:
-        raise AlphaFeasibilityDataError("potential_upstream_truncation")
-    normalized: list[Mapping[str, Any]] = []
-    isolated = 0
-    isolated_non_union = 0
-    keys: set[tuple[Any, ...]] = set()
-    for item in items:
-        if not isinstance(item, list) or len(item) != len(fields):
-            raise AlphaFeasibilityDataError("response_row_shape_invalid")
-        row, row_isolated = _normalize_response_row(task, dict(zip(fields, item)))
-        isolated += row_isolated
-        if row is None:
-            isolated_non_union += 1
-            continue
-        key = _primary_key(task.endpoint, row)
-        if key in keys:
-            raise AlphaFeasibilityDataError("duplicate_response_primary_key")
-        keys.add(key)
-        normalized.append(MappingProxyType(row))
+        if data is not None:
+            try:
+                _validate_transport_extensions({"error": data}, token=token)
+            except AlphaFeasibilityDataError as exc:
+                raise AlphaFeasibilityDataError(exc.code, diagnostic=diagnostic) from exc
+        category = classify_message_category(
+            upstream_code=code,
+            http_status=http_status,
+            message=root["msg"],
+            error=None,
+            transport_status="response_received",
+            channel="http",
+            secret=token or "",
+        )
+        diagnostic = {
+            **diagnostic,
+            "upstream_code": code,
+            "upstream_error_category": category,
+        }
+        _raise_response_error(f"upstream_{category}_error", diagnostic)
+
+    # A successful semantic core must not smuggle a post-cutoff observation in
+    # its message. Error messages are classified above by code/msg and are
+    # quarantined without being interpreted as market data.
+    try:
+        _reject_embedded_post_cutoff_date(
+            root["msg"],
+            "post_cutoff_response_date",
+        )
+    except AlphaFeasibilityDataError as exc:
+        raise AlphaFeasibilityDataError(
+            "data_payload_invalid",
+            diagnostic={**diagnostic, "data_failure_category": exc.code},
+        ) from exc
+
+    try:
+        if set(data) != {"fields", "items"}:
+            raise AlphaFeasibilityDataError("response_data_fields_differ_from_contract")
+        fields = data["fields"]
+        items = data["items"]
+        if (
+            not isinstance(fields, list)
+            or any(type(field) is not str for field in fields)
+            or len(fields) != len(set(fields))
+        ):
+            raise AlphaFeasibilityDataError("response_fields_not_unique_string_array")
+        if tuple(fields) != task.fields:
+            raise AlphaFeasibilityDataError("response_fields_differ_from_contract")
+        if not isinstance(items, list):
+            raise AlphaFeasibilityDataError("response_items_not_array")
+        _reject_response_post_cutoff_dates(task, root)
+        if len(items) >= POTENTIAL_TRUNCATION_LIMIT[task.endpoint]:
+            raise AlphaFeasibilityDataError("potential_upstream_truncation")
+        normalized: list[Mapping[str, Any]] = []
+        isolated = 0
+        isolated_non_union = 0
+        keys: set[tuple[Any, ...]] = set()
+        for item in items:
+            if not isinstance(item, list) or len(item) != len(fields):
+                raise AlphaFeasibilityDataError("response_row_shape_invalid")
+            row, row_isolated = _normalize_response_row(task, dict(zip(fields, item)))
+            isolated += row_isolated
+            if row is None:
+                isolated_non_union += 1
+                continue
+            key = _primary_key(task.endpoint, row)
+            if key in keys:
+                raise AlphaFeasibilityDataError("duplicate_response_primary_key")
+            keys.add(key)
+            normalized.append(MappingProxyType(row))
+    except AlphaFeasibilityDataError as exc:
+        data_diagnostic = {**diagnostic, "data_failure_category": exc.code}
+        raise AlphaFeasibilityDataError(
+            "data_payload_invalid",
+            diagnostic=data_diagnostic,
+        ) from exc
     normalized.sort(key=lambda row: _row_sort_key(task.endpoint, row))
     normalized_rows = [dict(row) for row in normalized]
     return ValidatedResponse(
         rows=tuple(normalized),
         raw_response_sha256=raw_sha,
-        normalized_content_sha256=canonical_sha256(normalized_rows),
-        accepted_root_fields=tuple(sorted(observed)),
-        request_id_present="request_id" in observed,
-        request_id_sha256=(
-            hashlib.sha256(request_id.encode("utf-8")).hexdigest()
-            if type(request_id) is str
-            else None
+        normalized_content_sha256=_normalized_content_sha256(task, normalized_rows),
+        observed_root_fields=tuple(sorted(observed)),
+        semantic_core_fields=tuple(sorted(REQUIRED_RESPONSE_ROOT_FIELDS)),
+        transport_extension_field_names=extension_metadata.field_names,
+        transport_extension_type_by_field=extension_metadata.type_by_field,
+        transport_extension_value_sha256_by_field=(
+            extension_metadata.value_sha256_by_field
         ),
+        transport_extensions_sha256=extension_metadata.sha256,
+        transport_extensions_byte_count=extension_metadata.byte_count,
         response_byte_count=len(raw),
         isolated_future_delist_date_count=isolated,
         isolated_non_union_row_count=isolated_non_union,
@@ -1433,19 +1715,49 @@ class TaskExecutionResult:
 
     @property
     def raw_transport_sha256(self) -> str:
-        return str(self.transport_receipt["response_body_sha256"])
+        key = (
+            "raw_transport_sha256"
+            if "raw_transport_sha256" in self.transport_receipt
+            else "response_body_sha256"
+        )
+        return str(self.transport_receipt[key])
 
     @property
     def accepted_root_fields(self) -> tuple[str, ...]:
-        return tuple(self.transport_receipt["accepted_root_fields"])
+        key = (
+            "observed_root_fields"
+            if "observed_root_fields" in self.transport_receipt
+            else "accepted_root_fields"
+        )
+        return tuple(self.transport_receipt[key])
 
     @property
     def request_id_present(self) -> bool:
+        if "transport_extension_field_names" in self.transport_receipt:
+            return "request_id" in self.transport_receipt[
+                "transport_extension_field_names"
+            ]
         return bool(self.transport_receipt["request_id_present"])
+
+    @property
+    def detail_present(self) -> bool:
+        return (
+            "transport_extension_field_names" in self.transport_receipt
+            and "detail" in self.transport_receipt["transport_extension_field_names"]
+        )
+
+    @property
+    def normalized_content_sha256(self) -> str:
+        return _normalized_content_sha256(self.task, self.rows)
+
+    @property
+    def transport_extensions_sha256(self) -> str | None:
+        value = self.transport_receipt.get("transport_extensions_sha256")
+        return str(value) if value is not None else None
 
 
 def _validate_transport_receipt(value: Any) -> Mapping[str, Any]:
-    expected = {
+    legacy_expected = {
         "http_status",
         "response_byte_count",
         "response_body_sha256",
@@ -1454,8 +1766,66 @@ def _validate_transport_receipt(value: Any) -> Mapping[str, Any]:
         "request_id_sha256",
         "token_leak_check",
     }
-    if not isinstance(value, Mapping) or set(value) != expected:
+    expected = {
+        "observed_root_fields",
+        "semantic_core_fields",
+        "transport_extension_field_names",
+        "transport_extension_type_by_field",
+        "transport_extension_value_sha256_by_field",
+        "transport_extensions_sha256",
+        "transport_extensions_byte_count",
+        "raw_transport_sha256",
+        "token_leak_check",
+    }
+    if not isinstance(value, Mapping) or set(value) not in (expected, legacy_expected):
         raise AlphaFeasibilityDataError("transport_receipt_fields_mismatch")
+    if set(value) == expected:
+        root_fields = value["observed_root_fields"]
+        semantic_fields = value["semantic_core_fields"]
+        extension_fields = value["transport_extension_field_names"]
+        extension_types = value["transport_extension_type_by_field"]
+        extension_hashes = value["transport_extension_value_sha256_by_field"]
+        allowed_types = {"null", "boolean", "integer", "number", "string", "array", "object"}
+        if (
+            not isinstance(root_fields, list)
+            or any(type(field) is not str for field in root_fields)
+            or root_fields != sorted(set(root_fields))
+            or semantic_fields != sorted(REQUIRED_RESPONSE_ROOT_FIELDS)
+            or not isinstance(extension_fields, list)
+            or any(type(field) is not str for field in extension_fields)
+            or extension_fields != sorted(set(extension_fields))
+            or len(extension_fields) > MAXIMUM_TRANSPORT_EXTENSION_FIELDS
+            or any(
+                _SAFE_TRANSPORT_EXTENSION_FIELD.fullmatch(field) is None
+                or _SECRET_TRANSPORT_KEY.search(field) is not None
+                for field in extension_fields
+            )
+            or set(root_fields) != REQUIRED_RESPONSE_ROOT_FIELDS | set(extension_fields)
+            or not isinstance(extension_types, Mapping)
+            or set(extension_types) != set(extension_fields)
+            or any(type(item) is not str or item not in allowed_types for item in extension_types.values())
+            or not isinstance(extension_hashes, Mapping)
+            or set(extension_hashes) != set(extension_fields)
+            or any(type(item) is not str or _SHA256.fullmatch(item) is None for item in extension_hashes.values())
+            or type(value["transport_extensions_sha256"]) is not str
+            or _SHA256.fullmatch(value["transport_extensions_sha256"]) is None
+            or type(value["transport_extensions_byte_count"]) is not int
+            or not 2 <= value["transport_extensions_byte_count"] <= MAXIMUM_TRANSPORT_EXTENSIONS_BYTES
+            or (
+                not extension_fields
+                and (
+                    value["transport_extensions_sha256"]
+                    != hashlib.sha256(b"{}").hexdigest()
+                    or value["transport_extensions_byte_count"] != 2
+                )
+            )
+            or type(value["raw_transport_sha256"]) is not str
+            or _SHA256.fullmatch(value["raw_transport_sha256"]) is None
+            or value["token_leak_check"] != "PASSED"
+        ):
+            raise AlphaFeasibilityDataError("transport_receipt_semantics_mismatch")
+        return MappingProxyType(dict(value))
+
     root_fields = value["accepted_root_fields"]
     request_id_present = value["request_id_present"]
     request_id_sha256 = value["request_id_sha256"]
@@ -1471,7 +1841,7 @@ def _validate_transport_receipt(value: Any) -> Mapping[str, Any]:
         or set(root_fields)
         not in (
             REQUIRED_RESPONSE_ROOT_FIELDS,
-            REQUIRED_RESPONSE_ROOT_FIELDS | OPTIONAL_RESPONSE_ROOT_FIELDS,
+            REQUIRED_RESPONSE_ROOT_FIELDS | {"request_id"},
         )
         or type(request_id_present) is not bool
         or request_id_present != ("request_id" in root_fields)
@@ -1553,11 +1923,27 @@ class CreateOnlyTaskStore:
             "locked_test_consumed",
             "response_artifact_sha256",
         }
-        if set(value) != expected_keys:
+        response_schema = value.get("schema_version")
+        expected_keys_for_schema = (
+            expected_keys | {"normalized_content_sha256"}
+            if response_schema == RESPONSE_SCHEMA_VERSION
+            else expected_keys
+        )
+        if set(value) != expected_keys_for_schema:
             raise AlphaFeasibilityDataError("response_artifact_fields_mismatch")
+        if response_schema == RESPONSE_SCHEMA_VERSION:
+            try:
+                validate_json_schema(value, RESPONSE_SCHEMA_PATH)
+            except SchemaValidationError as exc:
+                raise AlphaFeasibilityDataError("response_artifact_schema_invalid") from exc
         transport_receipt = _validate_transport_receipt(value["transport_receipt"])
+        receipt_is_legacy = "response_body_sha256" in transport_receipt
+        receipt_wire_sha256 = transport_receipt[
+            "response_body_sha256" if receipt_is_legacy else "raw_transport_sha256"
+        ]
         if (
-            value["schema_version"] != RESPONSE_SCHEMA_VERSION
+            response_schema not in (RESPONSE_SCHEMA_VERSION, LEGACY_RESPONSE_SCHEMA_VERSION)
+            or receipt_is_legacy != (response_schema == LEGACY_RESPONSE_SCHEMA_VERSION)
             or value["state"] != "RESPONSE_VALIDATED"
             or value["task_id"] != task.task_id
             or value["endpoint"] != task.endpoint
@@ -1566,8 +1952,7 @@ class CreateOnlyTaskStore:
             or _SHA256.fullmatch(value["raw_response_sha256"]) is None
             or type(value["wire_response_sha256"]) is not str
             or _SHA256.fullmatch(value["wire_response_sha256"]) is None
-            or value["wire_response_sha256"]
-            != transport_receipt["response_body_sha256"]
+            or value["wire_response_sha256"] != receipt_wire_sha256
             or type(value["raw_response_persisted"]) is not bool
             or type(value["isolated_future_delist_date_count"]) is not int
             or value["isolated_future_delist_date_count"] < 0
@@ -1578,6 +1963,11 @@ class CreateOnlyTaskStore:
             or not isinstance(value["rows"], list)
             or value["row_count"] != len(value["rows"])
             or value["normalized_rows_sha256"] != canonical_sha256(value["rows"])
+            or (
+                response_schema == RESPONSE_SCHEMA_VERSION
+                and value["normalized_content_sha256"]
+                != _normalized_content_sha256(task, value["rows"])
+            )
         ):
             raise AlphaFeasibilityDataError("response_artifact_semantics_mismatch")
         unsigned_response = dict(value)
@@ -1597,7 +1987,11 @@ class CreateOnlyTaskStore:
                 raise AlphaFeasibilityDataError("raw_response_hash_mismatch")
             if (
                 task.endpoint != "stock_basic"
-                and transport_receipt["request_id_present"] is False
+                and not (
+                    transport_receipt["request_id_present"]
+                    if receipt_is_legacy
+                    else transport_receipt["transport_extension_field_names"]
+                )
                 and value["wire_response_sha256"] != value["raw_response_sha256"]
             ):
                 raise AlphaFeasibilityDataError("wire_response_hash_mismatch")
@@ -1681,7 +2075,7 @@ class CreateOnlyTaskStore:
                     body=transport_response,
                 )
             if not isinstance(transport_response, TushareHttpResponse):
-                raise AlphaFeasibilityDataError("transport_response_envelope_invalid")
+                raise AlphaFeasibilityDataError("unknown_non_json_value")
             http_status = transport_response.http_status
             raw = transport_response.body
             response_byte_count = len(raw)
@@ -1698,11 +2092,11 @@ class CreateOnlyTaskStore:
             token_leak_check = "PASSED"
             rows = [dict(row) for row in validated.rows]
             persisted_response = raw
-            if task.endpoint == "stock_basic" or validated.request_id_present:
-                # ``request_id`` is transport metadata, never normalized data.
-                # Persist a replayable cutoff-safe content envelope without the
-                # identifier.  ``stock_basic`` also removes non-union/future
-                # metadata under its existing field-aware isolation rule.
+            if task.endpoint == "stock_basic" or validated.transport_extension_field_names:
+                # Transport extensions are never normalized data and their raw
+                # values do not enter ordinary replay evidence. ``stock_basic``
+                # also removes non-union/future metadata under its existing
+                # field-aware isolation rule.
                 persisted_response = canonical_json_bytes(
                     {
                         "code": 0,
@@ -1719,12 +2113,20 @@ class CreateOnlyTaskStore:
             _write_create_only(self.raw_path(task), persisted_response)
             persisted_sha = hashlib.sha256(persisted_response).hexdigest()
             transport_receipt = {
-                "http_status": http_status,
-                "response_byte_count": validated.response_byte_count,
-                "response_body_sha256": validated.raw_response_sha256,
-                "accepted_root_fields": list(validated.accepted_root_fields),
-                "request_id_present": validated.request_id_present,
-                "request_id_sha256": validated.request_id_sha256,
+                "observed_root_fields": list(validated.observed_root_fields),
+                "semantic_core_fields": list(validated.semantic_core_fields),
+                "transport_extension_field_names": list(
+                    validated.transport_extension_field_names
+                ),
+                "transport_extension_type_by_field": dict(
+                    validated.transport_extension_type_by_field
+                ),
+                "transport_extension_value_sha256_by_field": dict(
+                    validated.transport_extension_value_sha256_by_field
+                ),
+                "transport_extensions_sha256": validated.transport_extensions_sha256,
+                "transport_extensions_byte_count": validated.transport_extensions_byte_count,
+                "raw_transport_sha256": validated.raw_response_sha256,
                 "token_leak_check": "PASSED",
             }
             _validate_transport_receipt(transport_receipt)
@@ -1739,6 +2141,7 @@ class CreateOnlyTaskStore:
                 "transport_receipt": transport_receipt,
                 "raw_response_persisted": True,
                 "normalized_rows_sha256": canonical_sha256(rows),
+                "normalized_content_sha256": validated.normalized_content_sha256,
                 "row_count": len(rows),
                 "isolated_future_delist_date_count": validated.isolated_future_delist_date_count,
                 "isolated_non_union_row_count": validated.isolated_non_union_row_count,
@@ -1747,6 +2150,10 @@ class CreateOnlyTaskStore:
                 "locked_test_consumed": False,
             }
             response["response_artifact_sha256"] = canonical_sha256(response)
+            try:
+                validate_json_schema(response, RESPONSE_SCHEMA_PATH)
+            except SchemaValidationError as exc:
+                raise AlphaFeasibilityDataError("response_artifact_schema_invalid") from exc
             _write_json_create_only(self.response_path(task), response, token=token)
             return TaskExecutionResult(
                 task=task,
@@ -1762,28 +2169,23 @@ class CreateOnlyTaskStore:
             )
         except Exception as exc:
             code = exc.code if isinstance(exc, AlphaFeasibilityDataError) else "unclassified_task_failure"
-            if code == "credential_echo_in_response":
-                token_leak_check = (
-                    "DECODED_LEAK_REJECTED"
-                    if token_leak_check == "RAW_BYTES_PASSED"
-                    else "RAW_LEAK_REJECTED"
-                )
             diagnostic = (
                 dict(exc.diagnostic)
                 if isinstance(exc, AlphaFeasibilityDataError)
                 else {}
             )
+            if (
+                code == "transport_extension_secret_detected"
+                and "token_leak_check" not in diagnostic
+            ):
+                token_leak_check = (
+                    "DECODED_LEAK_REJECTED"
+                    if token_leak_check == "RAW_BYTES_PASSED"
+                    else "RAW_LEAK_REJECTED"
+                )
             observed_root_fields = diagnostic.get(
-                "sorted_observed_root_fields",
-                list(validated.accepted_root_fields) if validated is not None else [],
-            )
-            request_id_present = diagnostic.get(
-                "request_id_present",
-                validated.request_id_present if validated is not None else False,
-            )
-            request_id_sha256 = diagnostic.get(
-                "request_id_sha256",
-                validated.request_id_sha256 if validated is not None else None,
+                "observed_root_fields",
+                list(validated.observed_root_fields) if validated is not None else [],
             )
             quarantine = {
                 "schema_version": QUARANTINE_SCHEMA_VERSION,
@@ -1793,31 +2195,50 @@ class CreateOnlyTaskStore:
                 "plan_sha256": task.plan_sha256,
                 "reason": code,
                 "failure_code": code,
-                "raw_response_sha256": raw_sha,
+                "raw_transport_sha256": diagnostic.get("raw_transport_sha256", raw_sha),
                 "http_status": diagnostic.get("http_status", http_status),
                 "response_byte_count": diagnostic.get(
                     "response_byte_count", response_byte_count
                 ),
-                "response_body_sha256": diagnostic.get(
-                    "response_body_sha256", raw_sha
+                "observed_root_fields": observed_root_fields,
+                "semantic_core_fields": diagnostic.get("semantic_core_fields", []),
+                "missing_semantic_core_fields": diagnostic.get(
+                    "missing_semantic_core_fields", []
                 ),
-                "sorted_observed_root_fields": observed_root_fields,
-                "missing_required_root_fields": diagnostic.get(
-                    "missing_required_root_fields", []
+                "transport_extension_field_names": diagnostic.get(
+                    "transport_extension_field_names", []
                 ),
-                "unexpected_root_fields": diagnostic.get(
-                    "unexpected_root_fields", []
+                "transport_extension_type_by_field": diagnostic.get(
+                    "transport_extension_type_by_field", {}
                 ),
+                "transport_extension_value_sha256_by_field": diagnostic.get(
+                    "transport_extension_value_sha256_by_field", {}
+                ),
+                "transport_extensions_sha256": diagnostic.get(
+                    "transport_extensions_sha256"
+                ),
+                "transport_extensions_byte_count": diagnostic.get(
+                    "transport_extensions_byte_count"
+                ),
+                "upstream_code": diagnostic.get("upstream_code"),
+                "upstream_error_category": diagnostic.get(
+                    "upstream_error_category"
+                ),
+                "data_failure_category": diagnostic.get("data_failure_category"),
                 "token_leak_check": diagnostic.get(
                     "token_leak_check", token_leak_check
                 ),
-                "request_id_present": request_id_present,
-                "request_id_sha256": request_id_sha256,
                 "raw_response_persisted": False,
                 "locked_test_status": dict(LOCKED_TEST_STATUS),
                 "locked_test_consumed": False,
             }
             if not self.quarantine_path(task).exists():
+                try:
+                    validate_json_schema(quarantine, QUARANTINE_SCHEMA_PATH)
+                except SchemaValidationError as schema_exc:
+                    raise AlphaFeasibilityDataError(
+                        "quarantine_artifact_schema_invalid"
+                    ) from schema_exc
                 _write_json_create_only(self.quarantine_path(task), quarantine, token=token)
             if isinstance(exc, AlphaFeasibilityDataError):
                 raise

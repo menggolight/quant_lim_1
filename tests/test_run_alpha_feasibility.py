@@ -30,7 +30,7 @@ def _counts() -> dict[str, int]:
     }
 
 
-def _backfill(*, stage: str) -> dict[str, object]:
+def _backfill(*, stage: str, blocker: str | None = None) -> dict[str, object]:
     blocked = stage != cli.READY_STAGE
     adapter_blocked = stage == "BLOCKED_ADAPTER_PROTOCOL"
     return {
@@ -59,9 +59,9 @@ def _backfill(*, stage: str) -> dict[str, object]:
         "suspension_coverage_status": "BLOCKED_DATA" if blocked else "COMPLETE",
         "benchmark_coverage_status": "BLOCKED_DATA" if blocked else "COMPLETE",
         "remaining_blockers": (
-            ["response_root_fields_differ_from_contract"]
+            [blocker or "semantic_core_missing"]
             if adapter_blocked
-            else ["pit_membership_incomplete"]
+            else [blocker or "pit_membership_incomplete"]
             if blocked
             else []
         ),
@@ -149,10 +149,21 @@ def _study() -> SimpleNamespace:
 
 class RunAlphaFeasibilityCliTests(unittest.TestCase):
     def test_adapter_protocol_failure_sets_remain_exactly_aligned(self) -> None:
+        expected = {
+            "duplicate_json_key",
+            "semantic_core_missing",
+            "semantic_core_type_invalid",
+            "response_body_too_large",
+            "transport_extensions_too_large",
+            "transport_extensions_too_deep",
+            "transport_extension_secret_detected",
+            "data_payload_invalid",
+            "unknown_non_json_value",
+        }
+        self.assertEqual(set(cli.data_lane.ADAPTER_PROTOCOL_FAILURES), expected)
         self.assertEqual(
-            set(cli.data_lane.ADAPTER_PROTOCOL_FAILURES),
-            set(cli.reporting.ADAPTER_PROTOCOL_BLOCKERS)
-            - {"blocked_adapter_protocol"},
+            set(cli.reporting.ADAPTER_PROTOCOL_BLOCKERS),
+            expected,
         )
 
     def test_date_and_endpoint_preflight_precede_token_and_output_access(self) -> None:
@@ -262,6 +273,88 @@ class RunAlphaFeasibilityCliTests(unittest.TestCase):
         self.assertEqual(summary["terminal_status"], "BLOCKED_ADAPTER_PROTOCOL")
         self.assertEqual(report["terminal_status"], "BLOCKED_ADAPTER_PROTOCOL")
         load_inputs.assert_not_called()
+        run_alpha.assert_not_called()
+
+    def test_nonzero_upstream_code_with_controlled_extensions_is_blocked_data(self) -> None:
+        task = cli.data_lane.CollectionTask(
+            endpoint="trade_cal",
+            params={
+                "exchange": "SSE",
+                "start_date": "20170701",
+                "end_date": "20231231",
+            },
+            fields=cli.data_lane.EXPECTED_FIELDS["trade_cal"],
+            plan_sha256="1" * 64,
+        )
+        raw = json.dumps(
+            {
+                "code": 2002,
+                "msg": None,
+                "data": {"provider_status": "denied"},
+                "detail": {"safe_hint": "do-not-persist-this-value"},
+                "request_id": "request-opaque-1",
+                "trace_id": ["trace-opaque-1"],
+            },
+            separators=(",", ":"),
+        ).encode("utf-8")
+        with self.assertRaises(cli.data_lane.AlphaFeasibilityDataError) as raised:
+            cli.data_lane.validate_response_bytes(
+                task,
+                raw,
+                token="UnitTestCredentialNeverPersist123456",
+            )
+        upstream_error = raised.exception
+        self.assertEqual(upstream_error.code, "upstream_permission_error")
+        self.assertNotIn(upstream_error.code, cli.data_lane.ADAPTER_PROTOCOL_FAILURES)
+        self.assertEqual(upstream_error.diagnostic["upstream_code"], 2002)
+        self.assertEqual(upstream_error.diagnostic["upstream_error_category"], "permission")
+        self.assertEqual(
+            upstream_error.diagnostic["transport_extension_field_names"],
+            ["detail", "request_id", "trace_id"],
+        )
+        self.assertEqual(
+            upstream_error.diagnostic["transport_extension_type_by_field"],
+            {"detail": "object", "request_id": "string", "trace_id": "array"},
+        )
+        self.assertNotIn(
+            "do-not-persist-this-value",
+            repr(upstream_error.diagnostic),
+        )
+
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
+            cli.data_lane,
+            "run_backfill_from_environment",
+            side_effect=upstream_error,
+        ), mock.patch.object(
+            cli, "_current_commit_sha", return_value=COMMIT_SHA
+        ), mock.patch.object(
+            cli.engine, "run_alpha_feasibility_study"
+        ) as run_alpha, mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            code = cli.main(
+                [
+                    "all",
+                    "--output-root",
+                    temp_dir,
+                    "--generated-at",
+                    GENERATED_AT,
+                ]
+            )
+            serialized = stdout.getvalue()
+            summary = json.loads(serialized)
+            report = json.loads(
+                (Path(temp_dir) / "alpha_feasibility_report.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(summary["terminal_status"], "BLOCKED_DATA")
+        self.assertEqual(report["terminal_status"], "BLOCKED_DATA")
+        self.assertEqual(report["remaining_blockers"], ["upstream_permission_error"])
+        persisted_text = serialized + json.dumps(report, sort_keys=True)
+        self.assertNotIn("do-not-persist-this-value", persisted_text)
+        self.assertNotIn("request-opaque-1", persisted_text)
+        self.assertNotIn("trace-opaque-1", persisted_text)
         run_alpha.assert_not_called()
 
     def test_missing_token_after_valid_preflight_is_blocked_data_not_failed(self) -> None:

@@ -374,6 +374,104 @@ class Draft202012SchemaValidationTests(unittest.TestCase):
             schema_name,
         )
 
+    def test_tushare_v3_response_and_quarantine_schemas_close_transport_metadata(self) -> None:
+        locked = {
+            "access": "NOT_ACCESSED",
+            "download": "NOT_DOWNLOADED",
+            "run": "NOT_RUN",
+        }
+        receipt = {
+            "observed_root_fields": ["code", "data", "detail", "msg"],
+            "semantic_core_fields": ["code", "data", "msg"],
+            "transport_extension_field_names": ["detail"],
+            "transport_extension_type_by_field": {"detail": "object"},
+            "transport_extension_value_sha256_by_field": {"detail": SHA},
+            "transport_extensions_sha256": SHA,
+            "transport_extensions_byte_count": 24,
+            "raw_transport_sha256": SHA,
+            "token_leak_check": "PASSED",
+        }
+        response = {
+            "schema_version": "tushare-alpha-feasibility-task-response.v3",
+            "state": "RESPONSE_VALIDATED",
+            "task_id": f"index_weight-{SHA}",
+            "endpoint": "index_weight",
+            "plan_sha256": SHA,
+            "raw_response_sha256": SHA,
+            "wire_response_sha256": SHA,
+            "transport_receipt": receipt,
+            "raw_response_persisted": False,
+            "normalized_rows_sha256": SHA,
+            "normalized_content_sha256": SHA,
+            "row_count": 0,
+            "isolated_future_delist_date_count": 0,
+            "isolated_non_union_row_count": 0,
+            "rows": [],
+            "locked_test_status": locked,
+            "locked_test_consumed": False,
+            "response_artifact_sha256": SHA,
+        }
+        response_schema = "tushare_alpha_feasibility_task_response.v3.json"
+        validate_json_schema(response, SCHEMA_ROOT / response_schema)
+
+        response_extra = deepcopy(response)
+        response_extra["transport_receipt"]["detail"] = {"raw": "forbidden"}
+        self.assert_schema_rejects(response_extra, response_schema)
+
+        response_unsafe_key = deepcopy(response)
+        response_unsafe_key["transport_receipt"][
+            "transport_extension_type_by_field"
+        ] = {"bad key": "string"}
+        self.assert_schema_rejects(response_unsafe_key, response_schema)
+
+        quarantine = {
+            "schema_version": "tushare-alpha-feasibility-quarantine.v3",
+            "state": "RESPONSE_QUARANTINED",
+            "task_id": f"index_weight-{SHA}",
+            "endpoint": "index_weight",
+            "plan_sha256": SHA,
+            "reason": "transport_extension_secret_detected",
+            "failure_code": "transport_extension_secret_detected",
+            "raw_transport_sha256": SHA,
+            "http_status": 200,
+            "response_byte_count": 128,
+            "observed_root_fields": ["code", "data", "msg", "trace_id"],
+            "semantic_core_fields": ["code", "data", "msg"],
+            "missing_semantic_core_fields": [],
+            "transport_extension_field_names": ["trace_id"],
+            "transport_extension_type_by_field": {"trace_id": "string"},
+            "transport_extension_value_sha256_by_field": {"trace_id": SHA},
+            "transport_extensions_sha256": SHA,
+            "transport_extensions_byte_count": 18,
+            "upstream_code": None,
+            "upstream_error_category": None,
+            "data_failure_category": None,
+            "token_leak_check": "PASSED",
+            "raw_response_persisted": False,
+            "locked_test_status": locked,
+            "locked_test_consumed": False,
+        }
+        quarantine_schema = "tushare_alpha_feasibility_quarantine.v3.json"
+        validate_json_schema(quarantine, SCHEMA_ROOT / quarantine_schema)
+
+        quarantine_extra = deepcopy(quarantine)
+        quarantine_extra["detail_value"] = "must never persist"
+        self.assert_schema_rejects(quarantine_extra, quarantine_schema)
+
+    def test_tushare_experiment_schema_caps_full_response_at_two_mib(self) -> None:
+        config = json.loads(
+            (
+                Path(__file__).resolve().parents[1]
+                / "configs"
+                / "a_share_technical_alpha_feasibility.v1.json"
+            ).read_text(encoding="utf-8")
+        )
+        schema_name = "technical_alpha_feasibility_experiment.v1.json"
+        validate_json_schema(config, SCHEMA_ROOT / schema_name)
+        oversized = deepcopy(config)
+        oversized["source"]["maximum_response_bytes"] = 2 * 1024 * 1024 + 1
+        self.assert_schema_rejects(oversized, schema_name)
+
 
 if __name__ == "__main__":
     unittest.main()
