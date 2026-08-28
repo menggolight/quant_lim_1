@@ -2,6 +2,48 @@
 
 > 本文是带时点的交接快照，不替代代码、配置、受控状态、标准 CLI 产物或 manifest。
 
+## 2026-08-28 — Technical Momentum 正式数据与验证 P0
+
+### 本轮时点与工作树
+
+- `as_of`：`2026-08-28T12:18:46+08:00`，Asia/Shanghai。
+- `branch`：`codex/project-review-20260820`。
+- `baseline`：`fe44495e95993147294ba296fe0ba6aa7091e280`，与任务指定基线一致。
+- `worktree_state`：dirty；本节所列 P0 文件待形成范围明确的本地 commit。用户既有 `docs/DECISIONS.md` 改动未读取为本轮决策、未修改且明确排除在提交之外。
+- `locked_test_status=NOT_RUN`；`locked_test_consumed=false`。本轮未读取、运行或解释 2024—2025 Locked Test 数据或结果。
+
+### 当前目标与完成内容
+
+当前唯一正式研究主线为 `a-share-technical-momentum-adaptive-v1`。质量成长线暂停但保留；Technical Shadow 继续作为既有每日业务闭环观察，本轮没有扩建或修改其历史产物。
+
+- 新增[正式实验配置](../configs/a_share_technical_momentum_adaptive.v1.json)，冻结既有六因子 Alpha、Exposure 阈值、组合参数和 Development/Validation/Locked Test 切分；没有新增因子、权重或阈值。
+- 新增[技术正式数据契约与实现说明](TECHNICAL_MOMENTUM_FORMAL_P0.md)、四个 JSON Schema、双价格实现、PIT 中证800 loader、执行状态/成本/回测内核和 fail-closed 报告器。
+- `signal_return_series` 只以当日可见的未复权收盘价和当期 `adj_factor` 计算公司行动调整收益；`execution_price_series` 始终使用真实未复权 OHLC。测试覆盖除息、未来因子泄漏、价格通道混用和持仓公司行动会计拒绝。
+- PIT loader 要求 `index_weight` 月截面、严格先于决策日、800只唯一成员、Decimal 权重及权重和；日期、重复、缺月、粗精度和当前成分回填均失败关闭。
+- 执行内核覆盖停牌、涨跌停、ST 禁新买、上市/退市、T+1、残仓、100股整手、最低佣金、印花税、过户费和滑点；全部输入必须先通过恰止于 split end 的分区元数据门，越界输入在首行迭代前拒绝；缺少受控退市终值或现金/送转股 entitlement 时拒绝回测，不猜测价格或现金。
+- 标准入口为 `python -m operations.run_technical_formal`。当前仅生成 create-only coverage、Development/Validation 和 Locked Test readiness 三份自校验报告；调用方布尔值、来源字符串、哈希或自报指标均不能提升准入。
+
+### 当前正式证据与结论
+
+- [dataset coverage report](technical_momentum_p0/20260828T121846+0800/dataset_coverage_report.json)：要求区间 `2018-01-01..2025-12-31`，信号预热从 `2017-07-01`；现有证据只是 Tushare 标准非 VIP 接口能力探针，不是正式批次。PIT 中证800仅有 `2024-01-31` 单截面，缺 `2017-12..2023-12` 与 `2024-02..2025-12`。
+- [Development/Validation report](technical_momentum_p0/20260828T121846+0800/development_validation_backtest_report.json)：两个区间均为 `NOT_RUN_BLOCKED`，没有用合成数据生成正式业绩指标。
+- [Locked Test readiness report](technical_momentum_p0/20260828T121846+0800/locked_test_readiness_report.json)：`verdict=BLOCKED`、`locked_test_status=NOT_RUN`、`locked_test_consumed=false`。
+- 关键阻塞：九类数据尚无完整、受控、标准 CLI 校验的历史批次；PIT 成分历史不完整；仅凭标量 `adj_factor` 无法唯一拆分现金分红与送转/配股 entitlement；退市残仓缺受控终值；正式数据校验器与受控回测运行器尚未接入，因此 Development/Validation 不得运行并声称正式结果。
+- 安全状态保持：`paper_eligibility=false`、`trade_eligibility=false`、`real_money_list_allowed=false`、`automatic_order_submission=false`、`live_supported=false`。未运行 Paper，未连接券商，未下单。
+
+### 实际验证
+
+- P0 定向：`python -m unittest tests.test_technical_formal_data tests.test_technical_formal_backtest tests.test_technical_formal_reporting tests.test_technical_momentum_experiment -v`，`Ran 54 tests`，退出码0，`OK`。
+- Technical 全专项：枚举 `test_technical*.py` 模块运行，`Ran 102 tests`，退出码0，`OK`。
+- 安全全仓回归：枚举测试模块并在导入前精确排除 `test_strategy_workspace_admission`、`test_strategy_workspace_evaluation`、`test_strategy_workspace_experiment`、`test_strategy_workspace_top_decile_backtest`；补丁前首次 `Ran 1009 tests` 后因 Windows 临时目录 rename 的瞬时 `PermissionError` 退出码1，单测复跑通过，随后同集重跑退出码0；完成全输入物理分区零读取补丁后又从头运行最终86个安全模块，`Ran 1010 tests in 245.787s`，退出码0，`OK (skipped=4)`。四个 Locked Test 相关模块始终未导入、未运行。
+- `python -m compileall -q agent research trading operations integrations tests`：退出码0。
+- 四个新增 Schema、实验配置和 capability evidence 共6个源 JSON 文件解析：退出码0；三份交付报告的 Schema、自哈希和相互哈希绑定复核：`OK`。
+- `git diff --check`：退出码0；仅有既有 Windows 行尾转换提示。
+
+### 建议审查范围与下一步
+
+建议按本节 → [P0 规格与边界](TECHNICAL_MOMENTUM_FORMAL_P0.md) → 配置/Schema → `technical_formal_data.py` → `technical_formal_backtest.py` → `technical_formal_reporting.py` → 四个专项测试 → 三份报告的顺序审查。下一步只能先补齐并由标准 CLI 验证正式历史数据、公司行动 entitlement 和退市终值，再运行 Development/Validation；在 readiness 为 `BLOCKED` 时不得触碰 Locked Test。
+
 ## 快照元数据
 
 - `as_of`：`2026-08-27T14:59:47+08:00`，Asia/Shanghai。

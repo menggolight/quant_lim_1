@@ -1,0 +1,194 @@
+{
+  "schema_version": "technical-momentum-experiment.v1",
+  "strategy_id": "a-share-technical-momentum-adaptive-v1",
+  "research_status": "pre_locked_test_data_and_validation",
+  "frozen_implementation": {
+    "alpha_policy_path": "configs/a_share_technical_shadow_mvp.v1.json",
+    "alpha_policy_sha256": "53b7f2b3da72a2d393c18b4fc61afac9e1a3f63c2cd86756cbd1bd0d47eb77ea",
+    "alpha_source_path": "research/strategy_workspace/technical_alpha_shadow_v1.py",
+    "alpha_source_sha256": "3cd734c8770e5647754fa21d65e8d6a789da3c17958fb2b2b15352268af3d922",
+    "exposure_source_path": "research/strategy_workspace/technical_exposure_shadow_v1.py",
+    "exposure_source_sha256": "4a204237752dec4797c2f80cf5950d638aa4d638f2ece615a29ace62f14d0ca7"
+  },
+  "data": {
+    "contract_version": "technical-formal-dataset.v1",
+    "coverage_start": "2018-01-01",
+    "coverage_end": "2025-12-31",
+    "warmup_start": "2017-07-01",
+    "index_id": "000906.SH",
+    "membership_selection": "latest_snapshot_strictly_before_decision_date",
+    "required_datasets": [
+      "trade_calendar",
+      "raw_daily_bar",
+      "adjustment_factor",
+      "csi800_pit_membership",
+      "suspension_history",
+      "price_limit_history",
+      "name_and_st_history",
+      "security_master",
+      "csi800_price_benchmark"
+    ],
+    "allowed_sources": {
+      "baostock": [
+        "query_trade_dates",
+        "query_history_k_data_plus",
+        "query_adjust_factor",
+        "query_stock_basic"
+      ],
+      "tushare_standard_non_vip": [
+        "trade_cal",
+        "daily",
+        "adj_factor",
+        "index_weight",
+        "suspend_d",
+        "stk_limit",
+        "namechange",
+        "stock_basic",
+        "index_daily"
+      ]
+    },
+    "forbidden_sources": [
+      "tushare_vip",
+      "income",
+      "balancesheet",
+      "cashflow",
+      "disclosure_date",
+      "fina_indicator",
+      "news",
+      "broker_reports",
+      "sentiment"
+    ],
+    "locked_partition_may_be_coverage_checked": true,
+    "locked_partition_may_be_backtested": false
+  },
+  "dual_price": {
+    "signal_return_formula": "raw_close_t*adj_factor_t/(raw_close_t_minus_1*adj_factor_t_minus_1)-1",
+    "signal_ohlc_formula": "raw_ohlc_t*adj_factor_t/base_raw_close_times_factor",
+    "future_adjustment_factor_forbidden": true,
+    "execution_price_basis": "raw_unadjusted_open_close",
+    "adjusted_price_for_quantity_cash_or_nav_forbidden": true,
+    "held_factor_change_without_entitlement_policy": "fail_closed"
+  },
+  "alpha": {
+    "factor_ids": [
+      "RM20",
+      "RM60",
+      "RM120",
+      "TREND_EFF60",
+      "DOWNSIDE_VOL60",
+      "BREAKOUT60"
+    ],
+    "winsor_lower_quantile": "0.01",
+    "winsor_upper_quantile": "0.99",
+    "zscore_ddof": 0,
+    "directions": {
+      "RM20": 1,
+      "RM60": 1,
+      "RM120": 1,
+      "TREND_EFF60": 1,
+      "DOWNSIDE_VOL60": -1,
+      "BREAKOUT60": 1
+    },
+    "entry_score_min_exclusive": "0",
+    "entry_percentile_min": "0.90",
+    "hold_score_min_exclusive": "0",
+    "hold_percentile_min": "0.70"
+  },
+  "exposure": {
+    "benchmark_trend_sessions": 60,
+    "breadth_trend_sessions": 60,
+    "realized_vol_sessions": 20,
+    "annualization_sessions": 252,
+    "risk_off": {
+      "benchmark_trend_max": "0",
+      "breadth_max": "0.40",
+      "account_drawdown_max_loss": "-0.10"
+    },
+    "defensive": {
+      "breadth_trigger_below": "0.50",
+      "realized_vol_max": "0.30",
+      "account_drawdown_max_loss": "-0.07"
+    },
+    "risk_on": {
+      "benchmark_trend_min": "0",
+      "breadth_min": "0.60",
+      "realized_vol_max": "0.20",
+      "account_drawdown_min": "-0.03"
+    },
+    "gross_exposure": {
+      "RISK_OFF": "0.00",
+      "DEFENSIVE": "0.30",
+      "NEUTRAL": "0.60",
+      "RISK_ON": "1.00"
+    },
+    "failure_state": "RISK_OFF"
+  },
+  "portfolio": {
+    "initial_cash": "10000",
+    "max_positions": 3,
+    "max_position_weight": "0.40",
+    "lot_size": 100,
+    "leverage_allowed": false,
+    "short_selling_allowed": false,
+    "candidate_shortage_policy": "preserve_cash"
+  },
+  "costs": {
+    "base": {
+      "commission_rate": "0.00018",
+      "minimum_commission": "5",
+      "sell_tax_rate": "0.0005",
+      "transfer_fee_rate_both_sides": "0.00001",
+      "slippage_bps_one_way": "10",
+      "commission_multiplier": "1"
+    },
+    "stress": {
+      "commission_rate": "0.00018",
+      "minimum_commission": "5",
+      "sell_tax_rate": "0.0005",
+      "transfer_fee_rate_both_sides": "0.00001",
+      "slippage_bps_one_way": "20",
+      "commission_multiplier": "2"
+    }
+  },
+  "execution": {
+    "decision_time": "D_close",
+    "simulated_fill_time": "D_plus_1_open",
+    "valuation_time": "D_plus_1_close",
+    "new_buy_requires_not_suspended": true,
+    "new_buy_requires_not_st": true,
+    "new_buy_requires_not_limit_up_locked": true,
+    "sell_requires_not_suspended": true,
+    "sell_requires_not_limit_down_locked": true,
+    "sell_requires_t_plus_one": true,
+    "blocked_sell_retains_residual_position": true,
+    "listed_and_not_delisted_required": true,
+    "automatic_order_submission": false
+  },
+  "splits": {
+    "development": {
+      "start": "2018-01-01",
+      "end": "2022-12-31",
+      "allowed_to_run": true
+    },
+    "validation": {
+      "start": "2023-01-01",
+      "end": "2023-12-31",
+      "allowed_to_run": true
+    },
+    "locked_test": {
+      "start": "2024-01-01",
+      "end": "2025-12-31",
+      "allowed_to_run": false
+    },
+    "split_account_policy": "independent_initial_cash_and_zero_strategy_positions"
+  },
+  "locked_test_status": "NOT_RUN",
+  "locked_test_consumed": false,
+  "safety": {
+    "paper_eligibility": false,
+    "trade_eligibility": false,
+    "real_money_list_allowed": false,
+    "automatic_order_submission": false,
+    "live_supported": false
+  }
+}

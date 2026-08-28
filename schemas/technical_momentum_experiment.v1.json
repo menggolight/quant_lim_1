@@ -1,0 +1,106 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "technical_momentum_experiment.v1.json",
+  "title": "A-share Technical Momentum Adaptive Experiment V1",
+  "type": "object",
+  "required": [
+    "schema_version",
+    "strategy_id",
+    "research_status",
+    "frozen_implementation",
+    "data",
+    "dual_price",
+    "alpha",
+    "exposure",
+    "portfolio",
+    "costs",
+    "execution",
+    "splits",
+    "locked_test_status",
+    "locked_test_consumed",
+    "safety"
+  ],
+  "properties": {
+    "schema_version": {"const": "technical-momentum-experiment.v1"},
+    "strategy_id": {"const": "a-share-technical-momentum-adaptive-v1"},
+    "research_status": {"const": "pre_locked_test_data_and_validation"},
+    "frozen_implementation": {
+      "const": {
+        "alpha_policy_path": "configs/a_share_technical_shadow_mvp.v1.json",
+        "alpha_policy_sha256": "53b7f2b3da72a2d393c18b4fc61afac9e1a3f63c2cd86756cbd1bd0d47eb77ea",
+        "alpha_source_path": "research/strategy_workspace/technical_alpha_shadow_v1.py",
+        "alpha_source_sha256": "3cd734c8770e5647754fa21d65e8d6a789da3c17958fb2b2b15352268af3d922",
+        "exposure_source_path": "research/strategy_workspace/technical_exposure_shadow_v1.py",
+        "exposure_source_sha256": "4a204237752dec4797c2f80cf5950d638aa4d638f2ece615a29ace62f14d0ca7"
+      }
+    },
+    "alpha": {
+      "type": "object",
+      "required": ["factor_ids", "winsor_lower_quantile", "winsor_upper_quantile", "zscore_ddof", "directions", "entry_score_min_exclusive", "entry_percentile_min", "hold_score_min_exclusive", "hold_percentile_min"],
+      "properties": {
+        "factor_ids": {"const": ["RM20", "RM60", "RM120", "TREND_EFF60", "DOWNSIDE_VOL60", "BREAKOUT60"]},
+        "winsor_lower_quantile": {"const": "0.01"},
+        "winsor_upper_quantile": {"const": "0.99"},
+        "zscore_ddof": {"const": 0},
+        "directions": {"const": {"RM20": 1, "RM60": 1, "RM120": 1, "TREND_EFF60": 1, "DOWNSIDE_VOL60": -1, "BREAKOUT60": 1}},
+        "entry_score_min_exclusive": {"const": "0"},
+        "entry_percentile_min": {"const": "0.90"},
+        "hold_score_min_exclusive": {"const": "0"},
+        "hold_percentile_min": {"const": "0.70"}
+      },
+      "additionalProperties": false
+    },
+    "exposure": {
+      "type": "object",
+      "required": ["benchmark_trend_sessions", "breadth_trend_sessions", "realized_vol_sessions", "annualization_sessions", "gross_exposure"],
+      "properties": {
+        "benchmark_trend_sessions": {"const": 60},
+        "breadth_trend_sessions": {"const": 60},
+        "realized_vol_sessions": {"const": 20},
+        "annualization_sessions": {"const": 252},
+        "gross_exposure": {"const": {"RISK_OFF": "0.00", "DEFENSIVE": "0.30", "NEUTRAL": "0.60", "RISK_ON": "1.00"}}
+      }
+    },
+    "portfolio": {
+      "type": "object",
+      "required": ["initial_cash", "max_positions", "max_position_weight", "lot_size", "leverage_allowed", "short_selling_allowed"],
+      "properties": {
+        "initial_cash": {"const": "10000"},
+        "max_positions": {"const": 3},
+        "max_position_weight": {"const": "0.40"},
+        "lot_size": {"const": 100},
+        "leverage_allowed": {"const": false},
+        "short_selling_allowed": {"const": false}
+      }
+    },
+    "splits": {
+      "type": "object",
+      "required": ["development", "validation", "locked_test"],
+      "properties": {
+        "development": {"$ref": "#/$defs/development"},
+        "validation": {"$ref": "#/$defs/validation"},
+        "locked_test": {"$ref": "#/$defs/locked"}
+      }
+    },
+    "locked_test_status": {"const": "NOT_RUN"},
+    "locked_test_consumed": {"const": false},
+    "safety": {"$ref": "technical_formal_dataset_manifest.v1.json#/$defs/safety"}
+  },
+  "$defs": {
+    "development": {
+      "type": "object",
+      "required": ["start", "end", "allowed_to_run"],
+      "properties": {"start": {"const": "2018-01-01"}, "end": {"const": "2022-12-31"}, "allowed_to_run": {"const": true}}
+    },
+    "validation": {
+      "type": "object",
+      "required": ["start", "end", "allowed_to_run"],
+      "properties": {"start": {"const": "2023-01-01"}, "end": {"const": "2023-12-31"}, "allowed_to_run": {"const": true}}
+    },
+    "locked": {
+      "type": "object",
+      "required": ["start", "end", "allowed_to_run"],
+      "properties": {"start": {"const": "2024-01-01"}, "end": {"const": "2025-12-31"}, "allowed_to_run": {"const": false}}
+    }
+  }
+}

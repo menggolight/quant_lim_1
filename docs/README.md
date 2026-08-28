@@ -4,7 +4,8 @@
 
 ## 当前入口
 
-- [量化策略工作区](STRATEGY_WORKSPACE.md)：唯一默认策略主线；A股质量成长六因子、Choice PIT门、Experiment v2、Top Decile/Top2账本、两阶段Paper与当前阻塞状态。
+- [Technical Momentum 正式数据与验证 P0](TECHNICAL_MOMENTUM_FORMAL_P0.md)：当前唯一正式研究主线；冻结 Technical Alpha/Exposure、九类正式数据、双价格、动态 PIT、Development/Validation 与 Locked Test 硬边界。
+- [量化策略工作区](STRATEGY_WORKSPACE.md)：已暂停但保留的质量成长兼容线；Choice PIT门、Experiment v2、Top Decile/Top2账本、两阶段Paper与当前阻塞状态。
 - [自适应仓位 V2](ADAPTIVE_EXPOSURE_V2.md)：独立、非默认的日终信号系统；P0.1执行内核、五模块、12阶段编排、固定Daily publication registry、D+1人工复核与日频Paper对账已实现。2026-08-24红队补齐正式Daily/Exposure/Alpha Schema校验、authority/failure/safety与Exposure条件图绑定、Next二次复核及exact-type防子类覆写。formal loader仍阻断，正式Alpha固定 `DATA_FAIL_CLOSED`，当前只发布 `BLOCKED` 或无BUY的 `RISK_REDUCTION_ONLY`，全部准入保持关闭。
 - [市场数据 V2](MARKET_DATA.md)：Strategy Workspace 的证据适配层；说明 Provider、时点、校验、准入、真实探针和离线回放。
 - [Choice到期后的Tushare迁移边界](TUSHARE_MIGRATION.md)：Choice新访问失败关闭、历史证据保留、Tushare 5000能力探针与下一阶段dataset迁移门。
@@ -31,7 +32,7 @@
 - [交易执行层](../trading/README.md)
 - [外部集成](../integrations/README.md)
 
-Factor Lab V1、研报审计、行业雷达、个股诊断以及 `agent` 的 market observation/dashboard 保留用于证据、复现或兼容，不物理删除，也不能直接形成交易信号。当前质量成长主线虽已完成Choice只读诊断探针，但正式PIT批次仍缺失，因而保持 `blocked_missing_pit_data` 且未运行正式回测；旧 CSI `RM20` 负结果仅为反证。Paper 尚未准入，LIVE 永久不支持。
+Factor Lab V1、质量成长 V1、研报审计、行业雷达、个股诊断以及 `agent` 的 market observation/dashboard 保留用于证据、复现或兼容，不物理删除，也不能直接形成交易信号。质量成长线虽已完成Choice只读诊断探针，但正式PIT批次仍缺失，因而保持 `blocked_missing_pit_data`；旧 CSI `RM20` 负结果仅为反证。当前 Technical Momentum 正式线也因九类历史数据和公司行动执行会计缺口保持 `BLOCKED`。Paper 尚未准入，LIVE 永久不支持。
 
 ## 历史版本化规格与接入记录（冻结）
 

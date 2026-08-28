@@ -1,0 +1,164 @@
+{
+  "datasets": {
+    "trade_calendar": {
+      "status": "partial",
+      "source": "tushare_standard_non_vip",
+      "interface": "trade_cal",
+      "record_count": 52,
+      "coverage_start": "2026-06-30",
+      "coverage_end": "2026-08-21",
+      "missing_dates": [
+        "required_range_unresolved:2018-01-01..2025-12-31"
+      ],
+      "content_sha256": "9266334ff125112fb85045dea9de17d6556ce5e3f76393d68d12203606add378",
+      "issues": [
+        "capability_probe_only_not_formally_admitted",
+        "coverage_outside_required_range"
+      ]
+    },
+    "raw_daily_bar": {
+      "status": "partial",
+      "source": "tushare_standard_non_vip",
+      "interface": "daily",
+      "record_count": 5,
+      "coverage_start": "2026-08-03",
+      "coverage_end": "2026-08-07",
+      "missing_dates": [
+        "required_warmup_and_range_unresolved:2017-07-01..2025-12-31"
+      ],
+      "content_sha256": "908e59965625f51ac868c3051c2c4e5d8fba8a269442e10feab373e74cf8250c",
+      "issues": [
+        "capability_probe_only_not_formally_admitted",
+        "single_security_five_session_sample"
+      ]
+    },
+    "adjustment_factor": {
+      "status": "partial",
+      "source": "tushare_standard_non_vip",
+      "interface": "adj_factor",
+      "record_count": 5,
+      "coverage_start": "2026-08-03",
+      "coverage_end": "2026-08-07",
+      "missing_dates": [
+        "required_warmup_and_range_unresolved:2017-07-01..2025-12-31"
+      ],
+      "content_sha256": "9f18db285a2b607d793a0e8c6124cb697ad7834eeaf88fff0e03f25e424da164",
+      "issues": [
+        "capability_probe_only_not_formally_admitted",
+        "single_security_five_session_sample"
+      ]
+    },
+    "csi800_pit_membership": {
+      "status": "partial",
+      "source": "tushare_standard_non_vip",
+      "interface": "index_weight",
+      "record_count": 800,
+      "coverage_start": "2024-01-31",
+      "coverage_end": "2024-01-31",
+      "missing_dates": [
+        "missing_months:2017-12..2023-12",
+        "missing_months:2024-02..2025-12"
+      ],
+      "content_sha256": "8b187dae3e1cbaa9995adacf957e27d754d4c29fb0b9f5d870e18bbdf37fd0ea",
+      "issues": [
+        "capability_probe_only_not_formally_admitted",
+        "single_snapshot_cannot_form_pit_history"
+      ]
+    },
+    "suspension_history": {
+      "status": "partial",
+      "source": "tushare_standard_non_vip",
+      "interface": "suspend_d",
+      "record_count": 5,
+      "coverage_start": "2026-08-18",
+      "coverage_end": "2026-08-18",
+      "missing_dates": [
+        "required_range_unresolved:2018-01-01..2025-12-31"
+      ],
+      "content_sha256": "43940fe95132207769290d565ab445fdcc64d4a0950504337a0169119744ae88",
+      "issues": [
+        "capability_probe_only_not_formally_admitted",
+        "single_date_sample"
+      ]
+    },
+    "price_limit_history": {
+      "status": "invalid",
+      "source": "tushare_standard_non_vip",
+      "interface": "stk_limit",
+      "record_count": 5,
+      "coverage_start": "2026-08-03",
+      "coverage_end": "2026-08-07",
+      "missing_dates": [
+        "required_range_unresolved:2018-01-01..2025-12-31"
+      ],
+      "content_sha256": "7ebc230e4ced101e4d88af9870573145f2be10afcf285023cb2f40ce9a7d33a6",
+      "issues": [
+        "capability_probe_schema_drift_missing_pre_close",
+        "coverage_outside_required_range"
+      ]
+    },
+    "name_and_st_history": {
+      "status": "missing",
+      "source": "tushare_standard_non_vip",
+      "interface": "namechange",
+      "record_count": 0,
+      "coverage_start": null,
+      "coverage_end": null,
+      "missing_dates": [
+        "required_range_unresolved:2018-01-01..2025-12-31"
+      ],
+      "content_sha256": null,
+      "issues": [
+        "capability_probe_invalid_payload",
+        "no_formal_history_available"
+      ]
+    },
+    "security_master": {
+      "status": "invalid",
+      "source": "tushare_standard_non_vip",
+      "interface": "stock_basic",
+      "record_count": 1,
+      "coverage_start": null,
+      "coverage_end": null,
+      "missing_dates": [
+        "required_range_unresolved:2018-01-01..2025-12-31"
+      ],
+      "content_sha256": "87946cbc12e5042ec160010c6d29234a5409c69c840ab3420d4340eb714dbd5b",
+      "issues": [
+        "capability_probe_schema_drift_missing_exchange_list_status_delist_date",
+        "single_current_security_sample_not_pit"
+      ]
+    },
+    "csi800_price_benchmark": {
+      "status": "partial",
+      "source": "tushare_standard_non_vip",
+      "interface": "index_daily",
+      "record_count": 5,
+      "coverage_start": "2026-08-03",
+      "coverage_end": "2026-08-07",
+      "missing_dates": [
+        "required_warmup_and_range_unresolved:2017-07-01..2025-12-31"
+      ],
+      "content_sha256": "54dcd45032cb64240d057fad0f44abdd3eb99cc8ff9f619e0f855b9e3ca1232c",
+      "issues": [
+        "capability_probe_only_not_formally_admitted",
+        "five_session_sample"
+      ]
+    }
+  },
+  "critical_checks": {
+    "date_order_valid": false,
+    "no_duplicate_primary_keys": false,
+    "pit_membership_complete": false,
+    "adjustment_point_in_time_valid": false,
+    "dual_price_isolated": false,
+    "execution_states_complete": false,
+    "corporate_action_entitlements_complete": false
+  },
+  "remaining_blockers": [
+    "capability_receipt_scope_not_formal_admission",
+    "corporate_action_entitlement_decomposition_out_of_scope",
+    "delisted_residual_terminal_valuation_not_admitted",
+    "historical_formal_batches_not_collected"
+  ]
+}

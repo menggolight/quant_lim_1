@@ -6,6 +6,7 @@
 
 | 文件 | 职责 |
 |---|---|
+| `a_share_technical_momentum_adaptive.v1.json` | 当前唯一正式研究主线的冻结实验：既有六因子/Exposure参数、九类正式数据、双价格、Development/Validation/Locked物理边界与全关闭安全状态；当前数据门为 `BLOCKED` |
 | `strategy_adaptive_exposure.v2.json` | A股1万元自适应仓位V2的P0契约：月净收益10%仅作挑战报告，目标总仓位0%—100%、显式现金意图、风险退出优先和严格样本外边界；P0安全运行时已实现，但未实现Alpha/仓位模型且不具备Paper或交易准入 |
 | `strategy_quality_growth.v1.json` | A股1万元质量成长V1的六因子、PIT数据门、Top2仓位、成本、风险、历史门、Paper与降级诊断真源；当前 `blocked_missing_pit_data` |
 | `market_data.v1.json` | BaoStock 默认主源、Provider allowlist、dataset-specific admission、整批 fallback、三层存储和可选核验政策 |

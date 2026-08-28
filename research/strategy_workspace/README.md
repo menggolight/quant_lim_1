@@ -1,6 +1,6 @@
 # Strategy Workspace 代码边界
 
-本目录同时保留默认的质量成长 V1 研究链和非默认的 Adaptive Exposure V2。模块存在、Schema 通过或专项测试通过，只表示工程契约可复核；不表示数据来源已认证、统计有效、Paper 已准入或允许交易。仓库永久不支持 LIVE。
+本目录当前以 `a-share-technical-momentum-adaptive-v1` 为唯一正式研究主线，同时保留已暂停的质量成长 V1、每日观察用 Technical Shadow 和非默认 Adaptive Exposure V2。Technical formal P0 使用独立模块与契约，不修改 Shadow 历史产物；当前数据与公司行动会计门仍为 `BLOCKED`。模块存在、Schema 通过或专项测试通过，只表示工程契约可复核；不表示数据来源已认证、统计有效、Paper 已准入或允许交易。仓库永久不支持 LIVE。
 
 ## Adaptive Exposure V2 五模块
 

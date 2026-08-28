@@ -2,20 +2,15 @@
 
 这是一个面向真实资金决策、但严格停留在研究、Paper 与人工复核边界内的中低频量化策略工作区。默认模型是可解释的 OLS、Ridge 和 Fama–MacBeth，不以复杂度代替证据，也不承诺盈利。仓库永久不支持 LIVE 下单。
 
-## 当前唯一默认主线
+## 当前唯一正式研究主线
 
-```text
-A股中证800动态PIT股票池
-  -> 六个冻结质量成长因子（首披财务）
-  -> 同日去极值 / 行业与风格残差化 / Z-score
-  -> Fama–MacBeth + Newey–West / train-only Ridge alpha=1
-  -> D+1开盘到D+21开盘的20日标签、20日调仓、Top2整手执行
-  -> 账户成本 / 美的外部持仓 / 行业集中度 / 回撤与换手门
-  -> 历史全门通过后12个月Paper
-  -> 仅人工真实资金候选
-```
+当前唯一正式研究主线为 `a-share-technical-momentum-adaptive-v1`：动态中证800 PIT 股票池、冻结六因子 Technical Alpha、冻结 0/30%/60%/100% Exposure、D 收盘到紧邻 D+1 未复权开盘，以及基础/压力成本下的 Development 与 Validation。完整 P0 契约与当前阻塞见 [Technical Momentum 正式数据与验证 P0](docs/TECHNICAL_MOMENTUM_FORMAL_P0.md)。
 
-主入口是 `research.strategy_workspace`，完整契约和命令见[策略工作区说明](docs/STRATEGY_WORKSPACE.md)。冻结账户成本为佣金 `0.00018`、单笔最低 `5` 元、卖出税 `0.0005`、双边过户费 `0.00001`、基础单边滑点 10 bps；压力情景为20 bps和双倍佣金。
+质量成长线已经暂停但不删除；其代码、配置、测试和历史证据保留为冻结兼容区。Technical Shadow 继续作为每日业务闭环观察，但不再扩建，也不能作为正式 PIT 数据或历史回测证据。
+
+正式技术路径当前仍为 `BLOCKED`：仓库没有 2018—2025 九类完整正式数据，且单一 `adj_factor` 不能唯一分解现金分红与送转，无法在“真实未复权价格计 NAV”约束下形成完整公司行动账本。Development/Validation 因而尚未运行；2024—2025 Locked Test 保持 `NOT_RUN` / `consumed=false`。
+
+主入口仍位于 `research.strategy_workspace`。冻结账户成本为佣金 `0.00018`、单笔最低 `5` 元、卖出税 `0.0005`、双边过户费 `0.00001`、基础单边滑点 10 bps；压力情景为20 bps和双倍佣金。
 
 [自适应仓位 V2](docs/ADAPTIVE_EXPOSURE_V2.md) 是独立、非默认的日频信号生产系统：P0.1执行内核保持冻结，本轮补齐Factor Discovery、train-only模型/校准、Exposure/Constructor Policy V2、Next-session Signal V2和逐日发布证据。`ExperimentV3AdmissionReceiptV1` 当前只能表达 `diagnostic_binding_only_not_formally_admitted` 的结构绑定，正式loader固定为 `blocked_not_implemented`；生产代码没有issuer token或issuer helper。正式Alpha因此固定 `DATA_FAIL_CLOSED` 且不能产生BUY，诊断打分也不能升级为正式信号。
 
@@ -23,7 +18,7 @@ LLM 在 [`research/factor_discovery/`](research/factor_discovery/README.md) 中�
 
 2026-08-24最终红队又关闭三项发布阻断：正式Daily decision、Exposure decision和Alpha ranking在发布边界执行冻结JSON Schema校验；authority/status/data-status/failure/safety及Exposure state/target到Intent、Construction、Daily的条件图必须一致；Next-session从固定registry加载后独立重复整图校验。Experiment诊断receipt、Daily admission/publication/loaded对象和Next-session Signal的信任边界均要求exact type并直接调用基类校验，调用方子类不能覆写验证或序列化方法绕过失败关闭。
 
-当前真实状态是 `blocked_missing_pit_data`，不是“策略已跑完”。2026-08-19 Choice 只读链曾完成当前800成分、当前一级行业、历史行业日期回显、中证800价格/全收益别名及60只股票价量采集；用户现已确认Choice访问权限到期，所有新网络访问在SDK导入前以`provider_access_expired`失败关闭，旧证据保留但不进入新的正式研究消费。既有降级样本覆盖2026-02-24至2026-08-18的121个共同交易日，60只均生成六个技术诊断因子；但它使用当前成分与当前行业，不是历史PIT，且相对收益使用价格指数而非正式全收益序列。当前只有单截面，没有排名、历史回测、Paper证书或股票清单。
+质量成长兼容线的真实状态仍是 `blocked_missing_pit_data`，不是“策略已跑完”。2026-08-19 Choice 只读链曾完成当前800成分、当前一级行业、历史行业日期回显、中证800价格/全收益别名及60只股票价量采集；用户现已确认Choice访问权限到期，所有新网络访问在SDK导入前以`provider_access_expired`失败关闭，旧证据保留但不进入新的正式研究消费。既有降级样本覆盖2026-02-24至2026-08-18的121个共同交易日，60只均生成六个技术诊断因子；但它使用当前成分与当前行业，不是历史PIT，且相对收益使用价格指数而非正式全收益序列。当前只有单截面，没有正式历史回测、Paper证书或股票清单。
 
 查看当前因子目录，以及把真实探针绑定成状态产物：
 
@@ -157,6 +152,7 @@ python -m research.broker_report_audit audit `
 
 - [项目交接状态](docs/STATUS.md)
 - [项目决策记录](docs/DECISIONS.md)
+- [Technical Momentum 正式数据与验证 P0](docs/TECHNICAL_MOMENTUM_FORMAL_P0.md)
 - [自适应仓位 V2](docs/ADAPTIVE_EXPOSURE_V2.md)
 - [因子发现治理](research/factor_discovery/README.md)
 - [市场数据 V2](docs/MARKET_DATA.md)

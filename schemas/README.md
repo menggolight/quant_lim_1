@@ -21,6 +21,10 @@ JSON Schema 负责结构，`research/market_data/validation.py` 在无网络依�
 
 ## 其他契约
 
+- `technical_momentum_experiment.v1.json`：当前唯一正式研究主线 `a-share-technical-momentum-adaptive-v1` 的独立冻结规格；哈希绑定既有 Technical Alpha/Exposure 真源，锁定九类数据、双价格、最多3只/40%、基础与压力成本，以及 Development/Validation/Locked 日期。Locked 固定 `NOT_RUN`、`consumed=false`，安全权限全关闭。
+- `technical_formal_dataset_manifest.v1.json`：九类 Technical 正式数据的 coverage/完整性 manifest；逐数据集记录来源接口、行数、日期、缺口、内容哈希和问题，并把 PIT、adjustment、双价格、执行状态及公司行动权益分解作为关键门。Schema通过不代表数据完整或来源官方。
+- `technical_momentum_backtest_report.v1.json`：只允许 Development 与 Validation 的基础/压力双情景报告；数据门失败时指标必须为 `null` 且状态为 `NOT_RUN_BLOCKED`，不得用单测或合成结果补值。
+- `technical_locked_test_readiness.v1.json`：只汇总正式数据 manifest 与 Development/Validation 报告的 readiness；不允许包含 2024—2025 factor、ranking、signal、trade、NAV 或 return，Locked 状态固定未运行/未消费。
 - `strategy_adaptive_exposure_policy.v2.json`：`a-share-small-account-adaptive-exposure-v2` 的冻结政策形状；锁定0%—100%离散仓位、Top3/单只40%、显式现金意图、P0.1执行语义、风险退出重试和“月净收益10%仅报告”，固定Paper/交易/真实资金为不准入且LIVE永久不支持。V1只保留历史兼容；Schema通过不证明策略有效或任何准入。
 - `portfolio_intent.v1.json`：V2研究决策到计划层的显式组合意图，绑定时点和四类输入哈希；普通空目标失败，只有 `NO_ALPHA_CASH`、`RISK_OFF` 与 `ACCOUNT_DRAWDOWN_EXIT` 可以用空权重表达0%目标。权重求和、哈希和时序仍须由领域校验重算。
 - `portfolio_execution_plan.v2.json`：意图、账户快照和逐日执行尝试的计划/对账信封；除报价与受控日历外，新增 `execution_rule_bundle_sha256`，绑定完整 `FeeSchedule`、所有相关 `InstrumentRule` 与整手政策。Planner、Gate、Approval 和 Paper Broker 都必须重算；所有现金、减仓、数据失败和暂停意图在Schema层也只能含SELL类订单。V1仅用于历史兼容。相邻性与哈希仍只证明传入内容一致，不证明官方来源。

@@ -1,6 +1,8 @@
-# A股小资金质量成长策略工作区
+# A股小资金质量成长策略工作区（暂停兼容线）
 
-`research.strategy_workspace` 的默认主线是 `a-share-small-account-quality-growth-v1`。它面向真实资金决策设计，但只生成研究、Paper 账本和人工复核候选；仓库永久不支持 LIVE 下单。
+> 本线已暂停但不删除。当前唯一正式研究主线为 [`a-share-technical-momentum-adaptive-v1`](TECHNICAL_MOMENTUM_FORMAL_P0.md)；本文件只保留质量成长 V1 的历史契约与阻塞状态，不再代表默认研究方向。
+
+`a-share-small-account-quality-growth-v1` 仅作为 `research.strategy_workspace` 的暂停兼容线保留。它面向真实资金决策设计，但只生成研究、Paper 账本和人工复核候选；仓库永久不支持 LIVE 下单。
 
 ## 非默认的自适应仓位 V2
 

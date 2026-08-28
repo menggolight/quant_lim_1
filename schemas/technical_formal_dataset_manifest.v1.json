@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "technical_formal_dataset_manifest.v1.json",
+  "title": "Technical Formal Dataset Manifest V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "dataset_id",
+    "strategy_id",
+    "generated_at",
+    "coverage_start",
+    "coverage_end",
+    "warmup_start",
+    "datasets",
+    "critical_checks",
+    "data_status",
+    "remaining_blockers",
+    "locked_test_status",
+    "locked_test_consumed",
+    "safety",
+    "manifest_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "technical-formal-dataset-manifest.v1"},
+    "dataset_id": {"type": "string", "minLength": 1},
+    "strategy_id": {"const": "a-share-technical-momentum-adaptive-v1"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "coverage_start": {"const": "2018-01-01"},
+    "coverage_end": {"const": "2025-12-31"},
+    "warmup_start": {"const": "2017-07-01"},
+    "datasets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "trade_calendar",
+        "raw_daily_bar",
+        "adjustment_factor",
+        "csi800_pit_membership",
+        "suspension_history",
+        "price_limit_history",
+        "name_and_st_history",
+        "security_master",
+        "csi800_price_benchmark"
+      ],
+      "properties": {
+        "trade_calendar": {"$ref": "#/$defs/dataset"},
+        "raw_daily_bar": {"$ref": "#/$defs/dataset"},
+        "adjustment_factor": {"$ref": "#/$defs/dataset"},
+        "csi800_pit_membership": {"$ref": "#/$defs/dataset"},
+        "suspension_history": {"$ref": "#/$defs/dataset"},
+        "price_limit_history": {"$ref": "#/$defs/dataset"},
+        "name_and_st_history": {"$ref": "#/$defs/dataset"},
+        "security_master": {"$ref": "#/$defs/dataset"},
+        "csi800_price_benchmark": {"$ref": "#/$defs/dataset"}
+      }
+    },
+    "critical_checks": {
+      "type": "object",
+      "additionalProperties": {"type": "boolean"},
+      "required": [
+        "date_order_valid",
+        "no_duplicate_primary_keys",
+        "pit_membership_complete",
+        "adjustment_point_in_time_valid",
+        "dual_price_isolated",
+        "execution_states_complete",
+        "corporate_action_entitlements_complete"
+      ]
+    },
+    "data_status": {"enum": ["READY", "BLOCKED"]},
+    "remaining_blockers": {
+      "type": "array",
+      "items": {"type": "string", "minLength": 1},
+      "uniqueItems": true
+    },
+    "locked_test_status": {"const": "NOT_RUN"},
+    "locked_test_consumed": {"const": false},
+    "safety": {"$ref": "#/$defs/safety"},
+    "manifest_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "dataset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status",
+        "source",
+        "interface",
+        "record_count",
+        "coverage_start",
+        "coverage_end",
+        "missing_dates",
+        "content_sha256",
+        "issues"
+      ],
+      "properties": {
+        "status": {"enum": ["complete", "missing", "partial", "invalid"]},
+        "source": {"type": ["string", "null"]},
+        "interface": {"type": ["string", "null"]},
+        "record_count": {"type": "integer", "minimum": 0},
+        "coverage_start": {"type": ["string", "null"], "format": "date"},
+        "coverage_end": {"type": ["string", "null"], "format": "date"},
+        "missing_dates": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        },
+        "content_sha256": {
+          "oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+        },
+        "issues": {
+          "type": "array",
+          "items": {"type": "string", "minLength": 1},
+          "uniqueItems": true
+        }
+      }
+    },
+    "safety": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "paper_eligibility",
+        "trade_eligibility",
+        "real_money_list_allowed",
+        "automatic_order_submission",
+        "live_supported"
+      ],
+      "properties": {
+        "paper_eligibility": {"const": false},
+        "trade_eligibility": {"const": false},
+        "real_money_list_allowed": {"const": false},
+        "automatic_order_submission": {"const": false},
+        "live_supported": {"const": false}
+      }
+    }
+  }
+}

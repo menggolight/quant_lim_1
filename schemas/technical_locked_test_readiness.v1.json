@@ -1,0 +1,39 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "technical_locked_test_readiness.v1.json",
+  "title": "Technical Momentum Locked Test Readiness V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "strategy_id",
+    "generated_at",
+    "verdict",
+    "dataset_manifest_sha256",
+    "backtest_report_sha256",
+    "checks",
+    "locked_test_status",
+    "locked_test_consumed",
+    "remaining_blockers",
+    "safety",
+    "readiness_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "technical-locked-test-readiness.v1"},
+    "strategy_id": {"const": "a-share-technical-momentum-adaptive-v1"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "verdict": {"enum": ["DATA_READY_FOR_LOCKED_TEST", "BLOCKED"]},
+    "dataset_manifest_sha256": {"$ref": "technical_formal_dataset_manifest.v1.json#/$defs/sha256"},
+    "backtest_report_sha256": {"$ref": "technical_formal_dataset_manifest.v1.json#/$defs/sha256"},
+    "checks": {
+      "type": "object",
+      "additionalProperties": {"type": "boolean"},
+      "required": ["formal_dataset_complete", "pit_membership_complete", "adjustment_safe", "execution_status_complete", "development_completed", "validation_completed", "locked_test_not_run"]
+    },
+    "locked_test_status": {"const": "NOT_RUN"},
+    "locked_test_consumed": {"const": false},
+    "remaining_blockers": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "safety": {"$ref": "technical_formal_dataset_manifest.v1.json#/$defs/safety"},
+    "readiness_sha256": {"$ref": "technical_formal_dataset_manifest.v1.json#/$defs/sha256"}
+  }
+}
