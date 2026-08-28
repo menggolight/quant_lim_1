@@ -33,7 +33,7 @@
       "items": {"$ref": "#/$defs/month"}
     },
     "stage_status": {"enum": ["PIT_MEMBERSHIP_READY", "BLOCKED_PIT_MEMBERSHIP"]},
-    "terminal_status": {"type": ["string", "null"], "enum": ["BLOCKED_DATA", null]},
+    "terminal_status": {"type": ["string", "null"], "enum": ["BLOCKED_DATA", "BLOCKED_ADAPTER_PROTOCOL", null]},
     "remaining_blockers": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
     "locked_test_status": {"$ref": "#/$defs/locked"},
     "locked_test_consumed": {"const": false},

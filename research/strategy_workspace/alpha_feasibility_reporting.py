@@ -54,6 +54,27 @@ ALLOWED_ENDPOINTS = (
     "suspend_d",
     "stock_basic",
 )
+ADAPTER_PROTOCOL_BLOCKERS = frozenset(
+    {
+        "duplicate_json_key",
+        "invalid_response_json",
+        "response_root_not_object",
+        "response_root_fields_differ_from_contract",
+        "response_code_type_invalid",
+        "response_message_type_invalid",
+        "response_request_id_type_invalid",
+        "response_request_id_format_invalid",
+        "response_error_data_type_invalid",
+        "response_data_not_object",
+        "response_data_fields_differ_from_contract",
+        "response_fields_not_unique_string_array",
+        "response_fields_differ_from_contract",
+        "response_items_not_array",
+        "response_row_shape_invalid",
+        "transport_response_envelope_invalid",
+        "blocked_adapter_protocol",
+    }
+)
 
 LOCKED_TEST_STATUS = {
     "access": "NOT_ACCESSED",
@@ -499,8 +520,9 @@ def _normalize_data_summary(
     allow_missing_provenance = (
         blocked_defaults
         or summary.get("data_status")
-        in {"BLOCKED_PIT_MEMBERSHIP", "BLOCKED_DATA"}
-        or summary.get("terminal_status") == "BLOCKED_DATA"
+        in {"BLOCKED_PIT_MEMBERSHIP", "BLOCKED_DATA", "BLOCKED_ADAPTER_PROTOCOL"}
+        or summary.get("terminal_status")
+        in {"BLOCKED_DATA", "BLOCKED_ADAPTER_PROTOCOL"}
     )
     provenance = {
         "collection_plan_sha256": _sha256_or_none(
@@ -531,6 +553,7 @@ def _normalize_data_summary(
         "READY",
         "BLOCKED_PIT_MEMBERSHIP",
         "BLOCKED_DATA",
+        "BLOCKED_ADAPTER_PROTOCOL",
     }:
         raise AlphaFeasibilityReportingError("data summary data_status is invalid")
 
@@ -872,10 +895,15 @@ def build_blocked_alpha_feasibility_report(
     config_path: Path | str = DEFAULT_CONFIG_PATH,
     generated_at: datetime | str | None = None,
 ) -> dict[str, Any]:
-    """Build an honest BLOCKED_DATA report without accepting any metrics."""
+    """Build an honest blocked report without accepting any metrics."""
 
     frozen = _resolve_experiment(experiment, config_path)
     data = _normalize_data_summary(data_summary, blocked_defaults=True)
+    terminal_status = (
+        "BLOCKED_ADAPTER_PROTOCOL"
+        if data["data_status"] == "BLOCKED_ADAPTER_PROTOCOL"
+        else "BLOCKED_DATA"
+    )
     payload = {
         **_report_base(
             experiment=frozen,
@@ -886,7 +914,7 @@ def build_blocked_alpha_feasibility_report(
         "development_metrics": None,
         "validation_metrics": None,
         "concentration_metrics": None,
-        "terminal_status": "BLOCKED_DATA",
+        "terminal_status": terminal_status,
         "locked_test_status": dict(LOCKED_TEST_STATUS),
         "locked_test_consumed": False,
         "remaining_blockers": _merge_blockers(data, remaining_blockers),
@@ -1003,7 +1031,7 @@ def verify_alpha_feasibility_report(
     blockers = _unique_strings(candidate["remaining_blockers"], "remaining_blockers")
 
     terminal = candidate["terminal_status"]
-    if terminal == "BLOCKED_DATA":
+    if terminal in {"BLOCKED_DATA", "BLOCKED_ADAPTER_PROTOCOL"}:
         if any(
             candidate[field] is not None
             for field in (
@@ -1012,9 +1040,16 @@ def verify_alpha_feasibility_report(
                 "concentration_metrics",
             )
         ):
-            raise AlphaFeasibilityReportingError("BLOCKED_DATA report must not contain metrics")
+            raise AlphaFeasibilityReportingError("blocked report must not contain metrics")
         if not blockers:
-            raise AlphaFeasibilityReportingError("BLOCKED_DATA report requires blockers")
+            raise AlphaFeasibilityReportingError("blocked report requires blockers")
+        expected_blocked_terminal = (
+            "BLOCKED_ADAPTER_PROTOCOL"
+            if any(blocker in ADAPTER_PROTOCOL_BLOCKERS for blocker in blockers)
+            else "BLOCKED_DATA"
+        )
+        if terminal != expected_blocked_terminal:
+            raise AlphaFeasibilityReportingError("blocked terminal_status derived result drift")
         return
 
     _assert_completed_data(data)

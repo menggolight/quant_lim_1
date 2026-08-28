@@ -48,7 +48,7 @@ Tushare Alpha Feasibility P1 专项：
 python -m unittest tests.test_tushare_alpha_feasibility tests.test_alpha_feasibility tests.test_alpha_feasibility_reporting tests.test_run_alpha_feasibility -v
 ```
 
-该组使用注入 transport 和内存反例验证73个月PIT、create-only重放、响应截止隔离、因果复权、停牌carry、完整日历、D+1开盘时序、冻结成本/Exposure、16项指标和三种终态；不访问网络，也不导入四个Locked Test模块。真实Tushare结果必须由独立CLI运行证据确认。
+该组使用注入 transport 和内存反例验证73个月PIT、create-only重放、严格`code/msg/data(+request_id)`包络、安全根字段诊断、request_id传输/normalized身份隔离、响应截止隔离、因果复权、停牌carry、完整日历、D+1开盘时序、冻结成本/Exposure、16项指标和四种终态；不访问网络，也不导入四个Locked Test模块。真实Tushare结果必须由独立CLI运行证据确认。
 
 该组验证政策哈希、普通空意图拒绝、显式现金意图、风险退出普通换手豁免、物理受阻不连坐、intent/attempt跨重启幂等、旧SQLite迁移、账户CAS、规范化报价包、内部日历相邻性、费用后仓位上限、D日收盘触发后下一受控session退出、逐日重试、永久no-reentry latch，以及日频现金/持仓/NAV/回撤/三类仓位重放。它不包含Alpha/仓位模型、正式PIT数据、官方日历/行情registry或Locked Test运行；Gate approval也尚未直接绑定独立费率表，因此这些测试不能证明策略有效或Paper准入。
 

@@ -32,11 +32,18 @@ def _counts() -> dict[str, int]:
 
 def _backfill(*, stage: str) -> dict[str, object]:
     blocked = stage != cli.READY_STAGE
+    adapter_blocked = stage == "BLOCKED_ADAPTER_PROTOCOL"
     return {
         "schema_version": "tushare-alpha-feasibility-backfill-result.v1",
         "experiment_id": "a-share-technical-alpha-feasibility-tushare-p1-v1",
         "stage_status": stage,
-        "terminal_status": "BLOCKED_DATA" if blocked else None,
+        "terminal_status": (
+            "BLOCKED_ADAPTER_PROTOCOL"
+            if adapter_blocked
+            else "BLOCKED_DATA"
+            if blocked
+            else None
+        ),
         "generated_at": GENERATED_AT,
         "actual_tushare_request_count_by_endpoint": _counts(),
         "coverage_start": "2017-07-01",
@@ -51,7 +58,13 @@ def _backfill(*, stage: str) -> dict[str, object]:
         "adj_factor_coverage_status": "BLOCKED_DATA" if blocked else "COMPLETE",
         "suspension_coverage_status": "BLOCKED_DATA" if blocked else "COMPLETE",
         "benchmark_coverage_status": "BLOCKED_DATA" if blocked else "COMPLETE",
-        "remaining_blockers": ["pit_membership_incomplete"] if blocked else [],
+        "remaining_blockers": (
+            ["response_root_fields_differ_from_contract"]
+            if adapter_blocked
+            else ["pit_membership_incomplete"]
+            if blocked
+            else []
+        ),
         "locked_test_status": dict(cli.LOCKED_TEST_STATUS),
         "locked_test_consumed": False,
         "execution_realism": "INCOMPLETE",
@@ -135,6 +148,13 @@ def _study() -> SimpleNamespace:
 
 
 class RunAlphaFeasibilityCliTests(unittest.TestCase):
+    def test_adapter_protocol_failure_sets_remain_exactly_aligned(self) -> None:
+        self.assertEqual(
+            set(cli.data_lane.ADAPTER_PROTOCOL_FAILURES),
+            set(cli.reporting.ADAPTER_PROTOCOL_BLOCKERS)
+            - {"blocked_adapter_protocol"},
+        )
+
     def test_date_and_endpoint_preflight_precede_token_and_output_access(self) -> None:
         source_config = json.loads(cli.reporting.DEFAULT_CONFIG_PATH.read_text(encoding="utf-8"))
         mutations = {
@@ -208,6 +228,41 @@ class RunAlphaFeasibilityCliTests(unittest.TestCase):
         self.assertIs(report["locked_test_consumed"], False)
         self.assertNotIn("super-secret-token-value", serialized)
         self.assertNotIn("2024-01-01", serialized)
+
+    def test_adapter_protocol_block_retains_distinct_terminal_and_skips_alpha(self) -> None:
+        blocked = _backfill(stage="BLOCKED_ADAPTER_PROTOCOL")
+        blocked["pit_months_observed"] = 0
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
+            cli.data_lane,
+            "run_backfill_from_environment",
+            return_value=blocked,
+        ), mock.patch.object(
+            cli.data_lane, "load_feasibility_inputs"
+        ) as load_inputs, mock.patch.object(
+            cli.engine, "run_alpha_feasibility_study"
+        ) as run_alpha, mock.patch.object(
+            cli, "_current_commit_sha", return_value=COMMIT_SHA
+        ), mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            code = cli.main(
+                [
+                    "all",
+                    "--output-root",
+                    temp_dir,
+                    "--generated-at",
+                    GENERATED_AT,
+                ]
+            )
+            summary = json.loads(stdout.getvalue())
+            report = json.loads(
+                (Path(temp_dir) / "alpha_feasibility_report.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+        self.assertEqual(code, 1)
+        self.assertEqual(summary["terminal_status"], "BLOCKED_ADAPTER_PROTOCOL")
+        self.assertEqual(report["terminal_status"], "BLOCKED_ADAPTER_PROTOCOL")
+        load_inputs.assert_not_called()
+        run_alpha.assert_not_called()
 
     def test_missing_token_after_valid_preflight_is_blocked_data_not_failed(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(

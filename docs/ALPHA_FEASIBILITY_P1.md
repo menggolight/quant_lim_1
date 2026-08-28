@@ -15,6 +15,8 @@
 
 PIT 通过后，只对73个月合法截面的成员并集回填。所有请求在本地形成不含 Token 的参数指纹、started claim、规范化响应哈希和 create-only 产物；完整任务离线重放，已开始但没有持久化响应的远端调用按歧义失败关闭，不自动重发。上游响应或错误字段一旦出现 `2024-01-01` 及以后日期，在进入消费者前隔离且不保存原始正文。
 
+Tushare HTTP 成功包络的必需根字段固定为 `code/msg/data`，只允许额外传输元数据 `request_id`。`request_id` 必须是1至160字符的保守ASCII opaque ID；完整值不写入normalized rows、PIT manifest或Experiment内容哈希，只在v2 transport receipt中记录存在性和可选SHA-256。任何其他根字段、缺失必需字段、重复JSON key、非对象根、非法类型或放松后的data内部结构都会失败关闭。根字段不匹配的quarantine只保存HTTP状态、字节数、响应SHA-256、安全化字段清单、缺失/未知字段、Token泄漏检查和稳定失败码，不保存正文、Token、Authorization、Cookie或完整request_id。
+
 历史完整性要求：
 
 - `trade_cal` 覆盖每个自然日并校验 `pretrade_date`、年度开市日数量和窗口内下一交易日映射；末日不跨到2024。
@@ -51,6 +53,7 @@ python -m operations.run_alpha_feasibility all `
 - `ALPHA_FEASIBILITY_GO_CANDIDATE`：Validation base 主动净收益大于0、stress 不小于0、两情景最大回撤均不超过12%，且单股与最佳10日收益集中度均不超过预注册50%门。
 - `ALPHA_FEASIBILITY_NO_GO`：数据完整，但冻结 Alpha 在 Validation 不值得继续扩建完整执行层。
 - `BLOCKED_DATA`：PIT、历史、回放或消费者完整性未通过；报告不含 Development/Validation 指标。
+- `BLOCKED_ADAPTER_PROTOCOL`：Tushare HTTP/JSON包络或data结构违反严格适配器契约；报告不含 Development/Validation 指标。
 
 即使为 GO candidate，也只是后续工程候选，不是实盘收益、Paper 准入、股票推荐或交易授权。
 

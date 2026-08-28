@@ -39,15 +39,24 @@ ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "configs" / "a_share_technical_alpha_feasibility.v1.json"
 NOW = datetime(2026, 8, 28, 1, 2, 3, tzinfo=timezone.utc)
 TOKEN = "UnitTestCredentialNeverPersist123456"
+_REQUEST_ID_UNSET = object()
 
 
-def response_bytes(endpoint: str, rows: list[list[object]]) -> bytes:
+def response_bytes(
+    endpoint: str,
+    rows: list[list[object]],
+    *,
+    request_id: object = _REQUEST_ID_UNSET,
+) -> bytes:
+    payload = {
+        "code": 0,
+        "msg": None,
+        "data": {"fields": list(EXPECTED_FIELDS[endpoint]), "items": rows},
+    }
+    if request_id is not _REQUEST_ID_UNSET:
+        payload["request_id"] = request_id
     return json.dumps(
-        {
-            "code": 0,
-            "msg": None,
-            "data": {"fields": list(EXPECTED_FIELDS[endpoint]), "items": rows},
-        },
+        payload,
         ensure_ascii=False,
         separators=(",", ":"),
     ).encode("utf-8")
@@ -60,7 +69,10 @@ class FakeTransport:
 
     def __call__(self, **kwargs):
         self.calls.append(dict(kwargs))
-        return self.callback(**kwargs)
+        return taf.TushareHttpResponse(
+            http_status=200,
+            body=self.callback(**kwargs),
+        )
 
 
 class InMemoryCompletedStore:
@@ -86,6 +98,17 @@ class InMemoryCompletedStore:
             isolated_non_union_row_count=0,
             wire_response_sha256=row_hash,
             response_artifact_sha256=row_hash,
+            transport_receipt=MappingProxyType(
+                {
+                    "http_status": 200,
+                    "response_byte_count": 1,
+                    "response_body_sha256": row_hash,
+                    "accepted_root_fields": ["code", "data", "msg"],
+                    "request_id_present": False,
+                    "request_id_sha256": None,
+                    "token_leak_check": "PASSED",
+                }
+            ),
         )
 
 
@@ -145,6 +168,381 @@ class TusharePlanTests(unittest.TestCase):
         self.assertEqual(len([task for task in tasks if task.endpoint == "stock_basic"]), 3)
 
 
+class TushareResponseEnvelopeTests(unittest.TestCase):
+    def setUp(self):
+        self.plan = load_config_and_build_plan(CONFIG)
+        history = build_history_plan(self.plan, ["600000.SH"])
+        self.task = next(task for task in history if task.endpoint == "trade_cal")
+        self.rows = [["SSE", "20170701", 0, "20170630"]]
+
+    def _validate(self, raw: bytes):
+        return taf.validate_response_bytes(self.task, raw, token=TOKEN, http_status=200)
+
+    def _payload(self, **changes):
+        payload = {
+            "code": 0,
+            "msg": None,
+            "data": {
+                "fields": list(EXPECTED_FIELDS["trade_cal"]),
+                "items": self.rows,
+            },
+        }
+        payload.update(changes)
+        return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+    def test_required_root_only_and_optional_request_id_both_pass(self):
+        without = self._validate(response_bytes("trade_cal", self.rows))
+        with_request = self._validate(
+            response_bytes("trade_cal", self.rows, request_id="req-201712-abc123")
+        )
+        self.assertEqual(without.accepted_root_fields, ("code", "data", "msg"))
+        self.assertFalse(without.request_id_present)
+        self.assertIsNone(without.request_id_sha256)
+        self.assertEqual(
+            with_request.accepted_root_fields,
+            ("code", "data", "msg", "request_id"),
+        )
+        self.assertTrue(with_request.request_id_present)
+        self.assertRegex(with_request.request_id_sha256, r"^[0-9a-f]{64}$")
+
+        opaque_current_request_date = self._validate(
+            response_bytes(
+                "trade_cal",
+                self.rows,
+                request_id="req-20260828-abc",
+            )
+        )
+        self.assertTrue(opaque_current_request_date.request_id_present)
+
+    def test_invalid_request_id_types_empty_length_control_and_path_are_rejected(self):
+        invalid = (
+            7,
+            {},
+            [],
+            "",
+            "x" * 161,
+            "control\nvalue",
+            "../request",
+            "folder/request",
+            "folder\\request",
+            "C:temp",
+        )
+        for request_id in invalid:
+            with self.subTest(request_id=repr(request_id)):
+                code = (
+                    "response_request_id_type_invalid"
+                    if type(request_id) is not str
+                    else "response_request_id_format_invalid"
+                )
+                with self.assertRaisesRegex(AlphaFeasibilityDataError, code):
+                    self._validate(
+                        response_bytes(
+                            "trade_cal",
+                            self.rows,
+                            request_id=request_id,
+                        )
+                    )
+
+    def test_unknown_and_missing_root_fields_fail_with_safe_diagnostics(self):
+        unknown = self._payload(trace_id="not-accepted")
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            store = CreateOnlyTaskStore(temporary)
+            transport = FakeTransport(lambda **_kwargs: unknown)
+            with self.assertRaisesRegex(
+                AlphaFeasibilityDataError,
+                "response_root_fields_differ_from_contract",
+            ):
+                store.execute(
+                    self.task,
+                    token=TOKEN,
+                    transport=transport,
+                    timeout_seconds=1,
+                    maximum_response_bytes=8_388_608,
+                )
+            evidence = json.loads(
+                store.quarantine_path(self.task).read_text(encoding="utf-8")
+            )
+        self.assertEqual(evidence["http_status"], 200)
+        self.assertEqual(evidence["response_byte_count"], len(unknown))
+        self.assertEqual(
+            evidence["response_body_sha256"], hashlib.sha256(unknown).hexdigest()
+        )
+        self.assertEqual(
+            evidence["sorted_observed_root_fields"],
+            ["code", "data", "msg", "trace_id"],
+        )
+        self.assertEqual(evidence["missing_required_root_fields"], [])
+        self.assertEqual(evidence["unexpected_root_fields"], ["trace_id"])
+        self.assertEqual(evidence["token_leak_check"], "PASSED")
+        self.assertEqual(
+            evidence["failure_code"],
+            "response_root_fields_differ_from_contract",
+        )
+        self.assertNotIn("not-accepted", json.dumps(evidence, sort_keys=True))
+        self.assertNotIn(TOKEN, json.dumps(evidence, sort_keys=True))
+
+        for missing_field in ("code", "data"):
+            payload = json.loads(self._payload().decode("utf-8"))
+            payload.pop(missing_field)
+            raw = json.dumps(payload, separators=(",", ":")).encode("utf-8")
+            with self.subTest(missing_field=missing_field):
+                with self.assertRaises(AlphaFeasibilityDataError) as raised:
+                    self._validate(raw)
+                self.assertEqual(
+                    raised.exception.code,
+                    "response_root_fields_differ_from_contract",
+                )
+                self.assertEqual(
+                    raised.exception.diagnostic["missing_required_root_fields"],
+                    [missing_field],
+                )
+
+    def test_code_and_data_types_are_strict_and_nonzero_null_is_controlled(self):
+        with self.assertRaisesRegex(
+            AlphaFeasibilityDataError, "response_code_type_invalid"
+        ):
+            self._validate(self._payload(code=True))
+        with self.assertRaisesRegex(
+            AlphaFeasibilityDataError, "response_message_type_invalid"
+        ):
+            self._validate(self._payload(msg=7))
+        with self.assertRaisesRegex(
+            AlphaFeasibilityDataError, "response_data_not_object"
+        ):
+            self._validate(self._payload(data=None))
+        with self.assertRaisesRegex(
+            AlphaFeasibilityDataError, "upstream_response_not_success"
+        ):
+            self._validate(self._payload(code=-2001, msg="permission denied", data=None))
+        with self.assertRaisesRegex(
+            AlphaFeasibilityDataError, "response_error_data_type_invalid"
+        ):
+            self._validate(self._payload(code=-2001, data=[]))
+        with self.assertRaisesRegex(
+            AlphaFeasibilityDataError, "credential_echo_in_response"
+        ):
+            self._validate(
+                response_bytes("trade_cal", self.rows, request_id=TOKEN)
+            )
+
+    def test_data_internal_contract_duplicate_json_keys_and_nonobject_root_remain_strict(self):
+        duplicate_fields = self._payload(
+            data={
+                "fields": ["exchange", "cal_date", "is_open", "is_open"],
+                "items": self.rows,
+            }
+        )
+        with self.assertRaisesRegex(
+            AlphaFeasibilityDataError,
+            "response_fields_not_unique_string_array",
+        ):
+            self._validate(duplicate_fields)
+        with self.assertRaisesRegex(AlphaFeasibilityDataError, "duplicate_json_key"):
+            self._validate(b'{"code":0,"code":0,"msg":null,"data":{}}')
+        with self.assertRaisesRegex(
+            AlphaFeasibilityDataError, "response_root_not_object"
+        ):
+            self._validate(b"[]")
+
+    def test_request_id_changes_transport_hash_but_not_normalized_identity(self):
+        first_id = "req-first-opaque"
+        second_id = "req-second-opaque"
+        results = []
+        roots = []
+        response_artifacts = []
+        for request_id in (first_id, second_id):
+            raw = response_bytes("trade_cal", self.rows, request_id=request_id)
+            root = tempfile.TemporaryDirectory(dir=ROOT)
+            self.addCleanup(root.cleanup)
+            roots.append(Path(root.name))
+            store = CreateOnlyTaskStore(root.name)
+            result = store.execute(
+                self.task,
+                token=TOKEN,
+                transport=FakeTransport(lambda **_kwargs: raw),
+                timeout_seconds=1,
+                maximum_response_bytes=8_388_608,
+            )
+            results.append(result)
+            response_artifacts.append(
+                json.loads(store.response_path(self.task).read_text(encoding="utf-8"))
+            )
+            self.assertNotIn(request_id.encode("utf-8"), store.raw_path(self.task).read_bytes())
+            self.assertNotIn(
+                request_id.encode("utf-8"), store.response_path(self.task).read_bytes()
+            )
+            self.assertNotIn(TOKEN.encode("utf-8"), store.response_path(self.task).read_bytes())
+
+        self.assertNotEqual(
+            results[0].raw_transport_sha256,
+            results[1].raw_transport_sha256,
+        )
+        self.assertEqual(
+            canonical_sha256([dict(row) for row in results[0].rows]),
+            canonical_sha256([dict(row) for row in results[1].rows]),
+        )
+        self.assertEqual(
+            results[0].raw_response_sha256,
+            results[1].raw_response_sha256,
+        )
+        self.assertEqual(
+            response_artifacts[0]["normalized_rows_sha256"],
+            response_artifacts[1]["normalized_rows_sha256"],
+        )
+        self.assertNotEqual(
+            results[0].transport_receipt["request_id_sha256"],
+            results[1].transport_receipt["request_id_sha256"],
+        )
+        normalized = canonical_json_bytes([dict(row) for row in results[0].rows])
+        self.assertNotIn(first_id.encode("utf-8"), normalized)
+        self.assertNotIn(second_id.encode("utf-8"), normalized)
+        self.assertNotIn(TOKEN.encode("utf-8"), normalized)
+
+        coverage = taf.HistoryCoverageResult(
+            report=MappingProxyType(
+                {
+                    "daily_coverage_status": "BLOCKED_DATA",
+                    "adj_factor_coverage_status": "BLOCKED_DATA",
+                    "suspension_coverage_status": "BLOCKED_DATA",
+                    "benchmark_coverage_status": "BLOCKED_DATA",
+                    "blockers": [{"reason": "test_partial_history"}],
+                }
+            ),
+            passed=False,
+            trading_dates=("20170701",),
+        )
+        pit = taf.PitMembershipResult(
+            coverage_report=MappingProxyType({"pit_months_observed": 73}),
+            manifest=MappingProxyType(
+                {
+                    "snapshots": [
+                        {
+                            "snapshot_date": "2017-12-29",
+                            "members": [
+                                {"instrument_id": "600000.SH", "weight": "100.000"}
+                            ],
+                        }
+                    ]
+                }
+            ),
+            union_instruments=("600000.SH",),
+            passed=True,
+        )
+        history_manifests = [
+            taf.build_history_manifest_from_store(
+                self.plan,
+                [self.task],
+                CreateOnlyTaskStore(root),
+                coverage,
+                pit_result=pit,
+                request_counts={endpoint: 0 for endpoint in taf.ALLOWED_ENDPOINTS},
+                generated_at=NOW,
+            )
+            for root in roots
+        ]
+        self.assertEqual(
+            history_manifests[0]["datasets"]["trade_calendar"][
+                "normalized_content_sha256"
+            ],
+            history_manifests[1]["datasets"]["trade_calendar"][
+                "normalized_content_sha256"
+            ],
+        )
+        self.assertEqual(history_manifests[0], history_manifests[1])
+
+    def test_adapter_protocol_terminal_stops_after_first_request(self):
+        raw = self._payload(trace_id="unexpected")
+        transport = FakeTransport(lambda **_kwargs: raw)
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            result = run_backfill(
+                CONFIG,
+                temporary,
+                TOKEN,
+                transport=transport,
+                generated_at=NOW,
+                sleeper=lambda _seconds: None,
+            )
+            pit_evidence = json.loads(
+                (Path(temporary) / "pit_membership_coverage_report.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+        self.assertEqual(len(transport.calls), 1)
+        self.assertEqual(result["terminal_status"], "BLOCKED_ADAPTER_PROTOCOL")
+        self.assertEqual(result["stage_status"], "BLOCKED_ADAPTER_PROTOCOL")
+        self.assertEqual(pit_evidence["terminal_status"], "BLOCKED_ADAPTER_PROTOCOL")
+        validate_json_schema(
+            pit_evidence,
+            ROOT / "schemas" / "pit_membership_coverage_report.v1.json",
+        )
+        self.assertEqual(result["actual_tushare_request_count_by_endpoint"]["index_weight"], 1)
+
+    def test_request_id_is_excluded_from_normalized_pit_membership_identity(self):
+        task = self.plan.pit_tasks[0]
+        members = tuple(f"{index:06d}.SZ" for index in range(1, 801))
+
+        def rows_for(pit_task):
+            snapshot = datetime.strptime(pit_task.params["end_date"], "%Y%m%d").date()
+            while snapshot.weekday() >= 5:
+                snapshot -= timedelta(days=1)
+            return [
+                {
+                    "index_code": "000906.SH",
+                    "con_code": code,
+                    "trade_date": snapshot.strftime("%Y%m%d"),
+                    "weight": "0.125",
+                }
+                for code in members
+            ]
+
+        wire_rows = [
+            [row[field] for field in task.fields]
+            for row in rows_for(task)
+        ]
+        executions = []
+        request_ids = ("pit-request-first", "pit-request-second")
+        for request_id in request_ids:
+            raw = response_bytes(
+                "index_weight",
+                wire_rows,
+                request_id=request_id,
+            )
+            root = tempfile.TemporaryDirectory(dir=ROOT)
+            self.addCleanup(root.cleanup)
+            executions.append(
+                CreateOnlyTaskStore(root.name).execute(
+                    task,
+                    token=TOKEN,
+                    transport=FakeTransport(lambda **_kwargs: raw),
+                    timeout_seconds=1,
+                    maximum_response_bytes=8_388_608,
+                )
+            )
+
+        manifests = []
+        for execution in executions:
+            supplied = {
+                pit_task.task_id: rows_for(pit_task)
+                for pit_task in self.plan.pit_tasks
+            }
+            supplied[task.task_id] = execution
+            manifests.append(
+                build_pit_membership_artifacts(
+                    self.plan,
+                    supplied,
+                    generated_at=NOW,
+                ).manifest
+            )
+        self.assertNotEqual(
+            executions[0].raw_transport_sha256,
+            executions[1].raw_transport_sha256,
+        )
+        self.assertEqual(manifests[0], manifests[1])
+        serialized = canonical_json_bytes(manifests[0])
+        for request_id in request_ids:
+            self.assertNotIn(request_id.encode("utf-8"), serialized)
+
+
 class TushareCreateOnlyTests(unittest.TestCase):
     def setUp(self):
         self.plan = load_config_and_build_plan(CONFIG)
@@ -174,15 +572,66 @@ class TushareCreateOnlyTests(unittest.TestCase):
             store = CreateOnlyTaskStore(temporary)
             first = self._execute(store, task, transport)
             self.assertFalse(first.replayed)
+            sealed_response = store.response_path(task).read_bytes()
+            sealed_raw = store.raw_path(task).read_bytes()
             never = FakeTransport(lambda **_kwargs: self.fail("network must not run on resume"))
             second = self._execute(store, task, never)
             self.assertTrue(second.replayed)
             self.assertEqual(len(transport.calls), 1)
             self.assertEqual(len(never.calls), 0)
+            self.assertEqual(store.response_path(task).read_bytes(), sealed_response)
+            self.assertEqual(store.raw_path(task).read_bytes(), sealed_raw)
             for path in Path(temporary).rglob("*"):
                 if path.is_file():
                     self.assertNotIn(TOKEN.encode("utf-8"), path.read_bytes())
             self.assertEqual(first.raw_response_sha256, hashlib.sha256(raw).hexdigest())
+
+    def test_legacy_sealed_receipt_is_rejected_read_only_and_never_modified(self):
+        task = self._trade_calendar_task()
+        raw = response_bytes("trade_cal", [["SSE", "20170701", 0, "20170630"]])
+        rows = [dict(row) for row in taf.validate_response_bytes(task, raw).rows]
+        legacy = {
+            "schema_version": "tushare-alpha-feasibility-task-response.v1",
+            "state": "RESPONSE_VALIDATED",
+            "task_id": task.task_id,
+            "endpoint": task.endpoint,
+            "plan_sha256": task.plan_sha256,
+            "raw_response_sha256": hashlib.sha256(raw).hexdigest(),
+            "wire_response_sha256": hashlib.sha256(raw).hexdigest(),
+            "raw_response_persisted": True,
+            "normalized_rows_sha256": canonical_sha256(rows),
+            "row_count": len(rows),
+            "isolated_future_delist_date_count": 0,
+            "isolated_non_union_row_count": 0,
+            "rows": rows,
+            "locked_test_status": dict(LOCKED_TEST_STATUS),
+            "locked_test_consumed": False,
+        }
+        legacy["response_artifact_sha256"] = canonical_sha256(legacy)
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            store = CreateOnlyTaskStore(temporary)
+            store.started_path(task).parent.mkdir(parents=True)
+            store.raw_path(task).parent.mkdir(parents=True)
+            store.started_path(task).write_bytes(canonical_json_bytes(taf._started_payload(task)))
+            store.raw_path(task).write_bytes(raw)
+            store.response_path(task).write_bytes(canonical_json_bytes(legacy))
+            before = {
+                path: (path.read_bytes(), path.stat().st_mtime_ns)
+                for path in (
+                    store.started_path(task),
+                    store.raw_path(task),
+                    store.response_path(task),
+                )
+            }
+            never = FakeTransport(lambda **_kwargs: self.fail("legacy receipt must not resend"))
+            with self.assertRaisesRegex(
+                AlphaFeasibilityDataError,
+                "response_artifact_fields_mismatch",
+            ):
+                self._execute(store, task, never)
+            self.assertEqual(never.calls, [])
+            for path, expected in before.items():
+                self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), expected)
 
     def test_started_without_response_is_ambiguous_and_is_not_resent(self):
         task = self._trade_calendar_task()
@@ -340,6 +789,10 @@ class TushareCreateOnlyTests(unittest.TestCase):
             quarantine = store.quarantine_path(task).read_bytes()
             self.assertIn(hashlib.sha256(raw).hexdigest().encode("ascii"), quarantine)
             self.assertNotIn(TOKEN.encode("utf-8"), quarantine)
+            self.assertEqual(
+                json.loads(quarantine)["token_leak_check"],
+                "DECODED_LEAK_REJECTED",
+            )
 
     def test_future_stock_delist_date_is_null_isolated_and_raw_body_not_saved(self):
         task = next(
@@ -530,7 +983,7 @@ class TushareCreateOnlyTests(unittest.TestCase):
                     temporary, plan_sha256=self.plan.plan_sha256
                 )
 
-    def test_wire_hash_tampering_is_rejected_or_changes_manifest_lineage(self):
+    def test_transport_hash_tampering_is_rejected_and_excluded_from_normalized_identity(self):
         daily = next(task for task in self.history if task.endpoint == "daily")
         daily_raw = response_bytes(
             "daily",
@@ -546,7 +999,7 @@ class TushareCreateOnlyTests(unittest.TestCase):
             artifact["response_artifact_sha256"] = canonical_sha256(unsigned)
             store.response_path(daily).write_bytes(canonical_json_bytes(artifact))
             with self.assertRaisesRegex(
-                AlphaFeasibilityDataError, "wire_response_hash_mismatch"
+                AlphaFeasibilityDataError, "response_artifact_semantics_mismatch"
             ):
                 store._load_response(daily)
 
@@ -603,6 +1056,7 @@ class TushareCreateOnlyTests(unittest.TestCase):
             )
             artifact = json.loads(store.response_path(stock).read_text(encoding="utf-8"))
             artifact["wire_response_sha256"] = "f" * 64
+            artifact["transport_receipt"]["response_body_sha256"] = "f" * 64
             unsigned = dict(artifact)
             unsigned.pop("response_artifact_sha256")
             artifact["response_artifact_sha256"] = canonical_sha256(unsigned)
@@ -616,10 +1070,11 @@ class TushareCreateOnlyTests(unittest.TestCase):
                 request_counts={endpoint: 0 for endpoint in taf.ALLOWED_ENDPOINTS},
                 generated_at=NOW,
             )
-            self.assertNotEqual(
+            self.assertEqual(
                 before["datasets"]["security_master"]["normalized_content_sha256"],
                 after["datasets"]["security_master"]["normalized_content_sha256"],
             )
+            self.assertEqual(before, after)
 
 
 class BackfillLineageAndManifestTests(unittest.TestCase):

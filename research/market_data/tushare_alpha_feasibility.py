@@ -51,8 +51,8 @@ ABSOLUTE_CUTOFF = date(2023, 12, 31)
 PLAN_SCHEMA_VERSION = "tushare-alpha-feasibility-plan.v1"
 TASK_SCHEMA_VERSION = "tushare-alpha-feasibility-task.v1"
 STARTED_SCHEMA_VERSION = "tushare-alpha-feasibility-task-started.v1"
-RESPONSE_SCHEMA_VERSION = "tushare-alpha-feasibility-task-response.v1"
-QUARANTINE_SCHEMA_VERSION = "tushare-alpha-feasibility-quarantine.v1"
+RESPONSE_SCHEMA_VERSION = "tushare-alpha-feasibility-task-response.v2"
+QUARANTINE_SCHEMA_VERSION = "tushare-alpha-feasibility-quarantine.v2"
 PIT_REPORT_SCHEMA_VERSION = "pit-membership-coverage-report.v1"
 PIT_MANIFEST_SCHEMA_VERSION = "pit-membership-manifest.v1"
 HISTORY_MANIFEST_SCHEMA_VERSION = "tushare-alpha-feasibility-manifest.v1"
@@ -143,10 +143,35 @@ _PIT_COMPONENT_CODE = re.compile(r"^\d{6}\.(?:SH|SZ)$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_TASK_ID = re.compile(r"^[a-z_]+-[0-9a-f]{64}$")
 _FORBIDDEN_PARAM_KEY = re.compile(
-    r"(?:token|secret|password|cookie|credential|account|order)", re.IGNORECASE
+    r"(?:token|secret|password|cookie|credential|authorization|account|order)",
+    re.IGNORECASE,
 )
 _EMBEDDED_DATE = re.compile(
     r"(?<!\d)(20\d{2})[-/]?(0[1-9]|1[0-2])[-/]?(0[1-9]|[12]\d|3[01])(?!\d)"
+)
+_REQUEST_ID = re.compile(r"^[A-Za-z0-9][A-Za-z0-9._:-]{0,159}$")
+REQUIRED_RESPONSE_ROOT_FIELDS = frozenset({"code", "msg", "data"})
+OPTIONAL_RESPONSE_ROOT_FIELDS = frozenset({"request_id"})
+MAX_REQUEST_ID_LENGTH = 160
+ADAPTER_PROTOCOL_FAILURES = frozenset(
+    {
+        "duplicate_json_key",
+        "invalid_response_json",
+        "response_root_not_object",
+        "response_root_fields_differ_from_contract",
+        "response_code_type_invalid",
+        "response_message_type_invalid",
+        "response_request_id_type_invalid",
+        "response_request_id_format_invalid",
+        "response_error_data_type_invalid",
+        "response_data_not_object",
+        "response_data_fields_differ_from_contract",
+        "response_fields_not_unique_string_array",
+        "response_fields_differ_from_contract",
+        "response_items_not_array",
+        "response_row_shape_invalid",
+        "transport_response_envelope_invalid",
+    }
 )
 
 
@@ -158,16 +183,37 @@ class AlphaFeasibilityDataError(RuntimeError):
     evidence and terminal summaries.
     """
 
-    def __init__(self, code: str, *, stage: str = "data") -> None:
+    def __init__(
+        self,
+        code: str,
+        *,
+        stage: str = "data",
+        diagnostic: Mapping[str, Any] | None = None,
+    ) -> None:
         if not re.fullmatch(r"[a-z0-9_]{3,96}", str(code)):
             code = "unsafe_error_sanitized"
         self.code = str(code)
         self.stage = str(stage)
+        self.diagnostic = MappingProxyType(dict(diagnostic or {}))
         super().__init__(self.code)
 
 
 class AmbiguousRemoteExecutionError(AlphaFeasibilityDataError):
     """A started request lacks a durable response and must not be resent."""
+
+
+@dataclass(frozen=True, slots=True)
+class TushareHttpResponse:
+    """Bounded HTTP result; the body remains untrusted until validated."""
+
+    http_status: int
+    body: bytes
+
+    def __post_init__(self) -> None:
+        if type(self.http_status) is not int or not 100 <= self.http_status <= 599:
+            raise AlphaFeasibilityDataError("http_status_invalid")
+        if not isinstance(self.body, bytes):
+            raise AlphaFeasibilityDataError("transport_response_not_bytes")
 
 
 class TushareTransport(Protocol):
@@ -180,7 +226,7 @@ class TushareTransport(Protocol):
         token: str,
         timeout_seconds: int,
         maximum_response_bytes: int,
-    ) -> bytes: ...
+    ) -> TushareHttpResponse | bytes: ...
 
 
 def _reject_duplicate_keys(pairs: list[tuple[str, Any]]) -> dict[str, Any]:
@@ -346,19 +392,27 @@ def _reject_response_post_cutoff_dates(
 
     ``stock_basic.delist_date`` is the sole field-aware exception: the frozen
     contract explicitly isolates a post-cutoff delisting date to ``null`` and
-    persists only the sanitized envelope.  Every other key/value string,
+    persists only the sanitized envelope. ``request_id`` is opaque transport
+    metadata and is never interpreted as a market date. Every content string,
     including security names and suspension timing, is scanned recursively.
     """
 
     if task.endpoint != "stock_basic":
-        _reject_embedded_post_cutoff_date(root, "post_cutoff_response_date")
+        _reject_embedded_post_cutoff_date(
+            {key: value for key, value in root.items() if key != "request_id"},
+            "post_cutoff_response_date",
+        )
         return
     data = root["data"]
     fields = data["fields"]
     items = data["items"]
     delist_index = fields.index("delist_date")
     _reject_embedded_post_cutoff_date(
-        {key: value for key, value in root.items() if key != "data"},
+        {
+            key: value
+            for key, value in root.items()
+            if key not in {"data", "request_id"}
+        },
         "post_cutoff_response_date",
     )
     _reject_embedded_post_cutoff_date(
@@ -870,7 +924,7 @@ class HttpsTushareTransport:
         token: str,
         timeout_seconds: int,
         maximum_response_bytes: int,
-    ) -> bytes:
+    ) -> TushareHttpResponse:
         # Keep this guard at the physical network boundary as well as on
         # CollectionTask construction.  A caller must not be able to bypass
         # the frozen endpoint/date/field contract by invoking the transport
@@ -914,7 +968,7 @@ class HttpsTushareTransport:
             raw = response.read(maximum_response_bytes + 1)
             if len(raw) > maximum_response_bytes:
                 raise AlphaFeasibilityDataError("response_size_limit_exceeded")
-            return raw
+            return TushareHttpResponse(http_status=response.status, body=raw)
         except AlphaFeasibilityDataError:
             raise
         except (OSError, http.client.HTTPException, ssl.SSLError) as exc:
@@ -1127,8 +1181,63 @@ def _row_sort_key(endpoint: str, row: Mapping[str, Any]) -> tuple[Any, ...]:
 class ValidatedResponse:
     rows: tuple[Mapping[str, Any], ...]
     raw_response_sha256: str
+    normalized_content_sha256: str
+    accepted_root_fields: tuple[str, ...]
+    request_id_present: bool
+    request_id_sha256: str | None
+    response_byte_count: int
     isolated_future_delist_date_count: int
     isolated_non_union_row_count: int
+
+
+def _safe_diagnostic_root_field(value: str) -> str:
+    if (
+        re.fullmatch(r"[A-Za-z_][A-Za-z0-9_]{0,63}", value) is not None
+        and _FORBIDDEN_PARAM_KEY.search(value) is None
+    ):
+        return value
+    return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+
+
+def _response_diagnostic(
+    root: Mapping[str, Any],
+    *,
+    raw_sha256: str,
+    response_byte_count: int,
+    http_status: int,
+    token_leak_check: str,
+) -> dict[str, Any]:
+    observed = set(root)
+    missing = REQUIRED_RESPONSE_ROOT_FIELDS - observed
+    unexpected = observed - REQUIRED_RESPONSE_ROOT_FIELDS - OPTIONAL_RESPONSE_ROOT_FIELDS
+    request_id = root.get("request_id")
+    request_id_sha256 = (
+        hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+        if type(request_id) is str and request_id
+        else None
+    )
+    return {
+        "http_status": http_status,
+        "response_byte_count": response_byte_count,
+        "response_body_sha256": raw_sha256,
+        "sorted_observed_root_fields": sorted(
+            _safe_diagnostic_root_field(key) for key in observed
+        ),
+        "missing_required_root_fields": sorted(missing),
+        "unexpected_root_fields": sorted(
+            _safe_diagnostic_root_field(key) for key in unexpected
+        ),
+        "token_leak_check": token_leak_check,
+        "request_id_present": "request_id" in observed,
+        "request_id_sha256": request_id_sha256,
+    }
+
+
+def _raise_response_error(
+    code: str,
+    diagnostic: Mapping[str, Any],
+) -> None:
+    raise AlphaFeasibilityDataError(code, diagnostic=diagnostic)
 
 
 def validate_response_bytes(
@@ -1137,11 +1246,16 @@ def validate_response_bytes(
     *,
     token: str | None = None,
     maximum_response_bytes: int = 8_388_608,
+    http_status: int = 200,
 ) -> ValidatedResponse:
     """Validate bounded response bytes before any body can be persisted."""
 
     if not isinstance(raw, bytes):
         raise AlphaFeasibilityDataError("transport_response_not_bytes")
+    if type(http_status) is not int or not 100 <= http_status <= 599:
+        raise AlphaFeasibilityDataError("http_status_invalid")
+    if http_status != 200:
+        raise AlphaFeasibilityDataError("http_status_not_success")
     if len(raw) > maximum_response_bytes:
         raise AlphaFeasibilityDataError("response_size_limit_exceeded")
     if token is not None and token.encode("utf-8") in raw:
@@ -1153,30 +1267,59 @@ def validate_response_bytes(
         raise AlphaFeasibilityDataError("response_root_not_object")
     if token is not None and _contains_decoded_text(root, token):
         raise AlphaFeasibilityDataError("credential_echo_in_response")
-    if set(root) not in ({"code", "msg", "data"}, {"request_id", "code", "msg", "data"}):
-        raise AlphaFeasibilityDataError("response_root_fields_differ_from_contract")
-    if root.get("msg") is not None and type(root.get("msg")) is not str:
-        raise AlphaFeasibilityDataError("response_message_type_invalid")
-    if "request_id" in root and type(root["request_id"]) is not str:
-        raise AlphaFeasibilityDataError("response_request_id_type_invalid")
+    diagnostic = _response_diagnostic(
+        root,
+        raw_sha256=raw_sha,
+        response_byte_count=len(raw),
+        http_status=http_status,
+        token_leak_check="PASSED",
+    )
+    observed = set(root)
+    if (
+        not REQUIRED_RESPONSE_ROOT_FIELDS.issubset(observed)
+        or observed - REQUIRED_RESPONSE_ROOT_FIELDS - OPTIONAL_RESPONSE_ROOT_FIELDS
+    ):
+        _raise_response_error("response_root_fields_differ_from_contract", diagnostic)
+    code = root["code"]
+    if type(code) is not int:
+        _raise_response_error("response_code_type_invalid", diagnostic)
+    if root["msg"] is not None and type(root["msg"]) is not str:
+        _raise_response_error("response_message_type_invalid", diagnostic)
+    request_id = root.get("request_id")
+    if "request_id" in root and type(request_id) is not str:
+        _raise_response_error("response_request_id_type_invalid", diagnostic)
+    if "request_id" in root and (
+        not 1 <= len(request_id) <= MAX_REQUEST_ID_LENGTH
+        or _REQUEST_ID.fullmatch(request_id) is None
+        or ".." in request_id
+        or re.match(r"^[A-Za-z]:", request_id) is not None
+    ):
+        _raise_response_error("response_request_id_format_invalid", diagnostic)
     _reject_embedded_post_cutoff_date(
-        {key: root[key] for key in ("msg", "request_id") if key in root},
+        {"msg": root["msg"]},
         "post_cutoff_response_date",
     )
-    code = root.get("code")
-    if type(code) is not int or code != 0:
-        raise AlphaFeasibilityDataError("upstream_response_not_success")
-    data = root.get("data")
+    data = root["data"]
+    if code != 0:
+        if data is not None and not isinstance(data, Mapping):
+            _raise_response_error("response_error_data_type_invalid", diagnostic)
+        _raise_response_error("upstream_response_not_success", diagnostic)
     if not isinstance(data, Mapping):
-        raise AlphaFeasibilityDataError("response_data_not_object")
+        _raise_response_error("response_data_not_object", diagnostic)
     if set(data) != {"fields", "items"}:
-        raise AlphaFeasibilityDataError("response_data_fields_differ_from_contract")
-    fields = data.get("fields")
-    items = data.get("items")
-    if not isinstance(fields, list) or tuple(fields) != task.fields:
-        raise AlphaFeasibilityDataError("response_fields_differ_from_contract")
+        _raise_response_error("response_data_fields_differ_from_contract", diagnostic)
+    fields = data["fields"]
+    items = data["items"]
+    if (
+        not isinstance(fields, list)
+        or any(type(field) is not str for field in fields)
+        or len(fields) != len(set(fields))
+    ):
+        _raise_response_error("response_fields_not_unique_string_array", diagnostic)
+    if tuple(fields) != task.fields:
+        _raise_response_error("response_fields_differ_from_contract", diagnostic)
     if not isinstance(items, list):
-        raise AlphaFeasibilityDataError("response_items_not_array")
+        _raise_response_error("response_items_not_array", diagnostic)
     _reject_response_post_cutoff_dates(task, root)
     if len(items) >= POTENTIAL_TRUNCATION_LIMIT[task.endpoint]:
         raise AlphaFeasibilityDataError("potential_upstream_truncation")
@@ -1198,9 +1341,19 @@ def validate_response_bytes(
         keys.add(key)
         normalized.append(MappingProxyType(row))
     normalized.sort(key=lambda row: _row_sort_key(task.endpoint, row))
+    normalized_rows = [dict(row) for row in normalized]
     return ValidatedResponse(
         rows=tuple(normalized),
         raw_response_sha256=raw_sha,
+        normalized_content_sha256=canonical_sha256(normalized_rows),
+        accepted_root_fields=tuple(sorted(observed)),
+        request_id_present="request_id" in observed,
+        request_id_sha256=(
+            hashlib.sha256(request_id.encode("utf-8")).hexdigest()
+            if type(request_id) is str
+            else None
+        ),
+        response_byte_count=len(raw),
         isolated_future_delist_date_count=isolated,
         isolated_non_union_row_count=isolated_non_union,
     )
@@ -1276,6 +1429,64 @@ class TaskExecutionResult:
     isolated_non_union_row_count: int
     wire_response_sha256: str
     response_artifact_sha256: str
+    transport_receipt: Mapping[str, Any]
+
+    @property
+    def raw_transport_sha256(self) -> str:
+        return str(self.transport_receipt["response_body_sha256"])
+
+    @property
+    def accepted_root_fields(self) -> tuple[str, ...]:
+        return tuple(self.transport_receipt["accepted_root_fields"])
+
+    @property
+    def request_id_present(self) -> bool:
+        return bool(self.transport_receipt["request_id_present"])
+
+
+def _validate_transport_receipt(value: Any) -> Mapping[str, Any]:
+    expected = {
+        "http_status",
+        "response_byte_count",
+        "response_body_sha256",
+        "accepted_root_fields",
+        "request_id_present",
+        "request_id_sha256",
+        "token_leak_check",
+    }
+    if not isinstance(value, Mapping) or set(value) != expected:
+        raise AlphaFeasibilityDataError("transport_receipt_fields_mismatch")
+    root_fields = value["accepted_root_fields"]
+    request_id_present = value["request_id_present"]
+    request_id_sha256 = value["request_id_sha256"]
+    if (
+        value["http_status"] != 200
+        or type(value["response_byte_count"]) is not int
+        or value["response_byte_count"] <= 0
+        or type(value["response_body_sha256"]) is not str
+        or _SHA256.fullmatch(value["response_body_sha256"]) is None
+        or not isinstance(root_fields, list)
+        or any(type(field) is not str for field in root_fields)
+        or root_fields != sorted(set(root_fields))
+        or set(root_fields)
+        not in (
+            REQUIRED_RESPONSE_ROOT_FIELDS,
+            REQUIRED_RESPONSE_ROOT_FIELDS | OPTIONAL_RESPONSE_ROOT_FIELDS,
+        )
+        or type(request_id_present) is not bool
+        or request_id_present != ("request_id" in root_fields)
+        or (
+            request_id_present
+            and (
+                type(request_id_sha256) is not str
+                or _SHA256.fullmatch(request_id_sha256) is None
+            )
+        )
+        or (not request_id_present and request_id_sha256 is not None)
+        or value["token_leak_check"] != "PASSED"
+    ):
+        raise AlphaFeasibilityDataError("transport_receipt_semantics_mismatch")
+    return MappingProxyType(dict(value))
 
 
 class CreateOnlyTaskStore:
@@ -1331,6 +1542,7 @@ class CreateOnlyTaskStore:
             "plan_sha256",
             "raw_response_sha256",
             "wire_response_sha256",
+            "transport_receipt",
             "raw_response_persisted",
             "normalized_rows_sha256",
             "row_count",
@@ -1343,6 +1555,7 @@ class CreateOnlyTaskStore:
         }
         if set(value) != expected_keys:
             raise AlphaFeasibilityDataError("response_artifact_fields_mismatch")
+        transport_receipt = _validate_transport_receipt(value["transport_receipt"])
         if (
             value["schema_version"] != RESPONSE_SCHEMA_VERSION
             or value["state"] != "RESPONSE_VALIDATED"
@@ -1353,6 +1566,8 @@ class CreateOnlyTaskStore:
             or _SHA256.fullmatch(value["raw_response_sha256"]) is None
             or type(value["wire_response_sha256"]) is not str
             or _SHA256.fullmatch(value["wire_response_sha256"]) is None
+            or value["wire_response_sha256"]
+            != transport_receipt["response_body_sha256"]
             or type(value["raw_response_persisted"]) is not bool
             or type(value["isolated_future_delist_date_count"]) is not int
             or value["isolated_future_delist_date_count"] < 0
@@ -1382,6 +1597,7 @@ class CreateOnlyTaskStore:
                 raise AlphaFeasibilityDataError("raw_response_hash_mismatch")
             if (
                 task.endpoint != "stock_basic"
+                and transport_receipt["request_id_present"] is False
                 and value["wire_response_sha256"] != value["raw_response_sha256"]
             ):
                 raise AlphaFeasibilityDataError("wire_response_hash_mismatch")
@@ -1414,6 +1630,7 @@ class CreateOnlyTaskStore:
             isolated_non_union_row_count=value["isolated_non_union_row_count"],
             wire_response_sha256=value["wire_response_sha256"],
             response_artifact_sha256=value["response_artifact_sha256"],
+            transport_receipt=transport_receipt,
         )
 
     def execute(
@@ -1443,8 +1660,12 @@ class CreateOnlyTaskStore:
         started = _started_payload(task)
         _write_json_create_only(self.started_path(task), started, token=token)
         raw_sha: str | None = None
+        http_status: int | None = None
+        response_byte_count: int | None = None
+        token_leak_check = "NOT_CONFIRMED"
+        validated: ValidatedResponse | None = None
         try:
-            raw = transport(
+            transport_response = transport(
                 endpoint=task.endpoint,
                 params=task.params,
                 fields=task.fields,
@@ -1452,21 +1673,36 @@ class CreateOnlyTaskStore:
                 timeout_seconds=timeout_seconds,
                 maximum_response_bytes=maximum_response_bytes,
             )
-            if isinstance(raw, bytes) and token.encode("utf-8") not in raw:
+            if isinstance(transport_response, bytes):
+                # Backward-compatible offline injection boundary.  The real
+                # HTTPS transport always supplies the observed status.
+                transport_response = TushareHttpResponse(
+                    http_status=200,
+                    body=transport_response,
+                )
+            if not isinstance(transport_response, TushareHttpResponse):
+                raise AlphaFeasibilityDataError("transport_response_envelope_invalid")
+            http_status = transport_response.http_status
+            raw = transport_response.body
+            response_byte_count = len(raw)
+            if token.encode("utf-8") not in raw:
                 raw_sha = hashlib.sha256(raw).hexdigest()
+                token_leak_check = "RAW_BYTES_PASSED"
             validated = validate_response_bytes(
                 task,
                 raw,
                 token=token,
                 maximum_response_bytes=maximum_response_bytes,
+                http_status=http_status,
             )
+            token_leak_check = "PASSED"
             rows = [dict(row) for row in validated.rows]
             persisted_response = raw
-            if task.endpoint == "stock_basic":
-                # The wire body is all-market and can include now-known future
-                # metadata. Persist a complete cutoff-safe response envelope
-                # for the requested union so its declared response hash remains
-                # offline replayable without retaining unrelated instruments.
+            if task.endpoint == "stock_basic" or validated.request_id_present:
+                # ``request_id`` is transport metadata, never normalized data.
+                # Persist a replayable cutoff-safe content envelope without the
+                # identifier.  ``stock_basic`` also removes non-union/future
+                # metadata under its existing field-aware isolation rule.
                 persisted_response = canonical_json_bytes(
                     {
                         "code": 0,
@@ -1482,6 +1718,16 @@ class CreateOnlyTaskStore:
             _guard_artifact_secret(persisted_response, token)
             _write_create_only(self.raw_path(task), persisted_response)
             persisted_sha = hashlib.sha256(persisted_response).hexdigest()
+            transport_receipt = {
+                "http_status": http_status,
+                "response_byte_count": validated.response_byte_count,
+                "response_body_sha256": validated.raw_response_sha256,
+                "accepted_root_fields": list(validated.accepted_root_fields),
+                "request_id_present": validated.request_id_present,
+                "request_id_sha256": validated.request_id_sha256,
+                "token_leak_check": "PASSED",
+            }
+            _validate_transport_receipt(transport_receipt)
             response = {
                 "schema_version": RESPONSE_SCHEMA_VERSION,
                 "state": "RESPONSE_VALIDATED",
@@ -1490,6 +1736,7 @@ class CreateOnlyTaskStore:
                 "plan_sha256": task.plan_sha256,
                 "raw_response_sha256": persisted_sha,
                 "wire_response_sha256": validated.raw_response_sha256,
+                "transport_receipt": transport_receipt,
                 "raw_response_persisted": True,
                 "normalized_rows_sha256": canonical_sha256(rows),
                 "row_count": len(rows),
@@ -1511,9 +1758,33 @@ class CreateOnlyTaskStore:
                 isolated_non_union_row_count=validated.isolated_non_union_row_count,
                 wire_response_sha256=validated.raw_response_sha256,
                 response_artifact_sha256=response["response_artifact_sha256"],
+                transport_receipt=MappingProxyType(dict(transport_receipt)),
             )
         except Exception as exc:
             code = exc.code if isinstance(exc, AlphaFeasibilityDataError) else "unclassified_task_failure"
+            if code == "credential_echo_in_response":
+                token_leak_check = (
+                    "DECODED_LEAK_REJECTED"
+                    if token_leak_check == "RAW_BYTES_PASSED"
+                    else "RAW_LEAK_REJECTED"
+                )
+            diagnostic = (
+                dict(exc.diagnostic)
+                if isinstance(exc, AlphaFeasibilityDataError)
+                else {}
+            )
+            observed_root_fields = diagnostic.get(
+                "sorted_observed_root_fields",
+                list(validated.accepted_root_fields) if validated is not None else [],
+            )
+            request_id_present = diagnostic.get(
+                "request_id_present",
+                validated.request_id_present if validated is not None else False,
+            )
+            request_id_sha256 = diagnostic.get(
+                "request_id_sha256",
+                validated.request_id_sha256 if validated is not None else None,
+            )
             quarantine = {
                 "schema_version": QUARANTINE_SCHEMA_VERSION,
                 "state": "RESPONSE_QUARANTINED",
@@ -1521,7 +1792,27 @@ class CreateOnlyTaskStore:
                 "endpoint": task.endpoint,
                 "plan_sha256": task.plan_sha256,
                 "reason": code,
+                "failure_code": code,
                 "raw_response_sha256": raw_sha,
+                "http_status": diagnostic.get("http_status", http_status),
+                "response_byte_count": diagnostic.get(
+                    "response_byte_count", response_byte_count
+                ),
+                "response_body_sha256": diagnostic.get(
+                    "response_body_sha256", raw_sha
+                ),
+                "sorted_observed_root_fields": observed_root_fields,
+                "missing_required_root_fields": diagnostic.get(
+                    "missing_required_root_fields", []
+                ),
+                "unexpected_root_fields": diagnostic.get(
+                    "unexpected_root_fields", []
+                ),
+                "token_leak_check": diagnostic.get(
+                    "token_leak_check", token_leak_check
+                ),
+                "request_id_present": request_id_present,
+                "request_id_sha256": request_id_sha256,
                 "raw_response_persisted": False,
                 "locked_test_status": dict(LOCKED_TEST_STATUS),
                 "locked_test_consumed": False,
@@ -1739,6 +2030,7 @@ def build_pit_membership_artifacts(
     *,
     adjustment_evidence: Mapping[str, Any] | None = None,
     generated_at: datetime | None = None,
+    blocked_terminal_status: str = "BLOCKED_DATA",
 ) -> PitMembershipResult:
     """Validate 73 monthly responses and retain every legal PIT snapshot."""
 
@@ -1746,6 +2038,8 @@ def build_pit_membership_artifacts(
         raise AlphaFeasibilityDataError(
             "controlled_adjustment_evidence_not_supported", stage="pit"
         )
+    if blocked_terminal_status not in {"BLOCKED_DATA", "BLOCKED_ADAPTER_PROTOCOL"}:
+        raise AlphaFeasibilityDataError("pit_blocked_terminal_status_invalid", stage="pit")
 
     expected_count = int(plan.config["index"]["expected_component_count"])
     month_details: list[dict[str, Any]] = []
@@ -1773,11 +2067,10 @@ def build_pit_membership_artifacts(
             )
             continue
         rows = value.rows if isinstance(value, TaskExecutionResult) else tuple(value)
-        response_sha = (
-            value.raw_response_sha256
-            if isinstance(value, TaskExecutionResult)
-            else canonical_sha256([dict(row) for row in rows])
-        )
+        # PIT membership identity is normalized content identity.  Transport
+        # metadata (including request_id and the raw wire hash) remains in the
+        # task receipt and must not alter this snapshot hash.
+        response_sha = canonical_sha256([dict(row) for row in rows])
         observed += 1
         grouped: dict[str, list[Mapping[str, Any]]] = {}
         snapshot_checks: list[dict[str, Any]] = []
@@ -1933,7 +2226,7 @@ def build_pit_membership_artifacts(
             "pit_months_observed": observed,
             "monthly_checks": month_details,
             "stage_status": "PIT_MEMBERSHIP_READY" if passed else "BLOCKED_PIT_MEMBERSHIP",
-            "terminal_status": None if passed else "BLOCKED_DATA",
+            "terminal_status": None if passed else blocked_terminal_status,
             "remaining_blockers": blockers,
             "locked_test_status": dict(LOCKED_TEST_STATUS),
             "locked_test_consumed": False,
@@ -2695,6 +2988,14 @@ def build_history_manifest_from_store(
 
     def dataset(endpoint: str) -> dict[str, Any]:
         entries = summaries[endpoint]
+        normalized_entries = [
+            {
+                "task_id": item["task_id"],
+                "row_count": item["row_count"],
+                "normalized_rows_sha256": item["normalized_rows_sha256"],
+            }
+            for item in entries
+        ]
         if not entries:
             status = "missing"
         elif len(entries) < expected[endpoint]:
@@ -2709,7 +3010,12 @@ def build_history_manifest_from_store(
             "record_count": sum(int(item["row_count"]) for item in entries),
             "coverage_start": plan.config["dates"]["signal_warmup_start"] if entries else None,
             "coverage_end": plan.config["dates"]["validation_end"] if entries else None,
-            "normalized_content_sha256": canonical_sha256(entries) if entries else None,
+            # Raw/wire/receipt hashes are transport provenance, not dataset
+            # content identity.  In particular request_id cannot influence the
+            # Experiment input content hash.
+            "normalized_content_sha256": (
+                canonical_sha256(normalized_entries) if normalized_entries else None
+            ),
             "issues": [] if status == "complete" else [f"{endpoint}_{status}"],
         }
 
@@ -3127,7 +3433,11 @@ def _blocked_summary(
         "schema_version": "tushare-alpha-feasibility-backfill-result.v1",
         "experiment_id": plan.config["experiment_id"],
         "stage_status": stage_status,
-        "terminal_status": "BLOCKED_DATA",
+        "terminal_status": (
+            "BLOCKED_ADAPTER_PROTOCOL"
+            if stage_status == "BLOCKED_ADAPTER_PROTOCOL"
+            else "BLOCKED_DATA"
+        ),
         "generated_at": artifact_generated_at,
         **_backfill_lineage(
             plan,
@@ -3259,17 +3569,27 @@ def run_backfill(
             pit_results = {result.task.task_id: result for result in pit_executions}
         except AlphaFeasibilityDataError as exc:
             pit_results = _completed_results(store, plan.pit_tasks)
+            adapter_protocol_blocked = exc.code in ADAPTER_PROTOCOL_FAILURES
             pit_result = build_pit_membership_artifacts(
                 plan,
                 pit_results,
                 adjustment_evidence=adjustment_evidence,
                 generated_at=timestamp,
+                blocked_terminal_status=(
+                    "BLOCKED_ADAPTER_PROTOCOL"
+                    if adapter_protocol_blocked
+                    else "BLOCKED_DATA"
+                ),
             )
             publish_pit_membership_artifacts(root, pit_result, token=safe_token)
             return _blocked_summary(
                 plan,
                 root,
-                stage_status="BLOCKED_PIT_MEMBERSHIP",
+                stage_status=(
+                    "BLOCKED_ADAPTER_PROTOCOL"
+                    if adapter_protocol_blocked
+                    else "BLOCKED_PIT_MEMBERSHIP"
+                ),
                 blocker=exc.code,
                 pit_result=pit_result,
                 expected_tasks=plan.pit_tasks,
@@ -3362,7 +3682,11 @@ def run_backfill(
         return _blocked_summary(
             plan,
             root,
-            stage_status="BLOCKED_DATA",
+            stage_status=(
+                "BLOCKED_ADAPTER_PROTOCOL"
+                if blocker in ADAPTER_PROTOCOL_FAILURES
+                else "BLOCKED_DATA"
+            ),
             blocker=blocker or "history_coverage_incomplete",
             pit_result=pit_result,
             coverage=coverage,

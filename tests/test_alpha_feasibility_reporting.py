@@ -195,6 +195,23 @@ class AlphaFeasibilityReportingTests(unittest.TestCase):
         )
         reporting.verify_alpha_feasibility_report(report, experiment=self.experiment)
 
+    def test_adapter_protocol_block_has_distinct_terminal_and_no_metrics(self) -> None:
+        data = _blocked_data()
+        data["data_status"] = "BLOCKED_ADAPTER_PROTOCOL"
+        data["pit_months_observed"] = 0
+        data["remaining_blockers"] = ["response_root_fields_differ_from_contract"]
+        report = reporting.build_blocked_alpha_feasibility_report(
+            commit_sha=COMMIT_SHA,
+            data_summary=data,
+            experiment=self.experiment,
+            generated_at=GENERATED_AT,
+        )
+        self.assertEqual(report["terminal_status"], "BLOCKED_ADAPTER_PROTOCOL")
+        self.assertIsNone(report["development_metrics"])
+        self.assertIsNone(report["validation_metrics"])
+        self.assertIsNone(report["concentration_metrics"])
+        reporting.verify_alpha_feasibility_report(report, experiment=self.experiment)
+
     def test_blocked_report_requires_a_real_blocker(self) -> None:
         data = _blocked_data()
         data["remaining_blockers"] = []

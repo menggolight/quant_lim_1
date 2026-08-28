@@ -61,7 +61,7 @@
     "development_metrics": {"oneOf": [{"$ref": "#/$defs/scenarios"}, {"type": "null"}]},
     "validation_metrics": {"oneOf": [{"$ref": "#/$defs/scenarios"}, {"type": "null"}]},
     "concentration_metrics": {"oneOf": [{"$ref": "#/$defs/concentration"}, {"type": "null"}]},
-    "terminal_status": {"enum": ["ALPHA_FEASIBILITY_GO_CANDIDATE", "ALPHA_FEASIBILITY_NO_GO", "BLOCKED_DATA"]},
+    "terminal_status": {"enum": ["ALPHA_FEASIBILITY_GO_CANDIDATE", "ALPHA_FEASIBILITY_NO_GO", "BLOCKED_DATA", "BLOCKED_ADAPTER_PROTOCOL"]},
     "locked_test_status": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/locked"},
     "locked_test_consumed": {"const": false},
     "remaining_blockers": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},

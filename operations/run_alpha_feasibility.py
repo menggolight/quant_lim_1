@@ -31,7 +31,9 @@ COMPACT_DATE = re.compile(
     r"(?<![0-9])(20[0-9]{2})(0[1-9]|1[0-2])([0-3][0-9])(?![0-9])"
 )
 READY_STAGE = "DATA_READY_FOR_ALPHA_FEASIBILITY"
-BLOCKED_STAGES = frozenset({"BLOCKED_PIT_MEMBERSHIP", "BLOCKED_DATA"})
+BLOCKED_STAGES = frozenset(
+    {"BLOCKED_PIT_MEMBERSHIP", "BLOCKED_DATA", "BLOCKED_ADAPTER_PROTOCOL"}
+)
 LOCKED_TEST_STATUS = {
     "access": "NOT_ACCESSED",
     "download": "NOT_DOWNLOADED",
@@ -270,7 +272,12 @@ def _reporting_data_summary(result: Mapping[str, Any]) -> dict[str, Any]:
 
     blocked = stage in BLOCKED_STAGES
     terminal = result.get("terminal_status")
-    if blocked and terminal != "BLOCKED_DATA":
+    expected_blocked_terminal = (
+        "BLOCKED_ADAPTER_PROTOCOL"
+        if stage == "BLOCKED_ADAPTER_PROTOCOL"
+        else "BLOCKED_DATA"
+    )
+    if blocked and terminal != expected_blocked_terminal:
         raise AlphaFeasibilityWorkflowError("blocked_terminal_status_invalid")
     if not blocked and terminal is not None:
         raise AlphaFeasibilityWorkflowError("ready_terminal_status_invalid")
@@ -518,7 +525,11 @@ def _safe_report_summary(report: Mapping[str, Any], report_path: Path) -> dict[s
     )
     terminal = report["terminal_status"]
     return {
-        "status": "blocked" if terminal == "BLOCKED_DATA" else "completed",
+        "status": (
+            "blocked"
+            if terminal in {"BLOCKED_DATA", "BLOCKED_ADAPTER_PROTOCOL"}
+            else "completed"
+        ),
         **{field: report[field] for field in fields},
         "report_path": str(report_path.resolve()),
     }
@@ -546,9 +557,9 @@ def run_workflow(
             generated_at=timestamp,
         )
     except data_lane.AlphaFeasibilityDataError as exc:
-        # Config preflight already passed, so a credential/local-evidence/data
-        # lane failure is a BLOCKED_DATA experiment outcome, not a fourth
-        # generic terminal state.  Counts remain conservative durable claims.
+        # Config preflight already passed.  Protocol-envelope failures retain
+        # their explicit adapter terminal; all other lane failures remain
+        # BLOCKED_DATA. Counts remain conservative durable claims.
         plan = data_lane.load_config_and_build_plan(config_path)
         try:
             counts = data_lane.actual_tushare_request_count_by_endpoint(
@@ -565,9 +576,14 @@ def run_workflow(
             collection_plan_sha256=plan.plan_sha256,
             blocker=blocker,
         )
+        adapter_blocked = blocker in data_lane.ADAPTER_PROTOCOL_FAILURES
         blocked_result = {
-            "stage_status": "BLOCKED_DATA",
-            "terminal_status": "BLOCKED_DATA",
+            "stage_status": (
+                "BLOCKED_ADAPTER_PROTOCOL" if adapter_blocked else "BLOCKED_DATA"
+            ),
+            "terminal_status": (
+                "BLOCKED_ADAPTER_PROTOCOL" if adapter_blocked else "BLOCKED_DATA"
+            ),
             "generated_at": evidence_timestamp.isoformat(),
             "actual_tushare_request_count_by_endpoint": counts,
             "coverage_start": reporting.COVERAGE_START,

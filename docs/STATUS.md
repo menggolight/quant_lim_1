@@ -2,6 +2,38 @@
 
 > 本文是带时点的交接快照，不替代代码、配置、受控状态、标准 CLI 产物或 manifest。
 
+## 2026-08-28 — Tushare Alpha Feasibility P1.1 响应包络修复
+
+### 时点、范围与网络状态
+
+- `as_of`：`2026-08-28T16:55:07+08:00`，Asia/Shanghai。
+- `branch`：`codex/project-review-20260820`；用户指定原始基线为 `33ac5f0e3c484a514288136ac5317830902e2105`。
+- 上一轮尚未提交的P1实现已先形成前置基线提交 `490b42fc3d0b3aabeaaa4c5bbb141caf707723d3`；本节只记录其上的HTTP响应包络/诊断修复。用户既有 `docs/DECISIONS.md` 修改未编辑、未暂存。
+- 离线门禁完成时 `network_process_count=0`、`actual_tushare_request_count_by_endpoint` 本轮尚未产生；没有读取 `TUSHARE_TOKEN`，没有请求Tushare。修复提交完成后才允许一次新的create-only P1运行，且不得复用上一轮 `data/tmp/alpha-feasibility/tushare-p1-v1/`。
+
+### 离线实现与身份边界
+
+- HTTP成功根包络要求精确必需字段 `code/msg/data`，只允许可选 `request_id`；未知根字段、缺字段、重复JSON key、非对象根、`bool` code、非法msg/data/request_id类型继续失败关闭。`request_id` 限1至160个保守ASCII字符，并拒绝控制字符、路径表达式和Token回显。
+- task response与quarantine升级为create-only v2证据。成功transport receipt记录HTTP status、响应字节数、raw transport SHA-256、accepted root fields、request_id存在性及可选SHA-256；不记录完整request_id。旧v1封存receipt只读拒绝，不迁移、不重写、不触发网络重发。
+- 根字段不匹配的quarantine新增 `http_status/response_byte_count/response_body_sha256/sorted_observed_root_fields/missing_required_root_fields/unexpected_root_fields/token_leak_check/failure_code`；字段名经过白名单安全化，正文、Token、Authorization、Cookie和完整request_id均不落盘。
+- PIT `source_response_sha256` 与history `normalized_content_sha256` 只绑定规范化内容；raw/wire/response artifact哈希不再进入策略数据内容身份。离线测试证明相同fields/items、不同request_id会产生不同raw transport SHA-256，但相同normalized rows、PIT manifest和history normalized content SHA-256。
+- HTTP/JSON包络或data结构错误显式归类 `BLOCKED_ADAPTER_PROTOCOL`；该终态与 `BLOCKED_DATA` 一样不含Development、Validation或集中度指标。Alpha公式、Exposure阈值、组合、成本和所有日期边界均未修改。
+
+### 离线验证证据
+
+- Tushare专项：`Ran 39 tests`，退出码0，`OK`；覆盖用户列出的包络、request_id、hash身份、旧receipt和2024—2025隔离用例。
+- P1四模块联合最终复跑：`Ran 86 tests in 48.766s`，退出码0，`OK`。
+- Schema/既有Tushare契约专项：`Ran 29 tests in 1.474s`，退出码0，`OK`；修改后的2个Schema另经PowerShell JSON解析通过。
+- 安全全仓回归：导入前精确排除 `test_strategy_workspace_admission`、`test_strategy_workspace_evaluation`、`test_strategy_workspace_experiment`、`test_strategy_workspace_top_decile_backtest`，运行90个允许模块；最终从头复跑 `Ran 1096 tests in 261.929s`，退出码0，`OK (skipped=4)`。
+- `python -m compileall -q agent research trading operations integrations tests`：退出码0。`git diff --check`：退出码0，仅有LF→CRLF提示。
+- 对抗式复核完成；最后一轮未发现尚存P0/P1问题，且确认Alpha、Exposure、组合、成本、日期切分与Locked Test边界均未改动。
+- 2024—2025 Locked Test固定 `access=NOT_ACCESSED/download=NOT_DOWNLOADED/run=NOT_RUN`、`locked_test_consumed=false`；四个禁止模块未导入、未运行。
+
+### 当前待完成
+
+- 待形成独立提交 `fix: accept Tushare request metadata envelope`。提交前继续逐路径暂存并排除 `docs/DECISIONS.md`。
+- 提交后只允许启动一个新P1进程和一个新输出目录；若首月通过则继续73个月PIT、成员并集、最小历史回填及Development/Validation，若再次出现协议/数据/权限/create-only错误则立即失败关闭且不重跑。
+
 ## 2026-08-28 — Tushare Alpha Feasibility P1
 
 ### 本轮时点与工作树
