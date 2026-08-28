@@ -2,6 +2,8 @@
 
 本目录当前以 `a-share-technical-momentum-adaptive-v1` 为唯一正式研究主线，同时保留已暂停的质量成长 V1、每日观察用 Technical Shadow 和非默认 Adaptive Exposure V2。Technical formal P0 使用独立模块与契约，不修改 Shadow 历史产物；当前数据与公司行动会计门仍为 `BLOCKED`。模块存在、Schema 通过或专项测试通过，只表示工程契约可复核；不表示数据来源已认证、统计有效、Paper 已准入或允许交易。仓库永久不支持 LIVE。
 
+P1 另提供 [`alpha_feasibility.py`](alpha_feasibility.py) 与 [`alpha_feasibility_reporting.py`](alpha_feasibility_reporting.py)：前者只消费已验签的73个月PIT与2023年底前历史，复用冻结formal ranker和Exposure做小数权重base/stress研究；后者只签发GO candidate、NO GO或BLOCKED DATA。数据采集位于 [`research/market_data/tushare_alpha_feasibility.py`](../market_data/tushare_alpha_feasibility.py)，标准入口为 `python -m operations.run_alpha_feasibility`。该链没有Paper、账户、订单或Locked Test能力。
+
 ## Adaptive Exposure V2 五模块
 
 | 模块 | 单一职责 | 明确不做 |

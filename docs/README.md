@@ -5,6 +5,7 @@
 ## 当前入口
 
 - [Technical Momentum 正式数据与验证 P0](TECHNICAL_MOMENTUM_FORMAL_P0.md)：当前唯一正式研究主线；冻结 Technical Alpha/Exposure、九类正式数据、双价格、动态 PIT、Development/Validation 与 Locked Test 硬边界。
+- [Tushare Alpha Feasibility P1](ALPHA_FEASIBILITY_P1.md)：独立的 Locked 前可行性门；逐月回填2017-12至2023-12中证800 PIT，只对成员并集采集最小历史，运行2018—2023 Development/Validation，不替代正式小账户执行回测。
 - [量化策略工作区](STRATEGY_WORKSPACE.md)：已暂停但保留的质量成长兼容线；Choice PIT门、Experiment v2、Top Decile/Top2账本、两阶段Paper与当前阻塞状态。
 - [自适应仓位 V2](ADAPTIVE_EXPOSURE_V2.md)：独立、非默认的日终信号系统；P0.1执行内核、五模块、12阶段编排、固定Daily publication registry、D+1人工复核与日频Paper对账已实现。2026-08-24红队补齐正式Daily/Exposure/Alpha Schema校验、authority/failure/safety与Exposure条件图绑定、Next二次复核及exact-type防子类覆写。formal loader仍阻断，正式Alpha固定 `DATA_FAIL_CLOSED`，当前只发布 `BLOCKED` 或无BUY的 `RISK_REDUCTION_ONLY`，全部准入保持关闭。
 - [市场数据 V2](MARKET_DATA.md)：Strategy Workspace 的证据适配层；说明 Provider、时点、校验、准入、真实探针和离线回放。

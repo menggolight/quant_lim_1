@@ -2,6 +2,62 @@
 
 > 本文是带时点的交接快照，不替代代码、配置、受控状态、标准 CLI 产物或 manifest。
 
+## 2026-08-28 — Tushare Alpha Feasibility P1
+
+### 本轮时点与工作树
+
+- `as_of`：`2026-08-28T15:21:54+08:00`，Asia/Shanghai；真实产物审计时点为 `2026-08-28T07:08:58.319513+00:00`。`generated_at` 仅是审计元数据，不作为市场、信号或 Locked Test 数据日期。
+- `branch`：`codex/project-review-20260820`。
+- `baseline/current_HEAD/commit_sha`：`33ac5f0e3c484a514288136ac5317830902e2105`，与用户指定基线一致。
+- `worktree_state`：dirty；本轮实现尚未提交或推送。用户既有 `docs/DECISIONS.md` 修改未由本轮编辑，继续明确排除。
+- 本轮文件范围：P1 experiment/config、5个Schema、Tushare collector、Alpha Feasibility engine/reporting/CLI、4个专项测试、P1说明与入口README、本文增量。`data/tmp/alpha-feasibility/` 为忽略提交的真实运行证据。
+
+### 目标、实现与最小变更面
+
+本轮保留正式小账户框架且不扩建九类执行数据，新增独立 `research_alpha_feasibility_only` 路径。冻结既有六因子、formal ranker、Exposure阈值、最多3只/单只40%和0/30/60/100%总仓位；没有新增因子、止损、价格区间、午盘逻辑、Paper、券商、账户或订单能力。
+
+- Tushare只允许 `trade_cal/index_weight/daily/adj_factor/index_daily/suspend_d/stock_basic` 七个标准只读接口，全部请求在网络前校验endpoint、fields、参数、成员scope和 `<=2023-12-31` 日期。
+- PIT固定逐月规划 `2017-12..2023-12` 73个请求；每月全部合法 `trade_date` 截面进入manifest与成员并集，决策日只选 `<=D` 的最新截面。non-800在V1无冻结官方调整registry时一律失败关闭。
+- 历史只按PIT成员并集分批；create-only started/response/quarantine、plan-bound请求计数、wire/normalized hash、manifest重建和字节一致重放共同约束。解析后Token回显、嵌套未来日期、不同plan started claim、同月漏截面、3+1批次错配和重签manifest篡改均有负向测试。
+- 股票经济价值使用 `raw_close * causal adj_factor`，执行参考使用同日因果 `raw_open * adj_factor`；全日停牌证据优先于同日vendor bar并沿用前一经济价值，非停牌缺口失败关闭。
+- Feasibility固定D收盘决策、D+1开盘小数换仓、base/stress比例成本；最低佣金、整手、精确分红送股、涨跌停、ST、退市终值与券商成交未模拟，始终 `execution_realism=INCOMPLETE`。
+- 最终报告用canonical decimal string和`Decimal`精确门禁，并自哈希绑定collection plan、PIT/history manifest、实验config、engine和reporting gate源码。
+
+### 真实Tushare运行与终态
+
+标准命令：
+
+```powershell
+python -m operations.run_alpha_feasibility all --config configs/a_share_technical_alpha_feasibility.v1.json --output-root data/tmp/alpha-feasibility/tushare-p1-v1
+```
+
+- 退出码：`1`，这是受控 `BLOCKED_DATA` 终态，不是Alpha结果。
+- `actual_tushare_request_count_by_endpoint`：`index_weight=1`；`trade_cal/daily/adj_factor/index_daily/suspend_d/stock_basic=0`。
+- `coverage_start/end=2017-07-01/2023-12-31`；`pit_months_expected/observed=73/0`；`union_instrument_count=0`。
+- `daily/adj_factor/suspension/benchmark coverage=blocked`；`history_manifest_sha256=null`。
+- 第一个 `2017-12 index_weight` 响应的根字段不符合冻结HTTP契约，稳定阻塞码为 `response_root_fields_differ_from_contract`。原始正文没有持久化；quarantine只保存响应SHA-256与稳定原因。由于started claim已存在，本轮没有重发该月份，也没有继续其余72个月或任何历史接口。
+- `development_metrics=null`、`validation_metrics=null`、`concentration_metrics=null`；没有运行或解释Alpha收益。
+- [最终报告](../data/tmp/alpha-feasibility/tushare-p1-v1/alpha_feasibility_report.json) `report_sha256=c14c94a3011ab175f58aefa3d3f93c299422cc8ca20cf2a523ec22f42449bcf4`；[PIT coverage](../data/tmp/alpha-feasibility/tushare-p1-v1/pit_membership_coverage_report.json) 与 [PIT manifest](../data/tmp/alpha-feasibility/tushare-p1-v1/pit_membership_manifest.json) 均已生成并验签。
+
+### 真实验证证据
+
+- P1四模块联合：`python -m unittest tests.test_tushare_alpha_feasibility tests.test_alpha_feasibility tests.test_alpha_feasibility_reporting tests.test_run_alpha_feasibility -q`，`Ran 74 tests in 49.950s`，退出码0，`OK`。
+- 真实产物：PIT coverage/manifest与最终report的JSON Schema、自哈希、runtime provenance复核通过；输出树扫描确认 `TUSHARE_TOKEN` 零落盘。
+- 安全全仓回归：精确枚举90个模块并在导入前排除 `test_strategy_workspace_admission`、`test_strategy_workspace_evaluation`、`test_strategy_workspace_experiment`、`test_strategy_workspace_top_decile_backtest`。首轮 `Ran 1084 tests in 296.701s`，仅两个既有Windows临时目录 `os.replace` 瞬时 `PermissionError`；两项精确复跑 `2/2 OK`，随后相同90模块从头重跑 `Ran 1084 tests in 306.627s`，退出码0，`OK (skipped=4)`。
+- `python -m compileall -q agent research trading operations integrations tests`：退出码0。
+- `git diff --check`：退出码0，仅有既有LF→CRLF提示；真实产物由 `.gitignore` 的 `data/tmp/` 规则排除。
+
+### 已知问题、下一步与安全状态
+
+- 终态：`BLOCKED_DATA`。在获得当前官方HTTP响应根字段的受控契约证据前，不放宽parser；由于本轮已形成create-only started claim，不自动重发。若未来另开授权轮次，应使用新输出根并把前次1次调用计入审计，而不是覆盖本轮证据。
+- `ALPHA_FEASIBILITY_GO_CANDIDATE/NO_GO` 均未产生；数据不完整，不能判断现有技术Alpha是否值得扩建执行层。
+- `locked_test_status={access:NOT_ACCESSED,download:NOT_DOWNLOADED,run:NOT_RUN}`、`locked_test_consumed=false`。四个Locked测试模块未导入、未运行；一次只读审查的宽搜索仅命中既有 `NOT_RUN` readiness元数据，没有打开或消费2024—2025市场数据、收益或回测结果。
+- `paper_eligibility=false`、`trade_eligibility=false`、`automatic_order_submission=false`、`live_supported=false`。本轮未运行Paper、未连接券商、未生成订单或交易建议。
+
+### 建议审查范围
+
+按本节 → [P1规格](ALPHA_FEASIBILITY_P1.md) → experiment与5个Schema → `tushare_alpha_feasibility.py` → `alpha_feasibility.py` → `alpha_feasibility_reporting.py` → `run_alpha_feasibility.py` → 4个专项测试 → 忽略提交的三份真实证据顺序复核。提交前必须逐路径暂存并确认cached diff不含 `docs/DECISIONS.md` 或 `data/tmp/`。
+
 ## 2026-08-28 — Technical Momentum 正式数据与验证 P0
 
 ### 本轮时点与工作树

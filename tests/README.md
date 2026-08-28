@@ -42,6 +42,14 @@ python -m unittest tests.test_technical_momentum_experiment -v
 
 该组只使用受控 fixture 验证双价格、未来 `adj_factor` 隔离、动态 PIT、执行状态、公司行动失败关闭、Development/Validation 指标和 Locked 零读取 guard。它不访问网络，不运行真实 Development/Validation，更不得读取或运行 2024—2025 Locked Test；测试通过不能升级数据 readiness。
 
+Tushare Alpha Feasibility P1 专项：
+
+```powershell
+python -m unittest tests.test_tushare_alpha_feasibility tests.test_alpha_feasibility tests.test_alpha_feasibility_reporting tests.test_run_alpha_feasibility -v
+```
+
+该组使用注入 transport 和内存反例验证73个月PIT、create-only重放、响应截止隔离、因果复权、停牌carry、完整日历、D+1开盘时序、冻结成本/Exposure、16项指标和三种终态；不访问网络，也不导入四个Locked Test模块。真实Tushare结果必须由独立CLI运行证据确认。
+
 该组验证政策哈希、普通空意图拒绝、显式现金意图、风险退出普通换手豁免、物理受阻不连坐、intent/attempt跨重启幂等、旧SQLite迁移、账户CAS、规范化报价包、内部日历相邻性、费用后仓位上限、D日收盘触发后下一受控session退出、逐日重试、永久no-reentry latch，以及日频现金/持仓/NAV/回撤/三类仓位重放。它不包含Alpha/仓位模型、正式PIT数据、官方日历/行情registry或Locked Test运行；Gate approval也尚未直接绑定独立费率表，因此这些测试不能证明策略有效或Paper准入。
 
 该组覆盖精确六因子与首披时点、动态中证800成分、Choice完整覆盖门、Experiment v2防改写、train-only Ridge、D+1→D+21 open-to-open标签、20交易日 cadence/purge、100万元Top Decile研究账本、成功子样本拒绝、A股整手/停复牌/涨跌停/T+1、账户行业集中度、基础/压力成本、回撤/换手和 append-only Paper 账本重放。Choice 正式适配器、真实数据与正式回测尚未运行；Paper 每决策点 signal/model/source 哈希仍由调用者提供且缺日频 NAV/回撤盯市，因此这些测试不证明历史→12个月的两阶段准入已跑通，Stage B 依然 `blocked_missing_controlled_paper_signal_adapter` 与 `blocked_missing_daily_paper_risk_marks`。

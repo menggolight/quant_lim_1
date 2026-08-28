@@ -7,6 +7,7 @@
 | 文件 | 职责 |
 |---|---|
 | `a_share_technical_momentum_adaptive.v1.json` | 当前唯一正式研究主线的冻结实验：既有六因子/Exposure参数、九类正式数据、双价格、Development/Validation/Locked物理边界与全关闭安全状态；当前数据门为 `BLOCKED` |
+| `a_share_technical_alpha_feasibility.v1.json` | 独立P1可行性门：只允许7个Tushare标准只读接口与2017-07至2023-12，哈希绑定既有Alpha实际ranker/Exposure，冻结小数权重、D+1开盘时序、base/stress成本和三种终态；不授予正式数据、Paper或交易准入 |
 | `strategy_adaptive_exposure.v2.json` | A股1万元自适应仓位V2的P0契约：月净收益10%仅作挑战报告，目标总仓位0%—100%、显式现金意图、风险退出优先和严格样本外边界；P0安全运行时已实现，但未实现Alpha/仓位模型且不具备Paper或交易准入 |
 | `strategy_quality_growth.v1.json` | A股1万元质量成长V1的六因子、PIT数据门、Top2仓位、成本、风险、历史门、Paper与降级诊断真源；当前 `blocked_missing_pit_data` |
 | `market_data.v1.json` | BaoStock 默认主源、Provider allowlist、dataset-specific admission、整批 fallback、三层存储和可选核验政策 |
@@ -24,7 +25,7 @@
 - `default_provider=baostock`；Provider 身份不能自证官方真值。
 - `daily_bar`、`trade_calendar` 和 `security_master` 的主源为 BaoStock。
 - Choice代码与历史证据保留，但当前访问策略为`expired`：所有新网络入口在SDK导入前返回`provider_access_expired`，旧validated数据也不能进入新的正式研究消费。它不会触发自动fallback或与其他Provider拼接。
-- Tushare V1仍仅为可选日线核验源；新增接口只走独立capability probe。缺少`TUSHARE_TOKEN`时为`not_configured`，不影响BaoStock主链，也不能形成正式MarketDataBatch。
+- Tushare V1在默认Market Data Registry中仍仅为可选日线核验源；本轮另有用户明确授权的P1独立回填配置，只能服务 `research_alpha_feasibility_only`，不能形成正式MarketDataBatch、Paper或交易准入。缺少`TUSHARE_TOKEN`时失败关闭。
 - AKShare 是禁用的扩展骨架；没有显式数据集、真实上游和准入声明时不能调用。
 - Eastmoney 行情固定为 `diagnostic_only`，`default_provider=false`，不能作为 fallback。
 - Primary 与 Secondary 只能形成独立完整批次，不允许补行、默认数据或 synthetic 降级。

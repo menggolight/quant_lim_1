@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "pit_membership_coverage_report.v1.json",
+  "title": "CSI 800 PIT Membership Coverage Report V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "experiment_id",
+    "generated_at",
+    "index_code",
+    "pit_months_expected",
+    "pit_months_observed",
+    "monthly_checks",
+    "stage_status",
+    "terminal_status",
+    "remaining_blockers",
+    "locked_test_status",
+    "locked_test_consumed",
+    "report_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "pit-membership-coverage-report.v1"},
+    "experiment_id": {"const": "a-share-technical-alpha-feasibility-tushare-p1-v1"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "index_code": {"const": "000906.SH"},
+    "pit_months_expected": {"const": 73},
+    "pit_months_observed": {"type": "integer", "minimum": 0, "maximum": 73},
+    "monthly_checks": {
+      "type": "array",
+      "minItems": 73,
+      "maxItems": 73,
+      "items": {"$ref": "#/$defs/month"}
+    },
+    "stage_status": {"enum": ["PIT_MEMBERSHIP_READY", "BLOCKED_PIT_MEMBERSHIP"]},
+    "terminal_status": {"type": ["string", "null"], "enum": ["BLOCKED_DATA", null]},
+    "remaining_blockers": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "locked_test_status": {"$ref": "#/$defs/locked"},
+    "locked_test_consumed": {"const": false},
+    "report_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "locked": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["access", "download", "run"],
+      "properties": {
+        "access": {"const": "NOT_ACCESSED"},
+        "download": {"const": "NOT_DOWNLOADED"},
+        "run": {"const": "NOT_RUN"}
+      }
+    },
+    "snapshot": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["snapshot_date", "component_count", "weight_sum", "weight_tolerance", "component_count_adjustment_evidence", "valid", "issues"],
+      "properties": {
+        "snapshot_date": {"type": "string", "format": "date"},
+        "component_count": {"type": "integer", "minimum": 0},
+        "weight_sum": {"type": "string", "pattern": "^-?[0-9]+(?:\\.[0-9]+)?$"},
+        "weight_tolerance": {"type": "string", "pattern": "^[0-9]+(?:\\.[0-9]+)?$"},
+        "component_count_adjustment_evidence": {"type": ["string", "null"], "minLength": 1},
+        "valid": {"type": "boolean"},
+        "issues": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true}
+      }
+    },
+    "month": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["month", "request_artifact_sha256", "response_sha256", "snapshots", "selected_snapshot_date", "status", "issues"],
+      "properties": {
+        "month": {"type": "string", "pattern": "^20(?:17-12|1[89]-(?:0[1-9]|1[0-2])|2[0-3]-(?:0[1-9]|1[0-2]))$"},
+        "request_artifact_sha256": {"$ref": "#/$defs/sha256"},
+        "response_sha256": {"$ref": "#/$defs/sha256"},
+        "snapshots": {"type": "array", "items": {"$ref": "#/$defs/snapshot"}},
+        "selected_snapshot_date": {"type": ["string", "null"], "format": "date"},
+        "status": {"enum": ["complete", "missing", "invalid"]},
+        "issues": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true}
+      }
+    }
+  }
+}

@@ -1,6 +1,6 @@
 # 研究层
 
-`research/` 的唯一默认量化策略入口是 `python -m research.strategy_workspace`。当前唯一正式研究主线为 `a-share-technical-momentum-adaptive-v1`；它冻结既有六因子 Technical Alpha 与 Exposure 参数，并新建正式数据、双价格、动态 PIT 股票池和 Development/Validation 路径。当前真实覆盖和公司行动会计门仍失败，所以状态为 `BLOCKED`，没有运行 Development、Validation 或 Locked Test。质量成长 V1 暂停但保留为冻结兼容线。研究模块不能调用券商写接口，也不能把诊断产物直接转换成订单。
+`research/` 的唯一默认量化策略入口是 `python -m research.strategy_workspace`。当前唯一正式研究主线为 `a-share-technical-momentum-adaptive-v1`；它冻结既有六因子 Technical Alpha 与 Exposure 参数，并新建正式数据、双价格、动态 PIT 股票池和 Development/Validation 路径。当前正式小账户覆盖和公司行动会计门仍失败，所以状态为 `BLOCKED`，没有运行正式小账户 Development、Validation 或 Locked Test。独立 [Alpha Feasibility P1](../docs/ALPHA_FEASIBILITY_P1.md) 只在2023年底前判断是否值得继续建设执行层，不替代正式路径。质量成长 V1 暂停但保留为冻结兼容线。研究模块不能调用券商写接口，也不能把诊断产物直接转换成订单。
 
 `research.strategy_workspace.adaptive_exposure` 与 `paper_ledger_v2` 是独立、非默认的自适应仓位V2 P0运行时：前者冻结并校验政策哈希，后者逐受控交易日重算Paper账户与风险退出证据。它们不生成Alpha或仓位状态，不读取锁定测试收益，不替代V1入口，也不授予Paper/交易权限。完整边界见[自适应仓位 V2](../docs/ADAPTIVE_EXPOSURE_V2.md)。
 

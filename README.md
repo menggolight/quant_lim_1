@@ -8,7 +8,9 @@
 
 质量成长线已经暂停但不删除；其代码、配置、测试和历史证据保留为冻结兼容区。Technical Shadow 继续作为每日业务闭环观察，但不再扩建，也不能作为正式 PIT 数据或历史回测证据。
 
-正式技术路径当前仍为 `BLOCKED`：仓库没有 2018—2025 九类完整正式数据，且单一 `adj_factor` 不能唯一分解现金分红与送转，无法在“真实未复权价格计 NAV”约束下形成完整公司行动账本。Development/Validation 因而尚未运行；2024—2025 Locked Test 保持 `NOT_RUN` / `consumed=false`。
+正式小账户技术路径当前仍为 `BLOCKED`：仓库没有 2018—2025 九类完整正式执行数据，且单一 `adj_factor` 不能唯一分解现金分红与送转，无法在“真实未复权价格计 NAV”约束下形成完整公司行动账本。正式小账户 Development/Validation 因而尚未运行；2024—2025 Locked Test 保持 `NOT_RUN` / `consumed=false`。
+
+独立的 [Tushare Alpha Feasibility P1](docs/ALPHA_FEASIBILITY_P1.md) 不等待九类执行数据，也不扩建上述正式框架：它只回填 `2017-07-01..2023-12-31` 的73个月中证800 PIT和成员并集最小历史，以小数权重、因果复权收益及基础/压力比例成本运行 Development/Validation。其 `execution_realism=INCOMPLETE`、Paper/交易均不准入，且任何 PIT、历史或重放缺口均直接 `BLOCKED_DATA`，不会触碰2024—2025。
 
 主入口仍位于 `research.strategy_workspace`。冻结账户成本为佣金 `0.00018`、单笔最低 `5` 元、卖出税 `0.0005`、双边过户费 `0.00001`、基础单边滑点 10 bps；压力情景为20 bps和双倍佣金。
 

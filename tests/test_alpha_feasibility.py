@@ -1,0 +1,575 @@
+from __future__ import annotations
+
+from datetime import date, timedelta
+from decimal import Decimal
+from hashlib import sha256
+import json
+from types import SimpleNamespace
+import unittest
+
+from research.strategy_workspace.alpha_feasibility import (
+    AlphaFeasibilityDataError,
+    AlphaFeasibilityInput,
+    BenchmarkBar,
+    FACTOR_IDS,
+    FROZEN_EXPOSURE_POLICY,
+    LOCKED_TEST_STATUS,
+    LockedTestAccessForbidden,
+    MAX_POSITION_WEIGHT,
+    PITAdmissionArtifacts,
+    PITMembershipSnapshot,
+    ProportionalCostScenario,
+    SignalBar,
+    SuspensionRecord,
+    rank_alpha_feasibility_universe,
+    run_alpha_feasibility,
+    run_alpha_feasibility_comparison,
+    select_pit_membership,
+)
+from research.strategy_workspace.technical_exposure_shadow_v1 import DEFAULT_POLICY
+from research.strategy_workspace.technical_formal_backtest import (
+    rank_technical_formal_universe,
+)
+
+
+D = Decimal
+BENCHMARK = "000906.SH"
+
+
+def _months() -> tuple[str, ...]:
+    result: list[str] = []
+    year, month = 2017, 12
+    while (year, month) <= (2023, 12):
+        result.append(f"{year:04d}-{month:02d}")
+        month += 1
+        if month == 13:
+            year += 1
+            month = 1
+    return tuple(result)
+
+
+def _self_hash(payload: dict, field: str) -> dict:
+    result = dict(payload)
+    raw = (
+        json.dumps(
+            result,
+            ensure_ascii=False,
+            sort_keys=True,
+            separators=(",", ":"),
+            allow_nan=False,
+        ).encode("utf-8")
+        + b"\n"
+    )
+    result[field] = sha256(raw).hexdigest()
+    return result
+
+
+def _pit_fixture(
+    instrument_ids: tuple[str, ...],
+    *,
+    same_month_early: tuple[str, tuple[str, ...]] | None = None,
+) -> tuple[tuple[PITMembershipSnapshot, ...], PITAdmissionArtifacts]:
+    if len(instrument_ids) != 30:
+        raise AssertionError("fixture weight vector assumes 30 instruments")
+    if same_month_early is not None and len(same_month_early[1]) != 30:
+        raise AssertionError("early fixture must also contain 30 instruments")
+    weights = ["3.343"] + ["3.333"] * (len(instrument_ids) - 1)
+    memberships: list[PITMembershipSnapshot] = []
+    checks: list[dict] = []
+    snapshots: list[dict] = []
+    adjustment_reason = "controlled synthetic unit-test fixture; production evidence required"
+    for month in _months():
+        month_snapshots: list[tuple[str, tuple[str, ...]]] = []
+        if same_month_early is not None and same_month_early[0] == month:
+            month_snapshots.append((f"{month}-05", same_month_early[1]))
+            month_snapshots.append((f"{month}-20", instrument_ids))
+        else:
+            month_snapshots.append((f"{month}-01", instrument_ids))
+        coverage_snapshots: list[dict] = []
+        for snapshot_date, snapshot_members in month_snapshots:
+            memberships.append(
+                PITMembershipSnapshot(date.fromisoformat(snapshot_date), snapshot_members)
+            )
+            coverage_snapshots.append(
+                {
+                    "snapshot_date": snapshot_date,
+                    "component_count": len(snapshot_members),
+                    "weight_sum": "100.000",
+                    "weight_tolerance": "0.015",
+                    "component_count_adjustment_evidence": adjustment_reason,
+                    "valid": True,
+                    "issues": [],
+                }
+            )
+            snapshots.append(
+                {
+                    "month": month,
+                    "snapshot_date": snapshot_date,
+                    "members": [
+                        {"instrument_id": instrument_id, "weight": weight}
+                        for instrument_id, weight in zip(
+                            snapshot_members, weights, strict=True
+                        )
+                    ],
+                    "weight_sum": "100.000",
+                    "weight_tolerance": "0.015",
+                    "component_count_adjustment_evidence": adjustment_reason,
+                    "source_response_sha256": "b" * 64,
+                }
+            )
+        checks.append(
+            {
+                "month": month,
+                "request_artifact_sha256": "a" * 64,
+                "response_sha256": "b" * 64,
+                "snapshots": coverage_snapshots,
+                "selected_snapshot_date": month_snapshots[-1][0],
+                "status": "complete",
+                "issues": [],
+            }
+        )
+    union_instruments = sorted(
+        {
+            member
+            for membership in memberships
+            for member in membership.members
+        }
+    )
+    locked = {"access": "NOT_ACCESSED", "download": "NOT_DOWNLOADED", "run": "NOT_RUN"}
+    report = _self_hash(
+        {
+            "schema_version": "pit-membership-coverage-report.v1",
+            "experiment_id": "a-share-technical-alpha-feasibility-tushare-p1-v1",
+            "generated_at": "2026-08-28T00:00:00+00:00",
+            "index_code": BENCHMARK,
+            "pit_months_expected": 73,
+            "pit_months_observed": 73,
+            "monthly_checks": checks,
+            "stage_status": "PIT_MEMBERSHIP_READY",
+            "terminal_status": None,
+            "remaining_blockers": [],
+            "locked_test_status": locked,
+            "locked_test_consumed": False,
+        },
+        "report_sha256",
+    )
+    manifest = _self_hash(
+        {
+            "schema_version": "pit-membership-manifest.v1",
+            "experiment_id": "a-share-technical-alpha-feasibility-tushare-p1-v1",
+            "generated_at": "2026-08-28T00:00:00+00:00",
+            "index_code": BENCHMARK,
+            "coverage_start_month": "2017-12",
+            "coverage_end_month": "2023-12",
+            "pit_months_expected": 73,
+            "pit_months_observed": 73,
+            "snapshots": snapshots,
+            "union_instrument_count": len(union_instruments),
+            "union_instrument_ids": union_instruments,
+            "stage_status": "PIT_MEMBERSHIP_READY",
+            "remaining_blockers": [],
+            "locked_test_status": locked,
+            "locked_test_consumed": False,
+        },
+        "manifest_sha256",
+    )
+    return tuple(memberships), PITAdmissionArtifacts(report, manifest)
+
+
+def _weekdays(start: date, end: date) -> tuple[date, ...]:
+    result: list[date] = []
+    current = start
+    while current <= end:
+        if current.weekday() < 5 and current != date(2023, 1, 2):
+            result.append(current)
+        current += timedelta(days=1)
+    return tuple(result)
+
+
+class _PoisonIterable:
+    def __iter__(self):
+        raise AssertionError("input iterable must not be touched")
+
+
+class AlphaFeasibilityDateGuardTests(unittest.TestCase):
+    def _poison_input(self, *, coverage_end: date) -> AlphaFeasibilityInput:
+        poison = _PoisonIterable()
+        return AlphaFeasibilityInput(
+            coverage_start=date(2022, 1, 1),
+            coverage_end=coverage_end,
+            trading_dates=poison,
+            memberships=poison,
+            stock_signal_bars=poison,
+            benchmark_signal_bars=poison,
+            suspensions=poison,
+        )
+
+    def test_forbidden_split_is_rejected_before_any_input_iteration(self) -> None:
+        with self.assertRaises(LockedTestAccessForbidden):
+            run_alpha_feasibility_comparison(
+                split="locked_test",
+                inputs=self._poison_input(coverage_end=date(2023, 12, 31)),
+            )
+
+    def test_future_coverage_is_rejected_before_any_input_iteration(self) -> None:
+        with self.assertRaises(LockedTestAccessForbidden):
+            run_alpha_feasibility_comparison(
+                split="validation",
+                inputs=self._poison_input(coverage_end=date(2024, 1, 1)),
+            )
+
+    def test_cost_parameters_cannot_be_tuned_through_the_feasibility_api(self) -> None:
+        with self.assertRaisesRegex(AlphaFeasibilityDataError, "cost scenarios are frozen"):
+            ProportionalCostScenario("base", commission_rate=D("0.00017"))
+
+    def test_scenario_duck_type_cannot_bypass_frozen_costs(self) -> None:
+        with self.assertRaisesRegex(AlphaFeasibilityDataError, "exact frozen"):
+            run_alpha_feasibility(
+                split="validation",
+                inputs=self._poison_input(coverage_end=date(2023, 12, 31)),
+                scenario=SimpleNamespace(name="base", buy_rate=D("0"), sell_rate=D("0")),
+            )
+
+
+class AlphaFeasibilityPITTests(unittest.TestCase):
+    def test_same_day_snapshot_is_visible_but_future_snapshot_never_backfills(self) -> None:
+        snapshots = (
+            PITMembershipSnapshot(date(2022, 12, 1), ("A", "B")),
+            PITMembershipSnapshot(date(2023, 1, 3), ("B", "C")),
+        )
+        self.assertEqual(
+            select_pit_membership(snapshots, date(2023, 1, 3)),
+            ("B", "C"),
+        )
+        self.assertEqual(
+            select_pit_membership(snapshots, date(2023, 1, 2)),
+            ("A", "B"),
+        )
+        with self.assertRaisesRegex(AlphaFeasibilityDataError, "no PIT membership"):
+            select_pit_membership(snapshots, date(2022, 11, 30))
+
+
+class AlphaFeasibilityEngineTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls) -> None:
+        cls.sessions = _weekdays(date(2022, 6, 1), date(2023, 12, 29))
+        cls.instrument_ids = tuple(f"{index + 1:06d}.SZ" for index in range(30))
+        cls.memberships, cls.pit_admission = _pit_fixture(cls.instrument_ids)
+        cls.stock_bars: list[SignalBar] = []
+        cls.signal_index: dict[tuple[date, str], SignalBar] = {}
+        cls.benchmark_bars: list[BenchmarkBar] = []
+        for day_number, session in enumerate(cls.sessions):
+            benchmark_close = D("100") + D(day_number) * D("0.02")
+            benchmark = BenchmarkBar(
+                session,
+                benchmark_close,
+                benchmark_close * D("1.001"),
+            )
+            cls.benchmark_bars.append(benchmark)
+            cls.signal_index[(session, BENCHMARK)] = SignalBar(
+                session,
+                BENCHMARK,
+                benchmark.close,
+                benchmark.high,
+            )
+            for stock_number, instrument_id in enumerate(cls.instrument_ids):
+                slope = D("0.01") + D(stock_number) * D("0.001")
+                close = D("80") + D(day_number) * slope
+                bar = SignalBar(session, instrument_id, close, close * D("1.001"))
+                cls.stock_bars.append(bar)
+                cls.signal_index[(session, instrument_id)] = bar
+        cls.inputs = AlphaFeasibilityInput(
+            coverage_start=date(2017, 7, 1),
+            coverage_end=date(2023, 12, 31),
+            trading_dates=cls.sessions,
+            memberships=cls.memberships,
+            stock_signal_bars=cls.stock_bars,
+            benchmark_signal_bars=cls.benchmark_bars,
+            suspensions=(),
+            pit_admission=cls.pit_admission,
+        )
+        cls.comparison = run_alpha_feasibility_comparison(
+            split="validation",
+            inputs=cls.inputs,
+        )
+
+    def test_rank_is_exactly_the_frozen_formal_ranker(self) -> None:
+        decision_date = self.sessions[150]
+        sessions = self.sessions[:151]
+        suspended: set[tuple[date, str]] = set()
+        actual = rank_alpha_feasibility_universe(
+            decision_date=decision_date,
+            sessions=sessions,
+            instrument_ids=self.instrument_ids,
+            signal_index=self.signal_index,
+            benchmark_id=BENCHMARK,
+            suspended=suspended,
+        )
+        statuses = {
+            (decision_date, instrument_id): SimpleNamespace(
+                suspended=False,
+                is_st=False,
+                listed=True,
+                delisted=False,
+            )
+            for instrument_id in self.instrument_ids
+        }
+        expected = rank_technical_formal_universe(
+            decision_date=decision_date,
+            sessions=sessions,
+            instrument_ids=self.instrument_ids,
+            signal_index=self.signal_index,  # type: ignore[arg-type]
+            benchmark_id=BENCHMARK,
+            status_index=statuses,  # type: ignore[arg-type]
+        )
+        self.assertEqual(actual, expected)
+        self.assertEqual(tuple(actual[0].factors or ()), FACTOR_IDS)
+        self.assertIs(FROZEN_EXPOSURE_POLICY, DEFAULT_POLICY)
+
+    def test_same_month_snapshots_are_all_admitted_and_selected_causally(self) -> None:
+        early_only = "900001.SH"
+        early_members = self.instrument_ids[:-1] + (early_only,)
+        memberships, admission = _pit_fixture(
+            self.instrument_ids,
+            same_month_early=("2023-01", early_members),
+        )
+        self.assertEqual(len(memberships), 74)
+        self.assertEqual(
+            select_pit_membership(memberships, date(2023, 1, 10)),
+            early_members,
+        )
+        self.assertEqual(
+            select_pit_membership(memberships, date(2023, 1, 20)),
+            self.instrument_ids,
+        )
+        extra_bars = []
+        for day_number, session in enumerate(self.sessions):
+            close = D("75") + D(day_number) * D("0.015")
+            extra_bars.append(
+                SignalBar(session, early_only, close, close * D("1.001"))
+            )
+        inputs = AlphaFeasibilityInput(
+            coverage_start=date(2017, 7, 1),
+            coverage_end=date(2023, 12, 31),
+            trading_dates=self.sessions,
+            memberships=memberships,
+            stock_signal_bars=(*self.stock_bars, *extra_bars),
+            benchmark_signal_bars=self.benchmark_bars,
+            suspensions=(),
+            pit_admission=admission,
+        )
+        result = run_alpha_feasibility(split="validation", inputs=inputs)
+        self.assertTrue(result.nav)
+        self.assertEqual(admission.manifest["union_instrument_count"], 31)
+        self.assertIn(early_only, admission.manifest["union_instrument_ids"])
+
+    def test_every_manifest_snapshot_requires_one_matching_monthly_check(self) -> None:
+        early_members = self.instrument_ids[:-1] + ("900001.SH",)
+        memberships, admission = _pit_fixture(
+            self.instrument_ids,
+            same_month_early=("2023-01", early_members),
+        )
+        report = json.loads(json.dumps(admission.coverage_report))
+        report.pop("report_sha256")
+        january = next(
+            item for item in report["monthly_checks"] if item["month"] == "2023-01"
+        )
+        january["snapshots"] = january["snapshots"][1:]
+        altered = AlphaFeasibilityInput(
+            coverage_start=date(2017, 7, 1),
+            coverage_end=date(2023, 12, 31),
+            trading_dates=self.sessions,
+            memberships=memberships,
+            stock_signal_bars=_PoisonIterable(),
+            benchmark_signal_bars=_PoisonIterable(),
+            suspensions=_PoisonIterable(),
+            pit_admission=PITAdmissionArtifacts(
+                _self_hash(report, "report_sha256"),
+                admission.manifest,
+            ),
+        )
+        with self.assertRaisesRegex(
+            AlphaFeasibilityDataError,
+            "coverage and manifest snapshot differ",
+        ):
+            run_alpha_feasibility(split="validation", inputs=altered)
+
+    def test_fractional_portfolio_never_exceeds_three_names_or_forty_percent(self) -> None:
+        decisions = self.comparison.base.decisions
+        self.assertTrue(decisions)
+        self.assertTrue(any(len(item.target_weights) == 3 for item in decisions))
+        for decision in decisions:
+            self.assertLessEqual(len(decision.target_weights), 3)
+            self.assertTrue(
+                all(weight <= MAX_POSITION_WEIGHT for weight in decision.target_weights.values())
+            )
+            self.assertIn(
+                decision.target_gross_exposure,
+                {D("0"), D("0.3"), D("0.6"), D("1.0")},
+            )
+
+    def test_stress_cost_is_not_below_base_and_minimum_fee_is_disclosed_off(self) -> None:
+        self.assertGreaterEqual(
+            self.comparison.stress.metrics.total_cost,
+            self.comparison.base.metrics.total_cost,
+        )
+        self.assertFalse(self.comparison.base.minimum_commission_modeled)
+        self.assertIn("minimum_5_cny", self.comparison.base.cost_model_semantics)
+
+    def test_metrics_and_per_stock_contribution_reconcile_to_normalized_nav(self) -> None:
+        for result in (self.comparison.base, self.comparison.stress):
+            metrics = result.metrics
+            self.assertAlmostEqual(
+                float(sum(metrics.per_stock_pnl_contribution.values(), D("0"))),
+                float(metrics.net_return),
+                places=12,
+            )
+            self.assertAlmostEqual(float(result.nav[-1].nav - D("1")), float(metrics.net_return), places=12)
+            self.assertGreaterEqual(metrics.max_drawdown, D("0"))
+            self.assertLessEqual(metrics.max_drawdown, D("1"))
+            self.assertGreaterEqual(metrics.positive_month_rate, D("0"))
+            self.assertLessEqual(metrics.positive_month_rate, D("1"))
+            self.assertAlmostEqual(
+                float(sum(metrics.exposure_state_distribution.values(), D("0"))),
+                1.0,
+                places=12,
+            )
+
+    def test_locked_and_execution_semantics_are_fixed_and_serializable(self) -> None:
+        payload = self.comparison.to_dict()
+        self.assertEqual(
+            payload["locked_test_status"],
+            {"access": "NOT_ACCESSED", "download": "NOT_DOWNLOADED", "run": "NOT_RUN"},
+        )
+        self.assertEqual(LOCKED_TEST_STATUS.access, "NOT_ACCESSED")
+        self.assertFalse(payload["locked_test_consumed"])
+        self.assertEqual(payload["execution_realism"], "INCOMPLETE")
+        self.assertFalse(payload["trade_eligibility"])
+
+    def test_held_non_suspended_missing_return_fails_closed(self) -> None:
+        first_report_date = next(day for day in self.sessions if day.year == 2023)
+        selected = self.comparison.base.decisions[0].selected_instrument_ids[0]
+        altered = AlphaFeasibilityInput(
+            coverage_start=date(2017, 7, 1),
+            coverage_end=date(2023, 12, 31),
+            trading_dates=self.sessions,
+            memberships=self.memberships,
+            stock_signal_bars=(
+                bar
+                for bar in self.stock_bars
+                if not (
+                    bar.instrument_id == selected
+                    and bar.trading_date == first_report_date
+                )
+            ),
+            benchmark_signal_bars=self.benchmark_bars,
+            suspensions=(),
+            pit_admission=self.pit_admission,
+        )
+        with self.assertRaisesRegex(
+            AlphaFeasibilityDataError,
+            "internal missing session",
+        ):
+            run_alpha_feasibility(split="validation", inputs=altered)
+
+    def test_suspension_uses_prior_economic_value_instead_of_future_fill(self) -> None:
+        first_report_date = next(day for day in self.sessions if day.year == 2023)
+        selected = self.comparison.base.decisions[0].selected_instrument_ids[0]
+        altered = AlphaFeasibilityInput(
+            coverage_start=date(2017, 7, 1),
+            coverage_end=date(2023, 12, 31),
+            trading_dates=self.sessions,
+            memberships=self.memberships,
+            stock_signal_bars=(
+                bar
+                for bar in self.stock_bars
+                if not (
+                    bar.instrument_id == selected
+                    and bar.trading_date == first_report_date
+                )
+            ),
+            benchmark_signal_bars=self.benchmark_bars,
+            suspensions=(SuspensionRecord(first_report_date, selected),),
+            pit_admission=self.pit_admission,
+        )
+        result = run_alpha_feasibility(split="validation", inputs=altered)
+        self.assertTrue(result.nav)
+
+    def test_suspension_evidence_overrides_same_day_vendor_bar(self) -> None:
+        first_report_date = next(day for day in self.sessions if day.year == 2023)
+        selected = self.comparison.base.decisions[0].selected_instrument_ids
+        altered = AlphaFeasibilityInput(
+            coverage_start=date(2017, 7, 1),
+            coverage_end=date(2023, 12, 31),
+            trading_dates=self.sessions,
+            memberships=self.memberships,
+            stock_signal_bars=self.stock_bars,
+            benchmark_signal_bars=self.benchmark_bars,
+            suspensions=tuple(
+                SuspensionRecord(first_report_date, instrument_id)
+                for instrument_id in selected
+            ),
+            pit_admission=self.pit_admission,
+        )
+        result = run_alpha_feasibility(split="validation", inputs=altered)
+        self.assertLessEqual(
+            abs(result.nav[0].daily_pnl + result.rebalances[0].total_cost),
+            D("1e-24"),
+        )
+
+    def test_internal_warmup_gap_fails_closed_before_ranking(self) -> None:
+        missing_day = date(2022, 12, 1)
+        altered = AlphaFeasibilityInput(
+            coverage_start=date(2017, 7, 1),
+            coverage_end=date(2023, 12, 31),
+            trading_dates=self.sessions,
+            memberships=self.memberships,
+            stock_signal_bars=(
+                bar
+                for bar in self.stock_bars
+                if not (
+                    bar.instrument_id == self.instrument_ids[0]
+                    and bar.trading_date == missing_day
+                )
+            ),
+            benchmark_signal_bars=self.benchmark_bars,
+            suspensions=(),
+            pit_admission=self.pit_admission,
+        )
+        with self.assertRaisesRegex(AlphaFeasibilityDataError, "internal missing session"):
+            run_alpha_feasibility(split="validation", inputs=altered)
+
+    def test_truncated_validation_calendar_cannot_claim_full_period(self) -> None:
+        cutoff = date(2023, 1, 3)
+        sessions = tuple(day for day in self.sessions if day <= cutoff)
+        altered = AlphaFeasibilityInput(
+            coverage_start=date(2017, 7, 1),
+            coverage_end=date(2023, 12, 31),
+            trading_dates=sessions,
+            memberships=self.memberships,
+            stock_signal_bars=(bar for bar in self.stock_bars if bar.trading_date <= cutoff),
+            benchmark_signal_bars=(
+                bar for bar in self.benchmark_bars if bar.trading_date <= cutoff
+            ),
+            suspensions=(),
+            pit_admission=self.pit_admission,
+        )
+        with self.assertRaisesRegex(AlphaFeasibilityDataError, "boundary sessions"):
+            run_alpha_feasibility(split="validation", inputs=altered)
+
+    def test_alpha_cannot_run_without_verified_73_month_pit_artifacts(self) -> None:
+        altered = AlphaFeasibilityInput(
+            coverage_start=date(2017, 7, 1),
+            coverage_end=date(2023, 12, 31),
+            trading_dates=self.sessions,
+            memberships=self.memberships,
+            stock_signal_bars=self.stock_bars,
+            benchmark_signal_bars=self.benchmark_bars,
+            suspensions=(),
+        )
+        with self.assertRaisesRegex(AlphaFeasibilityDataError, "admission artifacts"):
+            run_alpha_feasibility(split="validation", inputs=altered)
+
+
+if __name__ == "__main__":
+    unittest.main()
