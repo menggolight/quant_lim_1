@@ -31,14 +31,14 @@ EXPERIMENT_SCHEMA_PATH = (
     REPOSITORY_ROOT / "schemas" / "technical_alpha_feasibility_experiment.v2.json"
 )
 REPORT_SCHEMA_PATH = (
-    REPOSITORY_ROOT / "schemas" / "technical_alpha_feasibility_report.v2.json"
+    REPOSITORY_ROOT / "schemas" / "technical_alpha_feasibility_report.v3.json"
 )
 ALPHA_FEASIBILITY_ENGINE_PATH = (
     REPOSITORY_ROOT / "research" / "strategy_workspace" / "alpha_feasibility.py"
 )
 
 REPORT_FILENAME = "alpha_feasibility_report.json"
-REPORT_SCHEMA_VERSION = "technical-alpha-feasibility-report.v2"
+REPORT_SCHEMA_VERSION = "technical-alpha-feasibility-report.v3"
 EXPERIMENT_ID = "a-share-technical-alpha-feasibility-tushare-p1-v1"
 COVERAGE_START = "2017-07-01"
 COVERAGE_END = "2023-12-31"
@@ -48,6 +48,17 @@ CHINA_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
 STOCK_BASIC_STATUS = "DEFERRED_NOT_REQUIRED_FOR_ALPHA_FEASIBILITY"
 STOCK_BASIC_REQUEST_COUNT = 0
 SECURITY_MASTER_PIT_STATUS = "NOT_IMPLEMENTED_NOT_REQUIRED_IN_P1"
+REQUIRED_INDEX_WEIGHT_FIELDS = (
+    "index_code",
+    "con_code",
+    "trade_date",
+    "weight",
+)
+_SAFE_DATA_FIELD = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
+_DIAGNOSTIC_DATA_FIELD = re.compile(
+    r"^(?:[A-Za-z_][A-Za-z0-9_]{0,63}|sha256:[0-9a-f]{64}|"
+    r"type:(?:null|boolean|integer|number|string|array|object|unknown))$"
+)
 
 ALLOWED_ENDPOINTS = (
     "trade_cal",
@@ -67,6 +78,12 @@ ADAPTER_PROTOCOL_BLOCKERS = frozenset(
         "transport_extensions_too_deep",
         "transport_extension_secret_detected",
         "data_payload_invalid",
+        "data_fields_not_array",
+        "data_field_name_invalid",
+        "data_duplicate_fields",
+        "data_required_fields_missing",
+        "data_item_width_mismatch",
+        "data_required_value_invalid",
         "unknown_non_json_value",
     }
 )
@@ -482,6 +499,131 @@ def _unique_strings(values: Any, field: str) -> list[str]:
     return sorted(result)
 
 
+def _safe_field_array(values: Any, field: str) -> list[str]:
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+        raise AlphaFeasibilityReportingError(f"{field} must be an array")
+    result: list[str] = []
+    for value in values:
+        if type(value) is not str or _SAFE_DATA_FIELD.fullmatch(value) is None:
+            raise AlphaFeasibilityReportingError(
+                f"{field} contains an unsafe data field name"
+            )
+        result.append(value)
+    if len(result) != len(set(result)):
+        raise AlphaFeasibilityReportingError(f"{field} values must be unique")
+    return result
+
+
+def _diagnostic_field_array(values: Any, field: str) -> list[str]:
+    if not isinstance(values, Sequence) or isinstance(values, (str, bytes)):
+        raise AlphaFeasibilityReportingError(f"{field} must be an array")
+    result: list[str] = []
+    for value in values:
+        if type(value) is not str or _DIAGNOSTIC_DATA_FIELD.fullmatch(value) is None:
+            raise AlphaFeasibilityReportingError(
+                f"{field} contains an unsafe diagnostic field name"
+            )
+        result.append(value)
+    return result
+
+
+def _first_index_weight(value: Any, *, allow_none: bool) -> dict[str, Any] | None:
+    if value is None:
+        if allow_none:
+            return None
+        raise AlphaFeasibilityReportingError("first_index_weight is required")
+    required_keys = {
+        "observed_data_fields",
+        "required_data_fields",
+        "missing_required_data_fields",
+        "extra_data_fields",
+        "field_order_matches_canonical",
+        "data_row_count",
+        "provider_payload_sha256",
+        "normalized_content_sha256",
+    }
+    if not isinstance(value, Mapping) or set(value) != required_keys:
+        raise AlphaFeasibilityReportingError(
+            "first_index_weight must contain the exact safe evidence fields"
+        )
+    observed = _diagnostic_field_array(
+        value["observed_data_fields"], "first_index_weight.observed_data_fields"
+    )
+    required = _safe_field_array(
+        value["required_data_fields"], "first_index_weight.required_data_fields"
+    )
+    missing = _safe_field_array(
+        value["missing_required_data_fields"],
+        "first_index_weight.missing_required_data_fields",
+    )
+    extra = _safe_field_array(
+        value["extra_data_fields"], "first_index_weight.extra_data_fields"
+    )
+    if tuple(required) != REQUIRED_INDEX_WEIGHT_FIELDS:
+        raise AlphaFeasibilityReportingError(
+            "first_index_weight required fields differ from the canonical projection"
+        )
+    safe_observed = [
+        field for field in observed if _SAFE_DATA_FIELD.fullmatch(field) is not None
+    ]
+    observed_set = set(safe_observed)
+    required_set = set(required)
+    if (
+        not set(missing).issubset(required_set)
+        or set(extra) != observed_set - required_set
+        or set(missing) != required_set - observed_set
+    ):
+        raise AlphaFeasibilityReportingError(
+            "first_index_weight field diagnostics are inconsistent"
+        )
+    order_matches = value["field_order_matches_canonical"]
+    if type(order_matches) is not bool:
+        raise AlphaFeasibilityReportingError(
+            "first_index_weight.field_order_matches_canonical must be boolean"
+        )
+    observed_required_order = [
+        field for field in safe_observed if field in required_set
+    ]
+    if order_matches != (observed_required_order == required):
+        raise AlphaFeasibilityReportingError(
+            "first_index_weight field-order diagnostic is inconsistent"
+        )
+    provider_hash = _sha256_or_none(
+        value["provider_payload_sha256"],
+        "first_index_weight.provider_payload_sha256",
+        allow_none=True,
+    )
+    normalized_hash = _sha256_or_none(
+        value["normalized_content_sha256"],
+        "first_index_weight.normalized_content_sha256",
+        allow_none=True,
+    )
+    if normalized_hash is not None and (missing or provider_hash is None):
+        raise AlphaFeasibilityReportingError(
+            "normalized first index_weight evidence requires a complete provider payload"
+        )
+    return {
+        "observed_data_fields": observed,
+        "required_data_fields": required,
+        "missing_required_data_fields": missing,
+        "extra_data_fields": extra,
+        "field_order_matches_canonical": order_matches,
+        "data_row_count": _nonnegative_integer(
+            value["data_row_count"], "first_index_weight.data_row_count"
+        ),
+        "provider_payload_sha256": provider_hash,
+        "normalized_content_sha256": normalized_hash,
+    }
+
+
+def normalize_first_index_weight_evidence(
+    value: Any, *, allow_none: bool = False
+) -> dict[str, Any] | None:
+    """Expose the report's safe first-request evidence boundary to the runner."""
+
+    return _first_index_weight(value, allow_none=allow_none)
+
+
 def _request_counts(value: Any) -> dict[str, int]:
     if not isinstance(value, Mapping) or set(value) != set(ALLOWED_ENDPOINTS):
         raise AlphaFeasibilityReportingError(
@@ -620,12 +762,32 @@ def _normalize_data_summary(
         raw_insufficient_history_counts,
         "insufficient_history_count_by_decision",
     )
+    no_initial_price_count = _nonnegative_integer(
+        summary.get(
+            "ineligible_no_initial_price_count",
+            0 if blocked_defaults else None,
+        ),
+        "ineligible_no_initial_price_count",
+    )
     unexplained_gap_count = _nonnegative_integer(
         summary.get(
             "unexplained_market_data_gap_count",
             0 if blocked_defaults else None,
         ),
         "unexplained_market_data_gap_count",
+    )
+
+    blocked_status = summary.get("data_status") in {
+        "BLOCKED_PIT_MEMBERSHIP",
+        "BLOCKED_DATA",
+        "BLOCKED_ADAPTER_PROTOCOL",
+    } or summary.get("terminal_status") in {
+        "BLOCKED_DATA",
+        "BLOCKED_ADAPTER_PROTOCOL",
+    }
+    first_index_weight = _first_index_weight(
+        summary.get("first_index_weight"),
+        allow_none=blocked_defaults or blocked_status,
     )
 
     allow_missing_provenance = (
@@ -670,6 +832,7 @@ def _normalize_data_summary(
 
     return {
         "actual_tushare_request_count_by_endpoint": counts,
+        "first_index_weight": first_index_weight,
         **fixed_data_contract,
         "coverage_start": COVERAGE_START,
         "coverage_end": COVERAGE_END,
@@ -678,6 +841,7 @@ def _normalize_data_summary(
         "union_instrument_count": union_count,
         "valid_candidate_count_by_decision": valid_candidate_counts,
         "insufficient_history_count_by_decision": insufficient_history_counts,
+        "ineligible_no_initial_price_count": no_initial_price_count,
         "unexplained_market_data_gap_count": unexplained_gap_count,
         **provenance,
         **{
@@ -947,6 +1111,7 @@ def _report_base(
         "actual_tushare_request_count_by_endpoint": data_summary[
             "actual_tushare_request_count_by_endpoint"
         ],
+        "first_index_weight": data_summary["first_index_weight"],
         "stock_basic_status": data_summary["stock_basic_status"],
         "stock_basic_request_count": data_summary["stock_basic_request_count"],
         "security_master_pit_status": data_summary["security_master_pit_status"],
@@ -960,6 +1125,9 @@ def _report_base(
         ],
         "insufficient_history_count_by_decision": data_summary[
             "insufficient_history_count_by_decision"
+        ],
+        "ineligible_no_initial_price_count": data_summary[
+            "ineligible_no_initial_price_count"
         ],
         "unexplained_market_data_gap_count": data_summary[
             "unexplained_market_data_gap_count"
@@ -1059,6 +1227,16 @@ def _assert_completed_data(data: Mapping[str, Any]) -> None:
         raise AlphaFeasibilityReportingError("completed report requires all PIT months")
     if data["union_instrument_count"] <= 0:
         raise AlphaFeasibilityReportingError("completed report requires a non-empty union")
+    first_index_weight = data["first_index_weight"]
+    if (
+        first_index_weight is None
+        or first_index_weight["missing_required_data_fields"]
+        or first_index_weight["provider_payload_sha256"] is None
+        or first_index_weight["normalized_content_sha256"] is None
+    ):
+        raise AlphaFeasibilityReportingError(
+            "completed report requires complete first index_weight field evidence"
+        )
     valid_candidate_counts = data["valid_candidate_count_by_decision"]
     insufficient_history_counts = data["insufficient_history_count_by_decision"]
     if not valid_candidate_counts or not insufficient_history_counts:
@@ -1294,6 +1472,7 @@ __all__ = [
     "derive_terminal_status",
     "evaluate_terminal_status",
     "load_and_validate_experiment_config",
+    "normalize_first_index_weight_evidence",
     "publish_alpha_feasibility_report",
     "publish_report",
     "validate_experiment_config",

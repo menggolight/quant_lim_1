@@ -23,8 +23,9 @@ JSON Schema 负责结构，`research/market_data/validation.py` 在无网络依�
 
 - `technical_alpha_feasibility_experiment.v2.json`：冻结P1.3的6接口、`stock_basic`延期/零请求、121日个股资格、绝对日期截止，以及不变的ranker/Exposure、PIT、总回报、D+1开盘时序、小数仓位、成本与GO/NO_GO门；V1仅保留历史兼容。
 - `pit_membership_coverage_report.v1.json`、`pit_membership_manifest.v1.json`：分别约束73次逐月请求检查和合法截面/成员并集；非800截面必须携带受控指数公司调整说明，缺月或哈希/权重失败不得进入Alpha。
-- `tushare_alpha_feasibility_manifest.v2.json`：汇总6接口真实请求计数、`stock_basic`零请求/延期状态、逐决策候选与历史不足数、异常行情缺口及六类数据集覆盖/哈希；V1仅保留历史兼容。
-- `technical_alpha_feasibility_report.v2.json`：在V1四种终态和Development/Validation双情景指标上增加P1.3固定状态、逐决策计数和异常缺口计数；READY要求缺口为0，blocked指标仍必须为`null`，Locked Test和全部执行权限固定关闭。V1仅保留历史兼容。
+- `tushare_alpha_feasibility_task_response.v4.json`、`tushare_alpha_feasibility_quarantine.v4.json`：绑定服务端实际/必需/缺失/额外字段、顺序诊断、provider/normalized双内容哈希、额外列逐列哈希和安全行数；旧v2/v3证据只读兼容，不重签覆盖。
+- `tushare_alpha_feasibility_manifest.v3.json`：汇总6接口真实请求计数、`stock_basic`零请求/延期状态、逐决策候选与历史不足数、首次停牌无初始价数量、异常行情缺口及六类数据集覆盖/哈希；V1/V2仅保留历史兼容。
+- `technical_alpha_feasibility_report.v3.json`：在四种终态和Development/Validation双情景指标上绑定首个 `index_weight` 字段证据、首次停牌无初始价数量与异常缺口计数；READY要求缺口为0，blocked指标仍必须为`null`，Locked Test和全部执行权限固定关闭。V1/V2仅保留历史兼容。
 - `technical_momentum_experiment.v1.json`：当前唯一正式研究主线 `a-share-technical-momentum-adaptive-v1` 的独立冻结规格；哈希绑定既有 Technical Alpha/Exposure 真源，锁定九类数据、双价格、最多3只/40%、基础与压力成本，以及 Development/Validation/Locked 日期。Locked 固定 `NOT_RUN`、`consumed=false`，安全权限全关闭。
 - `technical_formal_dataset_manifest.v1.json`：九类 Technical 正式数据的 coverage/完整性 manifest；逐数据集记录来源接口、行数、日期、缺口、内容哈希和问题，并把 PIT、adjustment、双价格、执行状态及公司行动权益分解作为关键门。Schema通过不代表数据完整或来源官方。
 - `technical_momentum_backtest_report.v1.json`：只允许 Development 与 Validation 的基础/压力双情景报告；数据门失败时指标必须为 `null` 且状态为 `NOT_RUN_BLOCKED`，不得用单测或合成结果补值。

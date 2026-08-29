@@ -30,6 +30,29 @@ def _counts() -> dict[str, int]:
     }
 
 
+def _first_index_weight() -> dict[str, object]:
+    return {
+        "observed_data_fields": [
+            "index_code",
+            "con_code",
+            "trade_date",
+            "weight",
+        ],
+        "required_data_fields": [
+            "index_code",
+            "con_code",
+            "trade_date",
+            "weight",
+        ],
+        "missing_required_data_fields": [],
+        "extra_data_fields": [],
+        "field_order_matches_canonical": True,
+        "data_row_count": 800,
+        "provider_payload_sha256": "4" * 64,
+        "normalized_content_sha256": "5" * 64,
+    }
+
+
 def _backfill(*, stage: str, blocker: str | None = None) -> dict[str, object]:
     blocked = stage != cli.READY_STAGE
     adapter_blocked = stage == "BLOCKED_ADAPTER_PROTOCOL"
@@ -46,6 +69,7 @@ def _backfill(*, stage: str, blocker: str | None = None) -> dict[str, object]:
         ),
         "generated_at": GENERATED_AT,
         "actual_tushare_request_count_by_endpoint": _counts(),
+        "first_index_weight": None if blocked else _first_index_weight(),
         "stock_basic_status": "DEFERRED_NOT_REQUIRED_FOR_ALPHA_FEASIBILITY",
         "stock_basic_request_count": 0,
         "security_master_pit_status": "NOT_IMPLEMENTED_NOT_REQUIRED_IN_P1",
@@ -60,6 +84,7 @@ def _backfill(*, stage: str, blocker: str | None = None) -> dict[str, object]:
         "insufficient_history_count_by_decision": (
             {} if blocked else {"2023-01-03": 0}
         ),
+        "ineligible_no_initial_price_count": 0,
         "unexplained_market_data_gap_count": 0,
         "collection_plan_sha256": "1" * 64,
         "pit_membership_manifest_sha256": "2" * 64,
@@ -177,6 +202,12 @@ class RunAlphaFeasibilityCliTests(unittest.TestCase):
             "transport_extensions_too_deep",
             "transport_extension_secret_detected",
             "data_payload_invalid",
+            "data_fields_not_array",
+            "data_field_name_invalid",
+            "data_duplicate_fields",
+            "data_required_fields_missing",
+            "data_item_width_mismatch",
+            "data_required_value_invalid",
             "unknown_non_json_value",
         }
         self.assertEqual(set(cli.data_lane.ADAPTER_PROTOCOL_FAILURES), expected)
@@ -222,7 +253,7 @@ class RunAlphaFeasibilityCliTests(unittest.TestCase):
                 backfill.assert_not_called()
                 self.assertFalse(output_root.exists())
 
-    def test_reporting_boundary_enforces_v2_fixed_fields_maps_and_gap_types(self) -> None:
+    def test_reporting_boundary_enforces_v3_fixed_fields_maps_and_gap_types(self) -> None:
         invalid_mutations = {
             "request_count_missing": lambda result: result[
                 "actual_tushare_request_count_by_endpoint"
@@ -299,6 +330,22 @@ class RunAlphaFeasibilityCliTests(unittest.TestCase):
             "ready_gap": lambda result: result.__setitem__(
                 "unexplained_market_data_gap_count", 1
             ),
+            "no_initial_missing": lambda result: result.pop(
+                "ineligible_no_initial_price_count"
+            ),
+            "no_initial_bool": lambda result: result.__setitem__(
+                "ineligible_no_initial_price_count", False
+            ),
+            "no_initial_negative": lambda result: result.__setitem__(
+                "ineligible_no_initial_price_count", -1
+            ),
+            "first_missing": lambda result: result.pop("first_index_weight"),
+            "first_order_drift": lambda result: result[
+                "first_index_weight"
+            ].__setitem__("field_order_matches_canonical", False),
+            "first_incomplete_ready": lambda result: result[
+                "first_index_weight"
+            ].__setitem__("normalized_content_sha256", None),
         }
         for name, mutate in invalid_mutations.items():
             with self.subTest(name=name):
@@ -332,7 +379,47 @@ class RunAlphaFeasibilityCliTests(unittest.TestCase):
             summary["insufficient_history_count_by_decision"],
             {"2023-01-03": 0},
         )
+        self.assertEqual(summary["ineligible_no_initial_price_count"], 0)
+        self.assertEqual(summary["first_index_weight"], _first_index_weight())
         self.assertEqual(summary["unexplained_market_data_gap_count"], 0)
+
+    def test_reporting_boundary_accepts_extra_or_reordered_provider_fields(self) -> None:
+        for observed, order_matches in (
+            (
+                [
+                    "index_code",
+                    "index_name",
+                    "con_code",
+                    "trade_date",
+                    "weight",
+                ],
+                True,
+            ),
+            (
+                [
+                    "trade_date",
+                    "index_name",
+                    "weight",
+                    "con_code",
+                    "index_code",
+                ],
+                False,
+            ),
+        ):
+            with self.subTest(observed=observed):
+                result = _backfill(stage=cli.READY_STAGE)
+                result["first_index_weight"].update(
+                    {
+                        "observed_data_fields": observed,
+                        "extra_data_fields": ["index_name"],
+                        "field_order_matches_canonical": order_matches,
+                    }
+                )
+                summary = cli._reporting_data_summary(result)
+                self.assertEqual(
+                    summary["first_index_weight"]["extra_data_fields"],
+                    ["index_name"],
+                )
 
     def test_pit_block_publishes_blocked_report_and_never_enters_alpha(self) -> None:
         blocked = _backfill(stage="BLOCKED_PIT_MEMBERSHIP")
@@ -374,6 +461,8 @@ class RunAlphaFeasibilityCliTests(unittest.TestCase):
         self.assertEqual(report["stock_basic_request_count"], 0)
         self.assertEqual(report["valid_candidate_count_by_decision"], {})
         self.assertEqual(report["insufficient_history_count_by_decision"], {})
+        self.assertEqual(report["ineligible_no_initial_price_count"], 0)
+        self.assertIsNone(report["first_index_weight"])
         self.assertEqual(report["unexplained_market_data_gap_count"], 0)
         self.assertNotIn("super-secret-token-value", serialized)
         self.assertNotIn("2024-01-01", serialized)
@@ -596,6 +685,8 @@ class RunAlphaFeasibilityCliTests(unittest.TestCase):
         )
         self.assertEqual(report["valid_candidate_count_by_decision"], {})
         self.assertEqual(report["insufficient_history_count_by_decision"], {})
+        self.assertEqual(report["ineligible_no_initial_price_count"], 0)
+        self.assertIsNone(report["first_index_weight"])
         self.assertEqual(report["unexplained_market_data_gap_count"], 0)
 
     def test_precollection_block_replays_byte_identically_without_timestamp(self) -> None:
@@ -683,6 +774,8 @@ class RunAlphaFeasibilityCliTests(unittest.TestCase):
             report["insufficient_history_count_by_decision"],
             {"2023-01-03": 0},
         )
+        self.assertEqual(report["ineligible_no_initial_price_count"], 0)
+        self.assertEqual(report["first_index_weight"], _first_index_weight())
         self.assertEqual(report["unexplained_market_data_gap_count"], 0)
         self.assertEqual(report["stock_basic_request_count"], 0)
 
@@ -717,6 +810,8 @@ class RunAlphaFeasibilityCliTests(unittest.TestCase):
             summary["insufficient_history_count_by_decision"],
             {"2023-01-03": 0},
         )
+        self.assertEqual(summary["ineligible_no_initial_price_count"], 0)
+        self.assertEqual(summary["first_index_weight"], _first_index_weight())
         self.assertEqual(summary["unexplained_market_data_gap_count"], 0)
         self.assertEqual(summary["locked_test_status"], cli.LOCKED_TEST_STATUS)
         self.assertIs(summary["locked_test_consumed"], False)

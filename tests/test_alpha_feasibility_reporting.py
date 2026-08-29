@@ -28,9 +28,33 @@ def _counts() -> dict[str, int]:
     }
 
 
+def _first_index_weight() -> dict[str, object]:
+    return {
+        "observed_data_fields": [
+            "index_code",
+            "con_code",
+            "trade_date",
+            "weight",
+        ],
+        "required_data_fields": [
+            "index_code",
+            "con_code",
+            "trade_date",
+            "weight",
+        ],
+        "missing_required_data_fields": [],
+        "extra_data_fields": [],
+        "field_order_matches_canonical": True,
+        "data_row_count": 800,
+        "provider_payload_sha256": "4" * 64,
+        "normalized_content_sha256": "5" * 64,
+    }
+
+
 def _complete_data() -> dict[str, object]:
     return {
         "actual_tushare_request_count_by_endpoint": _counts(),
+        "first_index_weight": _first_index_weight(),
         "stock_basic_status": "DEFERRED_NOT_REQUIRED_FOR_ALPHA_FEASIBILITY",
         "stock_basic_request_count": 0,
         "security_master_pit_status": "NOT_IMPLEMENTED_NOT_REQUIRED_IN_P1",
@@ -41,6 +65,7 @@ def _complete_data() -> dict[str, object]:
         "union_instrument_count": 1200,
         "valid_candidate_count_by_decision": {"2023-01-03": 1199},
         "insufficient_history_count_by_decision": {"2023-01-03": 1},
+        "ineligible_no_initial_price_count": 1,
         "unexplained_market_data_gap_count": 0,
         "collection_plan_sha256": "1" * 64,
         "pit_membership_manifest_sha256": "2" * 64,
@@ -69,6 +94,7 @@ def _blocked_data() -> dict[str, object]:
             "union_instrument_count": 0,
             "valid_candidate_count_by_decision": {},
             "insufficient_history_count_by_decision": {},
+            "ineligible_no_initial_price_count": 0,
             "unexplained_market_data_gap_count": 0,
             "daily_coverage_status": "not_run",
             "adj_factor_coverage_status": "not_run",
@@ -265,6 +291,12 @@ class AlphaFeasibilityReportingTests(unittest.TestCase):
             "transport_extensions_too_deep",
             "transport_extension_secret_detected",
             "data_payload_invalid",
+            "data_fields_not_array",
+            "data_field_name_invalid",
+            "data_duplicate_fields",
+            "data_required_fields_missing",
+            "data_item_width_mismatch",
+            "data_required_value_invalid",
             "unknown_non_json_value",
         }
         self.assertEqual(set(reporting.ADAPTER_PROTOCOL_BLOCKERS), expected)
@@ -307,7 +339,7 @@ class AlphaFeasibilityReportingTests(unittest.TestCase):
 
     def test_complete_report_go_candidate_and_all_sixteen_metrics(self) -> None:
         report = self._completed()
-        self.assertEqual(report["schema_version"], "technical-alpha-feasibility-report.v2")
+        self.assertEqual(report["schema_version"], "technical-alpha-feasibility-report.v3")
         self.assertEqual(report["terminal_status"], "ALPHA_FEASIBILITY_GO_CANDIDATE")
         self.assertEqual(
             report["valid_candidate_count_by_decision"], {"2023-01-03": 1199}
@@ -315,6 +347,8 @@ class AlphaFeasibilityReportingTests(unittest.TestCase):
         self.assertEqual(
             report["insufficient_history_count_by_decision"], {"2023-01-03": 1}
         )
+        self.assertEqual(report["ineligible_no_initial_price_count"], 1)
+        self.assertEqual(report["first_index_weight"], _first_index_weight())
         self.assertEqual(report["unexplained_market_data_gap_count"], 0)
         self.assertEqual(report["stock_basic_request_count"], 0)
         for split in ("development_metrics", "validation_metrics"):
@@ -324,6 +358,147 @@ class AlphaFeasibilityReportingTests(unittest.TestCase):
         self.assertIs(report["safety"]["trade_eligibility"], False)
         self.assertEqual(report["safety"]["execution_realism"], "INCOMPLETE")
         reporting.verify_alpha_feasibility_report(report, experiment=self.experiment)
+
+    def test_completed_report_accepts_extra_or_reordered_provider_fields(self) -> None:
+        cases = (
+            (
+                [
+                    "index_code",
+                    "index_name",
+                    "con_code",
+                    "trade_date",
+                    "weight",
+                ],
+                True,
+            ),
+            (
+                [
+                    "trade_date",
+                    "index_name",
+                    "weight",
+                    "con_code",
+                    "index_code",
+                ],
+                False,
+            ),
+        )
+        for observed, order_matches in cases:
+            with self.subTest(observed=observed):
+                data = _complete_data()
+                evidence = copy.deepcopy(data["first_index_weight"])
+                evidence.update(
+                    {
+                        "observed_data_fields": observed,
+                        "extra_data_fields": ["index_name"],
+                        "field_order_matches_canonical": order_matches,
+                    }
+                )
+                data["first_index_weight"] = evidence
+                report = reporting.build_completed_alpha_feasibility_report(
+                    commit_sha=COMMIT_SHA,
+                    data_summary=data,
+                    development_metrics=_development(),
+                    validation_metrics=_validation(),
+                    experiment=self.experiment,
+                    generated_at=GENERATED_AT,
+                )
+                self.assertEqual(
+                    report["first_index_weight"]["extra_data_fields"],
+                    ["index_name"],
+                )
+                reporting.verify_alpha_feasibility_report(
+                    report,
+                    experiment=self.experiment,
+                )
+
+    def test_blocked_report_preserves_safe_invalid_field_placeholders(self) -> None:
+        data = _blocked_data()
+        data["data_status"] = "BLOCKED_ADAPTER_PROTOCOL"
+        data["remaining_blockers"] = ["data_field_name_invalid"]
+        data["first_index_weight"] = {
+            "observed_data_fields": ["sha256:" + "a" * 64, "type:string"],
+            "required_data_fields": [
+                "index_code",
+                "con_code",
+                "trade_date",
+                "weight",
+            ],
+            "missing_required_data_fields": [
+                "index_code",
+                "con_code",
+                "trade_date",
+                "weight",
+            ],
+            "extra_data_fields": [],
+            "field_order_matches_canonical": False,
+            "data_row_count": 0,
+            "provider_payload_sha256": None,
+            "normalized_content_sha256": None,
+        }
+        report = reporting.build_blocked_alpha_feasibility_report(
+            commit_sha=COMMIT_SHA,
+            data_summary=data,
+            experiment=self.experiment,
+            generated_at=GENERATED_AT,
+        )
+        self.assertEqual(
+            report["first_index_weight"]["observed_data_fields"],
+            ["sha256:" + "a" * 64, "type:string"],
+        )
+        reporting.verify_alpha_feasibility_report(
+            report,
+            experiment=self.experiment,
+        )
+
+        parser_like = copy.deepcopy(data)
+        parser_like["first_index_weight"] = {
+            "observed_data_fields": [
+                "index_code",
+                "con_code",
+                "trade_date",
+                "weight",
+                "sha256:" + "b" * 64,
+            ],
+            "required_data_fields": [
+                "index_code",
+                "con_code",
+                "trade_date",
+                "weight",
+            ],
+            "missing_required_data_fields": [],
+            "extra_data_fields": [],
+            "field_order_matches_canonical": True,
+            "data_row_count": 1,
+            "provider_payload_sha256": "c" * 64,
+            "normalized_content_sha256": None,
+        }
+        parser_like_report = reporting.build_blocked_alpha_feasibility_report(
+            commit_sha=COMMIT_SHA,
+            data_summary=parser_like,
+            experiment=self.experiment,
+            generated_at=GENERATED_AT,
+        )
+        self.assertTrue(
+            parser_like_report["first_index_weight"][
+                "field_order_matches_canonical"
+            ]
+        )
+        reporting.verify_alpha_feasibility_report(
+            parser_like_report,
+            experiment=self.experiment,
+        )
+
+        unsafe = copy.deepcopy(data)
+        unsafe["first_index_weight"]["observed_data_fields"] = [
+            "unsafe token-shaped field"
+        ]
+        with self.assertRaises(reporting.AlphaFeasibilityReportingError):
+            reporting.build_blocked_alpha_feasibility_report(
+                commit_sha=COMMIT_SHA,
+                data_summary=unsafe,
+                experiment=self.experiment,
+                generated_at=GENERATED_AT,
+            )
 
     def test_concentration_is_worst_validation_base_or_stress(self) -> None:
         report = self._completed()
@@ -458,7 +633,7 @@ class AlphaFeasibilityReportingTests(unittest.TestCase):
                 with self.assertRaises(reporting.AlphaFeasibilityReportingError):
                     build(data)
 
-    def test_v2_fixed_fields_and_decision_maps_have_strict_contracts(self) -> None:
+    def test_v3_fixed_fields_and_decision_maps_have_strict_contracts(self) -> None:
         def build(data: dict[str, object]) -> None:
             reporting.build_completed_alpha_feasibility_report(
                 commit_sha=COMMIT_SHA,
@@ -533,6 +708,28 @@ class AlphaFeasibilityReportingTests(unittest.TestCase):
             ),
             "gap_negative": lambda data: data.__setitem__(
                 "unexplained_market_data_gap_count", -1
+            ),
+            "no_initial_missing": lambda data: data.pop(
+                "ineligible_no_initial_price_count"
+            ),
+            "no_initial_bool": lambda data: data.__setitem__(
+                "ineligible_no_initial_price_count", False
+            ),
+            "no_initial_float": lambda data: data.__setitem__(
+                "ineligible_no_initial_price_count", 1.0
+            ),
+            "no_initial_negative": lambda data: data.__setitem__(
+                "ineligible_no_initial_price_count", -1
+            ),
+            "first_missing": lambda data: data.pop("first_index_weight"),
+            "first_order_drift": lambda data: data["first_index_weight"].__setitem__(
+                "field_order_matches_canonical", False
+            ),
+            "first_extra_inconsistent": lambda data: data[
+                "first_index_weight"
+            ].__setitem__("extra_data_fields", ["index_name"]),
+            "first_row_bool": lambda data: data["first_index_weight"].__setitem__(
+                "data_row_count", True
             ),
         }
         for name, mutate in mutations.items():

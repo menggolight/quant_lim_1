@@ -53,17 +53,26 @@ ABSOLUTE_CUTOFF = date(2023, 12, 31)
 PLAN_SCHEMA_VERSION = "tushare-alpha-feasibility-plan.v2"
 TASK_SCHEMA_VERSION = "tushare-alpha-feasibility-task.v1"
 STARTED_SCHEMA_VERSION = "tushare-alpha-feasibility-task-started.v1"
-RESPONSE_SCHEMA_VERSION = "tushare-alpha-feasibility-task-response.v3"
-LEGACY_RESPONSE_SCHEMA_VERSION = "tushare-alpha-feasibility-task-response.v2"
-QUARANTINE_SCHEMA_VERSION = "tushare-alpha-feasibility-quarantine.v3"
+RESPONSE_SCHEMA_VERSION = "tushare-alpha-feasibility-task-response.v4"
+LEGACY_RESPONSE_SCHEMA_VERSIONS = frozenset(
+    {
+        "tushare-alpha-feasibility-task-response.v2",
+        "tushare-alpha-feasibility-task-response.v3",
+    }
+)
+QUARANTINE_SCHEMA_VERSION = "tushare-alpha-feasibility-quarantine.v4"
 PIT_REPORT_SCHEMA_VERSION = "pit-membership-coverage-report.v1"
 PIT_MANIFEST_SCHEMA_VERSION = "pit-membership-manifest.v1"
-HISTORY_MANIFEST_SCHEMA_VERSION = "tushare-alpha-feasibility-manifest.v2"
+HISTORY_COVERAGE_SCHEMA_VERSION = "tushare-alpha-feasibility-history-coverage.v2"
+HISTORY_MANIFEST_SCHEMA_VERSION = "tushare-alpha-feasibility-manifest.v3"
+HISTORY_MANIFEST_SCHEMA_PATH = (
+    REPOSITORY_ROOT / "schemas" / "tushare_alpha_feasibility_manifest.v3.json"
+)
 RESPONSE_SCHEMA_PATH = (
-    REPOSITORY_ROOT / "schemas" / "tushare_alpha_feasibility_task_response.v3.json"
+    REPOSITORY_ROOT / "schemas" / "tushare_alpha_feasibility_task_response.v4.json"
 )
 QUARANTINE_SCHEMA_PATH = (
-    REPOSITORY_ROOT / "schemas" / "tushare_alpha_feasibility_quarantine.v3.json"
+    REPOSITORY_ROOT / "schemas" / "tushare_alpha_feasibility_quarantine.v4.json"
 )
 
 ALLOWED_ENDPOINTS = (
@@ -146,6 +155,7 @@ _TS_CODE = re.compile(r"^\d{6}\.(?:SH|SZ|BJ)$")
 _PIT_COMPONENT_CODE = re.compile(r"^\d{6}\.(?:SH|SZ)$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_TASK_ID = re.compile(r"^[a-z_]+-[0-9a-f]{64}$")
+_SAFE_DATA_FIELD_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
 _FORBIDDEN_PARAM_KEY = re.compile(
     r"(?:token|secret|password|cookie|credential|authorization|account|order)",
     re.IGNORECASE,
@@ -175,6 +185,12 @@ ADAPTER_PROTOCOL_FAILURES = frozenset(
         "transport_extensions_too_deep",
         "transport_extension_secret_detected",
         "data_payload_invalid",
+        "data_fields_not_array",
+        "data_field_name_invalid",
+        "data_duplicate_fields",
+        "data_required_fields_missing",
+        "data_item_width_mismatch",
+        "data_required_value_invalid",
         "unknown_non_json_value",
     }
 )
@@ -1323,7 +1339,7 @@ def _row_sort_key(endpoint: str, row: Mapping[str, Any]) -> tuple[Any, ...]:
     if endpoint == "trade_cal":
         return row["cal_date"], row["exchange"]
     if endpoint == "index_weight":
-        return row["trade_date"], row["con_code"]
+        return row["index_code"], row["trade_date"], row["con_code"]
     if endpoint == "stock_basic":
         return (row["ts_code"],)
     return row["trade_date"], row["ts_code"]
@@ -1344,6 +1360,14 @@ class ValidatedResponse:
     response_byte_count: int
     isolated_future_delist_date_count: int
     isolated_non_union_row_count: int
+    observed_data_fields: tuple[str, ...]
+    required_data_fields: tuple[str, ...]
+    missing_required_data_fields: tuple[str, ...]
+    extra_data_fields: tuple[str, ...]
+    field_order_matches_canonical: bool
+    provider_payload_sha256: str
+    extra_data_field_value_sha256_by_field: Mapping[str, str]
+    data_row_count: int
 
     @property
     def accepted_root_fields(self) -> tuple[str, ...]:
@@ -1372,6 +1396,96 @@ def _normalized_content_sha256(
             "items": [[row[field] for field in task.fields] for row in rows],
         }
     )
+
+
+def _provider_payload_sha256(fields: Sequence[str], items: Sequence[Any]) -> str:
+    """Bind the provider's semantic table payload without transport metadata."""
+
+    try:
+        encoded = _canonical_transport_json_bytes(
+            {"fields": list(fields), "items": list(items)}
+        )
+    except (AlphaFeasibilityDataError, RecursionError) as exc:
+        raise AlphaFeasibilityDataError("data_required_value_invalid") from exc
+    return hashlib.sha256(encoded).hexdigest()
+
+
+def _extra_data_field_value_hashes(
+    fields: Sequence[str],
+    items: Sequence[Sequence[Any]],
+    extra_fields: Sequence[str],
+) -> Mapping[str, str]:
+    positions = {field: index for index, field in enumerate(fields)}
+    hashes: dict[str, str] = {}
+    try:
+        for field in extra_fields:
+            payload = {
+                "field": field,
+                "values": [item[positions[field]] for item in items],
+            }
+            hashes[field] = hashlib.sha256(
+                _canonical_transport_json_bytes(payload)
+            ).hexdigest()
+    except (AlphaFeasibilityDataError, RecursionError) as exc:
+        raise AlphaFeasibilityDataError("data_required_value_invalid") from exc
+    return MappingProxyType(hashes)
+
+
+def _safe_diagnostic_data_field(value: Any) -> str:
+    if (
+        type(value) is str
+        and _SAFE_DATA_FIELD_NAME.fullmatch(value) is not None
+        and _SECRET_TRANSPORT_KEY.search(value) is None
+    ):
+        return value
+    if type(value) is str:
+        return "sha256:" + hashlib.sha256(value.encode("utf-8")).hexdigest()
+    try:
+        return "type:" + _transport_json_type(value)
+    except AlphaFeasibilityDataError:
+        return "type:unknown"
+
+
+def _validated_data_evidence(value: Mapping[str, Any], task: CollectionTask) -> None:
+    """Reject re-signed response artifacts whose field evidence is inconsistent."""
+
+    observed = value.get("observed_data_fields")
+    required = value.get("required_data_fields")
+    missing = value.get("missing_required_data_fields")
+    extra = value.get("extra_data_fields")
+    extra_hashes = value.get("extra_data_field_value_sha256_by_field")
+    if (
+        not isinstance(observed, list)
+        or any(
+            type(field) is not str
+            or _SAFE_DATA_FIELD_NAME.fullmatch(field) is None
+            or _SECRET_TRANSPORT_KEY.search(field) is not None
+            for field in observed
+        )
+        or len(observed) != len(set(observed))
+        or not set(task.fields).issubset(observed)
+        or required != list(task.fields)
+        or missing != []
+        or not isinstance(extra, list)
+        or extra != [field for field in observed if field not in set(task.fields)]
+        or any(field in task.fields for field in extra)
+        or type(value.get("field_order_matches_canonical")) is not bool
+        or value["field_order_matches_canonical"]
+        != (tuple(field for field in observed if field in set(task.fields)) == task.fields)
+        or type(value.get("provider_payload_sha256")) is not str
+        or _SHA256.fullmatch(value["provider_payload_sha256"]) is None
+        or not isinstance(extra_hashes, Mapping)
+        or set(extra_hashes) != set(extra)
+        or any(
+            type(digest) is not str or _SHA256.fullmatch(digest) is None
+            for digest in extra_hashes.values()
+        )
+        or type(value.get("data_row_count")) is not int
+        or value["data_row_count"] < 0
+        or value["data_row_count"]
+        != value.get("row_count", -1) + value.get("isolated_non_union_row_count", -1)
+    ):
+        raise AlphaFeasibilityDataError("response_artifact_data_evidence_mismatch")
 
 
 def _safe_diagnostic_root_field(value: str) -> str:
@@ -1542,21 +1656,82 @@ def validate_response_bytes(
             diagnostic={**diagnostic, "data_failure_category": exc.code},
         ) from exc
 
+    required_fields = task.fields
+    required_set = set(required_fields)
+    data_evidence: dict[str, Any] = {
+        "observed_data_fields": [],
+        "required_data_fields": list(required_fields),
+        "missing_required_data_fields": list(required_fields),
+        "extra_data_fields": [],
+        "field_order_matches_canonical": False,
+        "provider_payload_sha256": None,
+        "normalized_content_sha256": None,
+        "extra_data_field_value_sha256_by_field": {},
+        "data_row_count": 0,
+    }
     try:
-        if set(data) != {"fields", "items"}:
-            raise AlphaFeasibilityDataError("response_data_fields_differ_from_contract")
-        fields = data["fields"]
-        items = data["items"]
-        if (
-            not isinstance(fields, list)
-            or any(type(field) is not str for field in fields)
-            or len(fields) != len(set(fields))
-        ):
-            raise AlphaFeasibilityDataError("response_fields_not_unique_string_array")
-        if tuple(fields) != task.fields:
-            raise AlphaFeasibilityDataError("response_fields_differ_from_contract")
+        fields = data.get("fields")
+        items = data.get("items")
+        if isinstance(items, list):
+            data_evidence["data_row_count"] = len(items)
+        if not isinstance(fields, list):
+            raise AlphaFeasibilityDataError("data_fields_not_array")
+        data_evidence["observed_data_fields"] = [
+            _safe_diagnostic_data_field(field) for field in fields
+        ]
+        safe_field_names = [
+            field
+            for field in fields
+            if type(field) is str
+            and _SAFE_DATA_FIELD_NAME.fullmatch(field) is not None
+            and _SECRET_TRANSPORT_KEY.search(field) is None
+        ]
+        data_evidence["missing_required_data_fields"] = [
+            field for field in required_fields if field not in safe_field_names
+        ]
+        data_evidence["extra_data_fields"] = list(
+            dict.fromkeys(field for field in safe_field_names if field not in required_set)
+        )
+        # The diagnostic is only about the relative order of recognizable
+        # required fields.  An unsafe extra field is represented by a safe
+        # hash/type placeholder, but must not make an otherwise canonical
+        # required-field order disagree with the reporting boundary.
+        data_evidence["field_order_matches_canonical"] = (
+            tuple(field for field in safe_field_names if field in required_set)
+            == required_fields
+        )
+        if isinstance(items, list):
+            data_evidence["provider_payload_sha256"] = _provider_payload_sha256(
+                fields, items
+            )
+        if len(safe_field_names) != len(fields):
+            raise AlphaFeasibilityDataError("data_field_name_invalid")
+        if len(fields) != len(set(fields)):
+            raise AlphaFeasibilityDataError("data_duplicate_fields")
+        if data_evidence["missing_required_data_fields"]:
+            raise AlphaFeasibilityDataError("data_required_fields_missing")
         if not isinstance(items, list):
-            raise AlphaFeasibilityDataError("response_items_not_array")
+            raise AlphaFeasibilityDataError("data_item_width_mismatch")
+        for item in items:
+            if not isinstance(item, list) or len(item) != len(fields):
+                raise AlphaFeasibilityDataError("data_item_width_mismatch")
+        data_evidence["extra_data_field_value_sha256_by_field"] = dict(
+            _extra_data_field_value_hashes(
+                fields,
+                items,
+                data_evidence["extra_data_fields"],
+            )
+        )
+
+        data_extensions = set(data) - {"fields", "items"}
+        if data_extensions - {"has_more"}:
+            raise AlphaFeasibilityDataError("data_required_value_invalid")
+        if "has_more" in data:
+            if type(data["has_more"]) is not bool:
+                raise AlphaFeasibilityDataError("data_required_value_invalid")
+            if data["has_more"]:
+                raise AlphaFeasibilityDataError("potential_upstream_truncation")
+
         _reject_response_post_cutoff_dates(task, root)
         if len(items) >= POTENTIAL_TRUNCATION_LIMIT[task.endpoint]:
             raise AlphaFeasibilityDataError("potential_upstream_truncation")
@@ -1565,9 +1740,14 @@ def validate_response_bytes(
         isolated_non_union = 0
         keys: set[tuple[Any, ...]] = set()
         for item in items:
-            if not isinstance(item, list) or len(item) != len(fields):
-                raise AlphaFeasibilityDataError("response_row_shape_invalid")
-            row, row_isolated = _normalize_response_row(task, dict(zip(fields, item)))
+            observed_row = dict(zip(fields, item))
+            projected_row = {
+                field: observed_row[field] for field in required_fields
+            }
+            try:
+                row, row_isolated = _normalize_response_row(task, projected_row)
+            except AlphaFeasibilityDataError as exc:
+                raise AlphaFeasibilityDataError("data_required_value_invalid") from exc
             isolated += row_isolated
             if row is None:
                 isolated_non_union += 1
@@ -1578,17 +1758,23 @@ def validate_response_bytes(
             keys.add(key)
             normalized.append(MappingProxyType(row))
     except AlphaFeasibilityDataError as exc:
-        data_diagnostic = {**diagnostic, "data_failure_category": exc.code}
+        data_diagnostic = {
+            **diagnostic,
+            **data_evidence,
+            "data_failure_category": exc.code,
+        }
         raise AlphaFeasibilityDataError(
             "data_payload_invalid",
             diagnostic=data_diagnostic,
         ) from exc
     normalized.sort(key=lambda row: _row_sort_key(task.endpoint, row))
     normalized_rows = [dict(row) for row in normalized]
+    normalized_content_sha256 = _normalized_content_sha256(task, normalized_rows)
+    data_evidence["normalized_content_sha256"] = normalized_content_sha256
     return ValidatedResponse(
         rows=tuple(normalized),
         raw_response_sha256=raw_sha,
-        normalized_content_sha256=_normalized_content_sha256(task, normalized_rows),
+        normalized_content_sha256=normalized_content_sha256,
         observed_root_fields=tuple(sorted(observed)),
         semantic_core_fields=tuple(sorted(REQUIRED_RESPONSE_ROOT_FIELDS)),
         transport_extension_field_names=extension_metadata.field_names,
@@ -1601,6 +1787,18 @@ def validate_response_bytes(
         response_byte_count=len(raw),
         isolated_future_delist_date_count=isolated,
         isolated_non_union_row_count=isolated_non_union,
+        observed_data_fields=tuple(fields),
+        required_data_fields=required_fields,
+        missing_required_data_fields=(),
+        extra_data_fields=tuple(data_evidence["extra_data_fields"]),
+        field_order_matches_canonical=bool(
+            data_evidence["field_order_matches_canonical"]
+        ),
+        provider_payload_sha256=str(data_evidence["provider_payload_sha256"]),
+        extra_data_field_value_sha256_by_field=MappingProxyType(
+            dict(data_evidence["extra_data_field_value_sha256_by_field"])
+        ),
+        data_row_count=int(data_evidence["data_row_count"]),
     )
 
 
@@ -1675,6 +1873,14 @@ class TaskExecutionResult:
     wire_response_sha256: str
     response_artifact_sha256: str
     transport_receipt: Mapping[str, Any]
+    observed_data_fields: tuple[str, ...] = ()
+    required_data_fields: tuple[str, ...] = ()
+    missing_required_data_fields: tuple[str, ...] = ()
+    extra_data_fields: tuple[str, ...] = ()
+    field_order_matches_canonical: bool = False
+    provider_payload_sha256: str | None = None
+    extra_data_field_value_sha256_by_field: Mapping[str, str] | None = None
+    data_row_count: int = 0
 
     @property
     def raw_transport_sha256(self) -> str:
@@ -1886,12 +2092,24 @@ class CreateOnlyTaskStore:
             "locked_test_consumed",
             "response_artifact_sha256",
         }
+        normalized_hash_keys = {"normalized_content_sha256"}
+        data_evidence_keys = {
+            "observed_data_fields",
+            "required_data_fields",
+            "missing_required_data_fields",
+            "extra_data_fields",
+            "field_order_matches_canonical",
+            "provider_payload_sha256",
+            "extra_data_field_value_sha256_by_field",
+            "data_row_count",
+        }
         response_schema = value.get("schema_version")
-        expected_keys_for_schema = (
-            expected_keys | {"normalized_content_sha256"}
-            if response_schema == RESPONSE_SCHEMA_VERSION
-            else expected_keys
-        )
+        if response_schema == RESPONSE_SCHEMA_VERSION:
+            expected_keys_for_schema = expected_keys | normalized_hash_keys | data_evidence_keys
+        elif response_schema == "tushare-alpha-feasibility-task-response.v3":
+            expected_keys_for_schema = expected_keys | normalized_hash_keys
+        else:
+            expected_keys_for_schema = expected_keys
         if set(value) != expected_keys_for_schema:
             raise AlphaFeasibilityDataError("response_artifact_fields_mismatch")
         if response_schema == RESPONSE_SCHEMA_VERSION:
@@ -1899,14 +2117,17 @@ class CreateOnlyTaskStore:
                 validate_json_schema(value, RESPONSE_SCHEMA_PATH)
             except SchemaValidationError as exc:
                 raise AlphaFeasibilityDataError("response_artifact_schema_invalid") from exc
+            _validated_data_evidence(value, task)
         transport_receipt = _validate_transport_receipt(value["transport_receipt"])
         receipt_is_legacy = "response_body_sha256" in transport_receipt
         receipt_wire_sha256 = transport_receipt[
             "response_body_sha256" if receipt_is_legacy else "raw_transport_sha256"
         ]
         if (
-            response_schema not in (RESPONSE_SCHEMA_VERSION, LEGACY_RESPONSE_SCHEMA_VERSION)
-            or receipt_is_legacy != (response_schema == LEGACY_RESPONSE_SCHEMA_VERSION)
+            response_schema
+            not in ({RESPONSE_SCHEMA_VERSION} | LEGACY_RESPONSE_SCHEMA_VERSIONS)
+            or receipt_is_legacy
+            != (response_schema == "tushare-alpha-feasibility-task-response.v2")
             or value["state"] != "RESPONSE_VALIDATED"
             or value["task_id"] != task.task_id
             or value["endpoint"] != task.endpoint
@@ -1927,7 +2148,11 @@ class CreateOnlyTaskStore:
             or value["row_count"] != len(value["rows"])
             or value["normalized_rows_sha256"] != canonical_sha256(value["rows"])
             or (
-                response_schema == RESPONSE_SCHEMA_VERSION
+                response_schema
+                in {
+                    RESPONSE_SCHEMA_VERSION,
+                    "tushare-alpha-feasibility-task-response.v3",
+                }
                 and value["normalized_content_sha256"]
                 != _normalized_content_sha256(task, value["rows"])
             )
@@ -1941,6 +2166,26 @@ class CreateOnlyTaskStore:
             or declared_response_hash != canonical_sha256(unsigned_response)
         ):
             raise AlphaFeasibilityDataError("response_artifact_hash_mismatch")
+        if response_schema == RESPONSE_SCHEMA_VERSION:
+            observed_data_fields = tuple(value["observed_data_fields"])
+            required_data_fields = tuple(value["required_data_fields"])
+            missing_required_data_fields = tuple(value["missing_required_data_fields"])
+            extra_data_fields = tuple(value["extra_data_fields"])
+            field_order_matches_canonical = value["field_order_matches_canonical"]
+            provider_payload_sha256 = value["provider_payload_sha256"]
+            extra_data_field_value_sha256_by_field = MappingProxyType(
+                dict(value["extra_data_field_value_sha256_by_field"])
+            )
+            data_row_count = value["data_row_count"]
+        else:
+            observed_data_fields = task.fields
+            required_data_fields = task.fields
+            missing_required_data_fields = ()
+            extra_data_fields = ()
+            field_order_matches_canonical = True
+            provider_payload_sha256 = None
+            extra_data_field_value_sha256_by_field = MappingProxyType({})
+            data_row_count = len(value["rows"])
         if value["raw_response_persisted"]:
             try:
                 persisted_raw = self.raw_path(task).read_bytes()
@@ -1961,6 +2206,23 @@ class CreateOnlyTaskStore:
             replay = validate_response_bytes(task, persisted_raw)
             if [dict(row) for row in replay.rows] != value["rows"]:
                 raise AlphaFeasibilityDataError("raw_response_replay_mismatch")
+            if response_schema == RESPONSE_SCHEMA_VERSION:
+                replay_evidence = {
+                    "observed_data_fields": list(replay.observed_data_fields),
+                    "required_data_fields": list(replay.required_data_fields),
+                    "missing_required_data_fields": list(
+                        replay.missing_required_data_fields
+                    ),
+                    "extra_data_fields": list(replay.extra_data_fields),
+                    "field_order_matches_canonical": replay.field_order_matches_canonical,
+                    "provider_payload_sha256": replay.provider_payload_sha256,
+                    "extra_data_field_value_sha256_by_field": dict(
+                        replay.extra_data_field_value_sha256_by_field
+                    ),
+                    "data_row_count": replay.data_row_count,
+                }
+                if any(value[key] != replay_evidence[key] for key in data_evidence_keys):
+                    raise AlphaFeasibilityDataError("raw_response_data_evidence_mismatch")
         else:
             if self.raw_path(task).exists():
                 raise AlphaFeasibilityDataError("unexpected_raw_response_artifact")
@@ -1988,6 +2250,16 @@ class CreateOnlyTaskStore:
             wire_response_sha256=value["wire_response_sha256"],
             response_artifact_sha256=value["response_artifact_sha256"],
             transport_receipt=transport_receipt,
+            observed_data_fields=observed_data_fields,
+            required_data_fields=required_data_fields,
+            missing_required_data_fields=missing_required_data_fields,
+            extra_data_fields=extra_data_fields,
+            field_order_matches_canonical=field_order_matches_canonical,
+            provider_payload_sha256=provider_payload_sha256,
+            extra_data_field_value_sha256_by_field=(
+                extra_data_field_value_sha256_by_field
+            ),
+            data_row_count=data_row_count,
         )
 
     def execute(
@@ -2060,17 +2332,22 @@ class CreateOnlyTaskStore:
                 # values do not enter ordinary replay evidence. ``stock_basic``
                 # also removes non-union/future metadata under its existing
                 # field-aware isolation rule.
-                persisted_response = canonical_json_bytes(
-                    {
-                        "code": 0,
-                        "msg": None,
-                        "data": {
-                            "fields": list(task.fields),
-                            "items": [
-                                [row[field] for field in task.fields] for row in rows
-                            ],
-                        },
-                    }
+                parsed_root = _require_mapping(
+                    strict_json_loads(raw, label="response"),
+                    "semantic_core_type_invalid",
+                )
+                parsed_data = _require_mapping(
+                    parsed_root.get("data"),
+                    "semantic_core_type_invalid",
+                )
+                persisted_data = {
+                    "fields": parsed_data["fields"],
+                    "items": parsed_data["items"],
+                }
+                if "has_more" in parsed_data:
+                    persisted_data["has_more"] = parsed_data["has_more"]
+                persisted_response = _canonical_transport_json_bytes(
+                    {"code": 0, "msg": None, "data": persisted_data}
                 )
             _guard_artifact_secret(persisted_response, token)
             _write_create_only(self.raw_path(task), persisted_response)
@@ -2105,6 +2382,20 @@ class CreateOnlyTaskStore:
                 "raw_response_persisted": True,
                 "normalized_rows_sha256": canonical_sha256(rows),
                 "normalized_content_sha256": validated.normalized_content_sha256,
+                "observed_data_fields": list(validated.observed_data_fields),
+                "required_data_fields": list(validated.required_data_fields),
+                "missing_required_data_fields": list(
+                    validated.missing_required_data_fields
+                ),
+                "extra_data_fields": list(validated.extra_data_fields),
+                "field_order_matches_canonical": (
+                    validated.field_order_matches_canonical
+                ),
+                "provider_payload_sha256": validated.provider_payload_sha256,
+                "extra_data_field_value_sha256_by_field": dict(
+                    validated.extra_data_field_value_sha256_by_field
+                ),
+                "data_row_count": validated.data_row_count,
                 "row_count": len(rows),
                 "isolated_future_delist_date_count": validated.isolated_future_delist_date_count,
                 "isolated_non_union_row_count": validated.isolated_non_union_row_count,
@@ -2129,6 +2420,18 @@ class CreateOnlyTaskStore:
                 wire_response_sha256=validated.raw_response_sha256,
                 response_artifact_sha256=response["response_artifact_sha256"],
                 transport_receipt=MappingProxyType(dict(transport_receipt)),
+                observed_data_fields=validated.observed_data_fields,
+                required_data_fields=validated.required_data_fields,
+                missing_required_data_fields=validated.missing_required_data_fields,
+                extra_data_fields=validated.extra_data_fields,
+                field_order_matches_canonical=(
+                    validated.field_order_matches_canonical
+                ),
+                provider_payload_sha256=validated.provider_payload_sha256,
+                extra_data_field_value_sha256_by_field=(
+                    validated.extra_data_field_value_sha256_by_field
+                ),
+                data_row_count=validated.data_row_count,
             )
         except Exception as exc:
             code = exc.code if isinstance(exc, AlphaFeasibilityDataError) else "unclassified_task_failure"
@@ -2188,6 +2491,57 @@ class CreateOnlyTaskStore:
                     "upstream_error_category"
                 ),
                 "data_failure_category": diagnostic.get("data_failure_category"),
+                "observed_data_fields": diagnostic.get(
+                    "observed_data_fields",
+                    list(validated.observed_data_fields) if validated is not None else [],
+                ),
+                "required_data_fields": diagnostic.get(
+                    "required_data_fields", list(task.fields)
+                ),
+                "missing_required_data_fields": diagnostic.get(
+                    "missing_required_data_fields",
+                    (
+                        list(validated.missing_required_data_fields)
+                        if validated is not None
+                        else list(task.fields)
+                    ),
+                ),
+                "extra_data_fields": diagnostic.get(
+                    "extra_data_fields",
+                    list(validated.extra_data_fields) if validated is not None else [],
+                ),
+                "field_order_matches_canonical": diagnostic.get(
+                    "field_order_matches_canonical",
+                    (
+                        validated.field_order_matches_canonical
+                        if validated is not None
+                        else False
+                    ),
+                ),
+                "provider_payload_sha256": diagnostic.get(
+                    "provider_payload_sha256",
+                    validated.provider_payload_sha256 if validated is not None else None,
+                ),
+                "normalized_content_sha256": diagnostic.get(
+                    "normalized_content_sha256",
+                    (
+                        validated.normalized_content_sha256
+                        if validated is not None
+                        else None
+                    ),
+                ),
+                "extra_data_field_value_sha256_by_field": diagnostic.get(
+                    "extra_data_field_value_sha256_by_field",
+                    (
+                        dict(validated.extra_data_field_value_sha256_by_field)
+                        if validated is not None
+                        else {}
+                    ),
+                ),
+                "data_row_count": diagnostic.get(
+                    "data_row_count",
+                    validated.data_row_count if validated is not None else 0,
+                ),
                 "token_leak_check": diagnostic.get(
                     "token_leak_check", token_leak_check
                 ),
@@ -2787,7 +3141,7 @@ def validate_history_coverage(
     if not required.issubset(rows_by_endpoint):
         missing = sorted(required - set(rows_by_endpoint))
         report = {
-            "schema_version": "tushare-alpha-feasibility-history-coverage.v1",
+            "schema_version": HISTORY_COVERAGE_SCHEMA_VERSION,
             "generated_at": _generated_at(generated_at),
             "stage_status": "BLOCKED_DATA",
             "coverage_start": plan.config["dates"]["signal_warmup_start"],
@@ -2802,6 +3156,7 @@ def validate_history_coverage(
             "history_eligibility_status": INSUFFICIENT_HISTORY_STATUS,
             "valid_candidate_count_by_decision": {},
             "insufficient_history_count_by_decision": {},
+            "ineligible_no_initial_price_count": 0,
             "unexplained_market_data_gap_count": 0,
             "blockers": [{"reason": "missing_endpoint_artifacts", "endpoints": missing}],
             "locked_test_status": dict(LOCKED_TEST_STATUS),
@@ -2925,7 +3280,11 @@ def validate_history_coverage(
     adj_by_code: dict[str, list[tuple[date, Decimal]]] = {code: [] for code in union}
     try:
         daily_index = _unique_rows("daily", rows_by_endpoint["daily"])
-        if {key[0] for key in daily_index} != union_set:
+        # A PIT member can legitimately have no daily row yet when its first
+        # inclusion is a full-session suspension with no initial price.  Such
+        # members are concluded below as ``ineligible_no_initial_price``.
+        # Rows outside the PIT union remain a hard scope mismatch.
+        if not {key[0] for key in daily_index}.issubset(union_set):
             raise AlphaFeasibilityDataError("index_weight_daily_code_mismatch")
         if any(key[1] not in set(open_dates) for key in daily_index):
             raise AlphaFeasibilityDataError("daily_row_not_on_open_session")
@@ -2972,6 +3331,7 @@ def validate_history_coverage(
     unexplained_missing: set[tuple[str, str]] = set()
     valid_candidate_count_by_decision: dict[str, int] = {}
     insufficient_history_count_by_decision: dict[str, int] = {}
+    ineligible_no_initial_price_count = 0
     if (
         open_dates
         and snapshot_members_by_date
@@ -3060,6 +3420,8 @@ def validate_history_coverage(
                 window_positions = range(window_start, decision_position + 1)
                 valid_count = 0
                 insufficient_count = 0
+                no_initial_price_count = 0
+                unresolved_count = 0
                 for code in members:
                     decision_key = (code, _compact(decision_date))
                     if decision_key not in valid_signal_keys:
@@ -3071,6 +3433,11 @@ def validate_history_coverage(
                             )
                             and first_membership is not None
                             and decision_position >= first_membership
+                            and _is_full_session_suspension(
+                                suspend_index.get(
+                                    (code, open_dates[first_membership])
+                                )
+                            )
                             and (
                                 first_position is None
                                 or decision_position < first_position
@@ -3080,9 +3447,10 @@ def validate_history_coverage(
                             # no earlier economic value to freeze.  It is an
                             # individual history-ineligibility, not an
                             # unexplained non-suspension data gap.
-                            insufficient_count += 1
+                            no_initial_price_count += 1
                             continue
                         unexplained_missing.add(decision_key)
+                        unresolved_count += 1
                         continue
                     first_position = first_real_position.get(code)
                     has_gap = False
@@ -3115,6 +3483,7 @@ def validate_history_coverage(
                         unexplained_missing.add(key)
                         has_gap = True
                     if has_gap:
+                        unresolved_count += 1
                         continue
                     if (
                         len(window_positions)
@@ -3122,15 +3491,24 @@ def validate_history_coverage(
                         or has_pre_observation_prefix
                     ):
                         insufficient_count += 1
-                    elif not _is_full_session_suspension(
-                        suspend_index.get(decision_key)
-                    ):
+                    else:
                         valid_count += 1
+                if (
+                    valid_count
+                    + insufficient_count
+                    + no_initial_price_count
+                    + unresolved_count
+                    != len(members)
+                ):
+                    raise AlphaFeasibilityDataError(
+                        "pit_member_eligibility_conclusions_incomplete"
+                    )
                 decision_text = _iso(decision_date)
                 valid_candidate_count_by_decision[decision_text] = valid_count
                 insufficient_history_count_by_decision[
                     decision_text
                 ] = insufficient_count
+                ineligible_no_initial_price_count += no_initial_price_count
 
         except AlphaFeasibilityDataError as exc:
             blockers.append({"reason": exc.code})
@@ -3155,7 +3533,7 @@ def validate_history_coverage(
         )
     passed = not blockers
     report = {
-        "schema_version": "tushare-alpha-feasibility-history-coverage.v1",
+        "schema_version": HISTORY_COVERAGE_SCHEMA_VERSION,
         "experiment_id": plan.config["experiment_id"],
         "generated_at": _generated_at(generated_at),
         "stage_status": "PASS" if passed else "BLOCKED_DATA",
@@ -3175,6 +3553,7 @@ def validate_history_coverage(
         "insufficient_history_count_by_decision": (
             insufficient_history_count_by_decision
         ),
+        "ineligible_no_initial_price_count": ineligible_no_initial_price_count,
         "same_day_suspension_explained_missing_daily_count": len(
             explained_suspension_missing
         ),
@@ -3325,6 +3704,10 @@ def validate_history_coverage_from_store(
         )
         for key in decision_keys
     }
+    ineligible_no_initial_price_count = sum(
+        int(part.report.get("ineligible_no_initial_price_count", 0))
+        for part in partials
+    )
     if passed and not decision_keys:
         raise AlphaFeasibilityDataError("decision_history_counts_missing")
     if passed:
@@ -3337,7 +3720,7 @@ def validate_history_coverage_from_store(
             ) != expected_decision_keys:
                 raise AlphaFeasibilityDataError("decision_history_count_keys_mismatch")
     report = {
-        "schema_version": "tushare-alpha-feasibility-history-coverage.v1",
+        "schema_version": HISTORY_COVERAGE_SCHEMA_VERSION,
         "experiment_id": plan.config["experiment_id"],
         "generated_at": _generated_at(generated_at),
         "stage_status": "PASS" if passed else "BLOCKED_DATA",
@@ -3373,6 +3756,7 @@ def validate_history_coverage_from_store(
         "insufficient_history_count_by_decision": (
             insufficient_history_count_by_decision
         ),
+        "ineligible_no_initial_price_count": ineligible_no_initial_price_count,
         "same_day_suspension_explained_missing_daily_count": sum(
             int(part.report["same_day_suspension_explained_missing_daily_count"])
             for part in partials
@@ -3550,6 +3934,9 @@ def build_history_manifest(
             "insufficient_history_count_by_decision": dict(
                 coverage.report.get("insufficient_history_count_by_decision", {})
             ),
+            "ineligible_no_initial_price_count": int(
+                coverage.report.get("ineligible_no_initial_price_count", 0)
+            ),
             "unexplained_market_data_gap_count": int(
                 coverage.report.get("unexplained_market_data_gap_count", 0)
             ),
@@ -3706,6 +4093,9 @@ def build_history_manifest_from_store(
                         "insufficient_history_count_by_decision", {}
                     )
                 ),
+                "ineligible_no_initial_price_count": int(
+                    coverage.report.get("ineligible_no_initial_price_count", 0)
+                ),
                 "unexplained_market_data_gap_count": int(
                     coverage.report.get("unexplained_market_data_gap_count", 0)
                 ),
@@ -3795,7 +4185,7 @@ def build_total_return_panel(
     daily = _unique_rows("daily", daily_rows)
     suspensions = _unique_rows("suspend_d", suspension_rows)
     adj_index = _unique_rows("adj_factor", adj_factor_rows)
-    if {code for code, _trade_date in daily} != instrument_set:
+    if not {code for code, _trade_date in daily}.issubset(instrument_set):
         raise AlphaFeasibilityDataError("index_weight_daily_code_mismatch")
     if any(code not in instrument_set for code, _trade_date in suspensions):
         raise AlphaFeasibilityDataError("suspension_contains_non_panel_instrument")
@@ -3835,7 +4225,17 @@ def build_total_return_panel(
             if instrument == code
         ]
         if not real_dates:
-            raise AlphaFeasibilityDataError("index_weight_daily_code_mismatch")
+            has_full_session_suspension = any(
+                instrument == code and _is_full_session_suspension(row)
+                for (instrument, _trade_date), row in suspensions.items()
+            )
+            if not has_full_session_suspension:
+                raise AlphaFeasibilityDataError("index_weight_daily_code_mismatch")
+            # Do not manufacture a signal value for a member whose only
+            # observations are full-session suspensions before any price.
+            # The separate suspension evidence stream lets the engine emit
+            # ``ineligible_no_initial_price`` for each applicable decision.
+            continue
         first_real = max(start, min(real_dates))
         last_observed = min(end, max(observed_dates))
         factor_values = factors[code]
@@ -4076,6 +4476,56 @@ def _backfill_lineage(
     }
 
 
+def _public_data_failure_code(exc: AlphaFeasibilityDataError) -> str:
+    if exc.code == "data_payload_invalid":
+        category = exc.diagnostic.get("data_failure_category")
+        if type(category) is str and re.fullmatch(r"[a-z0-9_]{3,96}", category):
+            return category
+    return exc.code
+
+
+def _first_index_weight_summary(
+    plan: CollectionPlan,
+    store: CreateOnlyTaskStore,
+    *,
+    diagnostic: Mapping[str, Any] | None = None,
+) -> dict[str, Any]:
+    task = plan.pit_tasks[0]
+    result: TaskExecutionResult | None = None
+    if store.is_complete(task):
+        result = store._load_response(task)
+    if result is not None:
+        return {
+            "observed_data_fields": list(result.observed_data_fields),
+            "required_data_fields": list(result.required_data_fields or task.fields),
+            "missing_required_data_fields": list(
+                result.missing_required_data_fields
+            ),
+            "extra_data_fields": list(result.extra_data_fields),
+            "field_order_matches_canonical": result.field_order_matches_canonical,
+            "data_row_count": result.data_row_count,
+            "provider_payload_sha256": result.provider_payload_sha256,
+            "normalized_content_sha256": result.normalized_content_sha256,
+        }
+    safe = dict(diagnostic or {})
+    return {
+        "observed_data_fields": list(safe.get("observed_data_fields", [])),
+        "required_data_fields": list(
+            safe.get("required_data_fields", list(task.fields))
+        ),
+        "missing_required_data_fields": list(
+            safe.get("missing_required_data_fields", list(task.fields))
+        ),
+        "extra_data_fields": list(safe.get("extra_data_fields", [])),
+        "field_order_matches_canonical": bool(
+            safe.get("field_order_matches_canonical", False)
+        ),
+        "data_row_count": int(safe.get("data_row_count", 0)),
+        "provider_payload_sha256": safe.get("provider_payload_sha256"),
+        "normalized_content_sha256": safe.get("normalized_content_sha256"),
+    }
+
+
 def _blocked_summary(
     plan: CollectionPlan,
     output_root: Path,
@@ -4086,6 +4536,7 @@ def _blocked_summary(
     coverage: HistoryCoverageResult | None = None,
     history_manifest: Mapping[str, Any] | None = None,
     expected_tasks: Sequence[CollectionTask] | None = None,
+    first_index_weight: Mapping[str, Any] | None = None,
 ) -> dict[str, Any]:
     artifact_generated_at = (
         coverage.report.get("generated_at")
@@ -4114,6 +4565,10 @@ def _blocked_summary(
             expected_tasks,
             plan_sha256=plan.plan_sha256,
         ),
+        "first_index_weight": dict(
+            first_index_weight
+            or _first_index_weight_summary(plan, CreateOnlyTaskStore(output_root))
+        ),
         "stock_basic_status": STOCK_BASIC_STATUS,
         "stock_basic_request_count": STOCK_BASIC_REQUEST_COUNT,
         "security_master_pit_status": SECURITY_MASTER_PIT_STATUS,
@@ -4136,6 +4591,11 @@ def _blocked_summary(
             )
             if coverage
             else {}
+        ),
+        "ineligible_no_initial_price_count": (
+            int(coverage.report.get("ineligible_no_initial_price_count", 0))
+            if coverage
+            else 0
         ),
         "unexplained_market_data_gap_count": (
             int(coverage.report.get("unexplained_market_data_gap_count", 0))
@@ -4177,7 +4637,7 @@ def _blocked_history_coverage(
     generated_at: datetime,
 ) -> HistoryCoverageResult:
     report = {
-        "schema_version": "tushare-alpha-feasibility-history-coverage.v1",
+        "schema_version": HISTORY_COVERAGE_SCHEMA_VERSION,
         "experiment_id": plan.config["experiment_id"],
         "generated_at": _generated_at(generated_at),
         "stage_status": "BLOCKED_DATA",
@@ -4195,6 +4655,7 @@ def _blocked_history_coverage(
         "history_eligibility_status": INSUFFICIENT_HISTORY_STATUS,
         "valid_candidate_count_by_decision": {},
         "insufficient_history_count_by_decision": {},
+        "ineligible_no_initial_price_count": 0,
         "unexplained_market_data_gap_count": 0,
         "same_day_suspension_explained_missing_daily_count": 0,
         "non_suspension_missing_daily_count": 0,
@@ -4247,8 +4708,8 @@ def run_backfill(
     pit_result = _load_existing_pit_result(root, plan)
     if pit_result is None:
         try:
-            pit_executions = execute_tasks(
-                plan.pit_tasks,
+            first_pit_executions = execute_tasks(
+                plan.pit_tasks[:1],
                 store=store,
                 token=safe_token,
                 transport=active_transport,
@@ -4258,10 +4719,52 @@ def run_backfill(
                 sleeper=sleeper,
                 monotonic=monotonic,
             )
+            first_pit_probe = build_pit_membership_artifacts(
+                plan,
+                {first_pit_executions[0].task.task_id: first_pit_executions[0]},
+                adjustment_evidence=adjustment_evidence,
+                generated_at=timestamp,
+            )
+            first_month_check = first_pit_probe.coverage_report["monthly_checks"][0]
+            if first_month_check["status"] != "complete":
+                issues = first_month_check.get("issues", [])
+                blocker = (
+                    issues[0]
+                    if isinstance(issues, list)
+                    and issues
+                    and type(issues[0]) is str
+                    else "first_pit_month_invalid"
+                )
+                raise AlphaFeasibilityDataError(blocker, stage="pit")
+
+            # Splitting the first task into its own semantic/PIT gate must not
+            # weaken the configured inter-request spacing in the same process.
+            if (
+                len(plan.pit_tasks) > 1
+                and not first_pit_executions[0].replayed
+                and interval > 0
+            ):
+                sleeper(float(interval))
+            remaining_pit_executions = execute_tasks(
+                plan.pit_tasks[1:],
+                store=store,
+                token=safe_token,
+                transport=active_transport,
+                timeout_seconds=source["request_timeout_seconds"],
+                maximum_response_bytes=source["maximum_response_bytes"],
+                minimum_request_interval_seconds=interval,
+                sleeper=sleeper,
+                monotonic=monotonic,
+            )
+            pit_executions = (*first_pit_executions, *remaining_pit_executions)
             pit_results = {result.task.task_id: result for result in pit_executions}
         except AlphaFeasibilityDataError as exc:
             pit_results = _completed_results(store, plan.pit_tasks)
-            adapter_protocol_blocked = exc.code in ADAPTER_PROTOCOL_FAILURES
+            public_blocker = _public_data_failure_code(exc)
+            adapter_protocol_blocked = (
+                exc.code in ADAPTER_PROTOCOL_FAILURES
+                or public_blocker in ADAPTER_PROTOCOL_FAILURES
+            )
             pit_result = build_pit_membership_artifacts(
                 plan,
                 pit_results,
@@ -4282,9 +4785,12 @@ def run_backfill(
                     if adapter_protocol_blocked
                     else "BLOCKED_PIT_MEMBERSHIP"
                 ),
-                blocker=exc.code,
+                blocker=public_blocker,
                 pit_result=pit_result,
                 expected_tasks=plan.pit_tasks,
+                first_index_weight=_first_index_weight_summary(
+                    plan, store, diagnostic=exc.diagnostic
+                ),
             )
         pit_result = build_pit_membership_artifacts(
             plan,
@@ -4335,8 +4841,13 @@ def run_backfill(
             monotonic=monotonic,
         )
         blocker: str | None = None
+        adapter_protocol_blocked = False
     except AlphaFeasibilityDataError as exc:
-        blocker = exc.code
+        blocker = _public_data_failure_code(exc)
+        adapter_protocol_blocked = (
+            exc.code in ADAPTER_PROTOCOL_FAILURES
+            or blocker in ADAPTER_PROTOCOL_FAILURES
+        )
     if blocker is None:
         try:
             coverage = validate_history_coverage_from_store(
@@ -4349,6 +4860,7 @@ def run_backfill(
             )
         except AlphaFeasibilityDataError as exc:
             blocker = exc.code
+            adapter_protocol_blocked = False
             coverage = _blocked_history_coverage(
                 plan, len(pit_result.union_instruments), blocker, timestamp
             )
@@ -4376,7 +4888,7 @@ def run_backfill(
             root,
             stage_status=(
                 "BLOCKED_ADAPTER_PROTOCOL"
-                if blocker in ADAPTER_PROTOCOL_FAILURES
+                if adapter_protocol_blocked
                 else "BLOCKED_DATA"
             ),
             blocker=blocker or "history_coverage_incomplete",
@@ -4401,6 +4913,7 @@ def run_backfill(
             (*plan.pit_tasks, *history_tasks),
             plan_sha256=plan.plan_sha256,
         ),
+        "first_index_weight": _first_index_weight_summary(plan, store),
         "stock_basic_status": STOCK_BASIC_STATUS,
         "stock_basic_request_count": STOCK_BASIC_REQUEST_COUNT,
         "security_master_pit_status": SECURITY_MASTER_PIT_STATUS,
@@ -4415,6 +4928,9 @@ def run_backfill(
         ),
         "insufficient_history_count_by_decision": dict(
             coverage.report["insufficient_history_count_by_decision"]
+        ),
+        "ineligible_no_initial_price_count": int(
+            coverage.report["ineligible_no_initial_price_count"]
         ),
         "unexplained_market_data_gap_count": int(
             coverage.report["unexplained_market_data_gap_count"]
@@ -4473,10 +4989,12 @@ def load_feasibility_inputs(
     coverage_artifact = _load_json_object(
         root / "history_coverage_report.json", "history_coverage_unavailable"
     )
+    if coverage_artifact.get("schema_version") != HISTORY_COVERAGE_SCHEMA_VERSION:
+        raise AlphaFeasibilityDataError("history_coverage_schema_version_invalid")
     try:
         validate_json_schema(
             manifest,
-            Path(repository_root) / "schemas" / "tushare_alpha_feasibility_manifest.v2.json",
+            Path(repository_root) / "schemas" / HISTORY_MANIFEST_SCHEMA_PATH.name,
         )
     except SchemaValidationError as exc:
         raise AlphaFeasibilityDataError("history_manifest_schema_invalid") from exc
@@ -4565,11 +5083,16 @@ def load_feasibility_inputs(
     ]
 
     def suspension_records() -> Iterable[dict[str, Any]]:
-        for daily_task in by_endpoint["daily"]:
-            for row in panel_for_task(daily_task):
-                if row["is_suspended_carry"]:
+        # Preserve full-session evidence even before the first observable
+        # economic value.  The engine needs that evidence to conclude
+        # ``ineligible_no_initial_price`` without inventing a carry value.
+        for suspension_task in by_endpoint["suspend_d"]:
+            for row in store._load_response(suspension_task).rows:
+                if _is_full_session_suspension(row):
                     yield {
-                        "trading_date": row["trading_date"],
+                        "trading_date": _iso(
+                            _parse_date(row["trade_date"], "suspension_date")
+                        ),
                         "ts_code": row["ts_code"],
                         "instrument_id": row["ts_code"],
                         "suspend_type": "S",

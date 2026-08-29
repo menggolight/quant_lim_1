@@ -11,29 +11,31 @@
 
 ## 数据门
 
-标准入口先逐月请求 `000906.SH` 的 `2017-12..2023-12` 共73个 `index_weight` 窗口。每月必须存在合法截面、代码唯一、权重非负且权重和落在逐行末位精度推导的容差内。成分数不是800时，只有绑定中证指数公司正式证据、月份、截面日、实际数量、原因和源文件哈希的受控说明才可放行；否则阶段状态为 `BLOCKED_PIT_MEMBERSHIP`，最终状态为 `BLOCKED_DATA`，不会规划股票历史任务。
+标准入口先逐月请求 `000906.SH` 的 `2017-12..2023-12` 共73个 `index_weight` 窗口。唯一网络进程必须先单独完成2017-12首月的字段语义与PIT截面校验，只有首月通过才继续其余72个月，且不得重复首月请求。每月必须存在合法截面、代码唯一、权重非负且权重和落在逐行末位精度推导的容差内。成分数不是800时，只有绑定中证指数公司正式证据、月份、截面日、实际数量、原因和源文件哈希的受控说明才可放行；否则阶段状态为 `BLOCKED_PIT_MEMBERSHIP`，最终状态为 `BLOCKED_DATA`，不会规划股票历史任务。
 
 PIT 通过后，只对73个月合法截面的成员并集回填。每个决策日只能选择当日或之前最新合法 `index_weight` 截面；`con_code` 必须是沪深A股格式，并与 `daily.ts_code` 并集精确一致。不得用当前成分、`stock_basic` 或其他当前快照回填历史。所有请求在本地形成不含 Token 的参数指纹、started claim、规范化响应哈希和 create-only 产物；完整任务离线重放，已开始但没有持久化响应的远端调用按歧义失败关闭，不自动重发。上游响应或错误字段一旦出现 `2024-01-01` 及以后日期，在进入消费者前隔离且不保存原始正文。
 
 Tushare HTTP 根包络分为严格 `semantic_core` 与受控 `transport_extensions`。`semantic_core` 必须且只能按语义解释 `code/msg/data`：根必须是无重复key的JSON object，`code`必须是int且不接受bool，`msg`只能是string或null；`code=0`时`data`必须是object，`code!=0`时`data`只能是null或受控错误object。缺少核心字段或类型漂移一律失败关闭。非零`code`仍须按结构化code、msg和HTTP状态进入权限、限频、账户认证、参数、服务端或未知上游错误分类；扩展字段存在不能绕过非零`code`。
 
+成功响应的 `data` 必须包含 `fields/items`；仅额外允许类型严格为bool的 `has_more`，且只有 `false` 可放行，`true` 仍按潜在截断失败关闭。`data.fields` 是非空、唯一、安全字段名数组，字段顺序不承载业务语义。每行宽度必须与服务端实际 `fields` 一致，适配器先按服务端字段名和位置建行对象，再投影到请求契约的固定规范字段顺序；缺必需字段、重复字段、非法字段名、行宽错误或必需值非法均失败关闭，不按固定列位置解析。`index_weight` 的必需/规范字段固定为 `index_code/con_code/trade_date/weight`，规范化行按 `index_code/trade_date/con_code` 排序。服务端额外列允许存在，但只记录列名和逐列内容SHA-256，不进入规范化行、PIT成员、策略输入或内容哈希。
+
 除三项核心字段外的所有顶层字段统一进入 `transport_extensions`，不维护 `request_id/detail/...` 固定可选白名单。安全非空字段名及其合法JSON标量、数组或object可被接受，因此 `request_id`、string/object/array形态的`detail`和未来`trace_id`本身不会触发 `BLOCKED_ADAPTER_PROTOCOL`；但扩展及其嵌套key仍须通过控制字符、secret-like key、当前`TUSHARE_TOKEN`精确内容、非有限数和纯JSON类型检查。完整响应最多2 MiB，扩展规范化对象最多256 KiB，扩展最多64个根字段、4096个总元素、8层嵌套，单字符串最多65536字符。任何上限或secret检查失败都在解释上游错误前失败关闭。
 
-传输与内容身份分成三层：`raw_transport_sha256`绑定完整原始响应正文，`transport_extensions_sha256`绑定扩展规范化对象，`normalized_content_sha256`只绑定经严格`fields/items`和领域规则规范化后的data内容。相同data仅改变扩展时，前两层按实际字节/扩展变化，`normalized_content_sha256`及PIT截面内容身份必须保持不变；`request_id`、`detail`及未来扩展不得进入normalized rows、PIT manifest或Experiment内容哈希。
+传输与内容身份分成四层：`raw_transport_sha256`绑定完整原始响应正文，`transport_extensions_sha256`绑定扩展规范化对象，`provider_payload_sha256`绑定服务端实际 `fields/items`，`normalized_content_sha256`只绑定规范投影后的固定字段和领域规范值。相同业务数据只改变字段顺序，或只增加/改变额外列时，`provider_payload_sha256`按实际payload变化，`normalized_content_sha256`必须保持不变；`request_id`、`detail`、额外列及未来扩展不得进入normalized rows、PIT manifest或Experiment内容哈希。
 
-普通transport receipt只保存观察到的根字段、三项核心字段、扩展字段名/JSON类型/逐值SHA-256、扩展整体SHA-256与字节数、完整传输SHA-256及Token泄漏检查，不保存扩展原值。完整原始正文只有通过严格Token/secret扫描后才允许进入忽略Git的create-only原始证据目录；存在扩展时，普通重放证据使用剥离扩展后的规范化core/data包络。已封存的v2 `request_id`-only receipt只允许原位只读重放，不升级或改写；更旧或不匹配的receipt继续拒绝。quarantine同样只保存安全化元数据、稳定失败码和受控上游分类，不输出完整`detail`、request ID、Token、Authorization或Cookie。
+普通transport receipt只保存观察到的根字段、三项核心字段、扩展字段名/JSON类型/逐值SHA-256、扩展整体SHA-256与字节数、完整传输SHA-256及Token泄漏检查，不保存扩展原值。task response另绑定实际/必需/缺失/额外字段、规范顺序诊断、服务端payload哈希、额外列逐列哈希、规范内容哈希与行数；这些审计字段不能反向进入策略数据。完整原始正文只有通过严格Token/secret扫描后才允许进入忽略Git的create-only原始证据目录；存在扩展时，普通重放证据剥离根扩展但保留实际 `data.fields/items` 供字段证据复核。已封存的旧response/receipt只允许原位只读重放，不升级或改写。quarantine同样只保存安全化字段诊断、哈希、行数、稳定失败码和受控上游分类，不输出完整`detail`、request ID、Token、Authorization、Cookie或响应正文。
 
-适配器协议阻断稳定码固定为九类：`duplicate_json_key`、`semantic_core_missing`、`semantic_core_type_invalid`、`response_body_too_large`、`transport_extensions_too_large`、`transport_extensions_too_deep`、`transport_extension_secret_detected`、`data_payload_invalid`、`unknown_non_json_value`。`upstream_permission_error`、`upstream_rate_limit_error`、`upstream_authentication_account_error`、`upstream_invalid_parameter_error`、`upstream_server_internal_error`和`upstream_unknown_error`表示核心与扩展契约已经通过后的上游拒绝，归入`BLOCKED_DATA`而不是适配器协议漂移。
+适配器协议的外层仍以稳定安全码封装；`data` 内层失败分类固定使用 `data_fields_not_array`、`data_field_name_invalid`、`data_duplicate_fields`、`data_required_fields_missing`、`data_item_width_mismatch`、`data_required_value_invalid`，不再使用模糊的字段集合/顺序不一致错误。字段顺序变化和额外列只形成诊断，不阻断。`upstream_permission_error`、`upstream_rate_limit_error`、`upstream_authentication_account_error`、`upstream_invalid_parameter_error`、`upstream_server_internal_error`和`upstream_unknown_error`表示核心与扩展契约已经通过后的上游拒绝，归入`BLOCKED_DATA`而不是适配器协议漂移。
 
 历史完整性要求：
 
 - `trade_cal` 覆盖每个自然日并校验 `pretrade_date`、年度开市日数量和窗口内下一交易日映射；末日不跨到2024。
 - `daily` 保存未复权 OHLCV 及单位；`adj_factor` 只做当日或之前 as-of；`index_daily` 完整覆盖每个开市日。
-- 每个决策日按121个有效受控交易日判断个股资格：不足121日只记 `ineligible_insufficient_history`，不阻断整月；报告同时记录有效候选数和历史不足数。
-- 首个可观察价格以前不填充价格。已有经济价值后的缺失日只有同日全时段 `suspend_d` 才能冻结沿用；非停牌内部缺口记 `unexplained_market_data_gap` 并失败关闭，不补0、不前向填充成交价格，也不跨 Provider 补字段。
+- 每个决策日的每个PIT成员都必须有且只有一个历史资格结论。至少121个有效受控交易日才进入冻结Alpha ranker；不足121日只记 `eligibility=false / reason=ineligible_insufficient_history`，不要求Alpha分数，也不阻断整个截面。
+- 首次纳入即全时段停牌且没有任何初始有效价格时，记 `eligibility=false / reason=ineligible_no_initial_price`。上市前、首次停牌或无初始价格日期不补0、不前向填充；已有经济价值后的停牌才可凭同日 `suspend_d` 冻结沿用。已有足够历史后的非停牌异常缺口继续记 `unexplained_market_data_gap` 并失败关闭，也不跨 Provider 补字段。
 - `stock_basic_status=DEFERRED_NOT_REQUIRED_FOR_ALPHA_FEASIBILITY`、`stock_basic_request_count=0`、`security_master_pit_status=NOT_IMPLEMENTED_NOT_REQUIRED_IN_P1` 是配置、manifest、CLI 和最终报告的固定契约；`stock_basic` 缺失本身不得成为 `BLOCKED_DATA`。
 
-正式数据产物位于忽略提交的 `data/tmp/alpha-feasibility/tushare-p1-v2/`，其中至少包括：
+正式数据产物位于每轮新的、忽略提交且create-only的 `data/tmp/alpha-feasibility/<fresh-p1-root>/`，其中至少包括：
 
 - `pit_membership_coverage_report.json`
 - `pit_membership_manifest.json`
@@ -66,6 +68,6 @@ python -m operations.run_alpha_feasibility all `
 
 即使为 GO candidate，也只是后续工程候选，不是实盘收益、Paper 准入、股票推荐或交易授权。
 
-最终报告还固定输出 `stock_basic_status`、`stock_basic_request_count`、`security_master_pit_status`、`valid_candidate_count_by_decision`、`insufficient_history_count_by_decision` 与 `unexplained_market_data_gap_count`；Locked Test 三项状态保持 `NOT_ACCESSED / NOT_DOWNLOADED / NOT_RUN`，`locked_test_consumed=false`。
+最终报告还固定输出首个 `index_weight` 的字段投影/双内容哈希证据，以及 `stock_basic_status`、`stock_basic_request_count`、`security_master_pit_status`、`valid_candidate_count_by_decision`、`insufficient_history_count_by_decision`、`ineligible_no_initial_price_count` 与 `unexplained_market_data_gap_count`；Locked Test 三项状态保持 `NOT_ACCESSED / NOT_DOWNLOADED / NOT_RUN`，`locked_test_consumed=false`。
 
 为避免 IEEE-754 舍入把极小越界误判为通过，报告中的收益率、回撤、换手、成本、Exposure 和集中度均以 canonical decimal string 持久化；门禁使用 `Decimal` 精确比较。

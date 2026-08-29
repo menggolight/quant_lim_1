@@ -219,6 +219,7 @@ def _reporting_data_summary(result: Mapping[str, Any]) -> dict[str, Any]:
     stage = result.get("stage_status")
     if stage not in BLOCKED_STAGES | {READY_STAGE}:
         raise AlphaFeasibilityWorkflowError("data_stage_status_invalid")
+    blocked = stage in BLOCKED_STAGES
     if result.get("locked_test_status") != LOCKED_TEST_STATUS:
         raise AlphaFeasibilityWorkflowError("locked_test_status_drift")
     if result.get("locked_test_consumed") is not False:
@@ -227,6 +228,21 @@ def _reporting_data_summary(result: Mapping[str, Any]) -> dict[str, Any]:
         raise AlphaFeasibilityWorkflowError("execution_realism_drift")
     if result.get("trade_eligibility") is not False:
         raise AlphaFeasibilityWorkflowError("trade_eligibility_drift")
+
+    try:
+        first_index_weight = reporting.normalize_first_index_weight_evidence(
+            result.get("first_index_weight"),
+            allow_none=blocked,
+        )
+    except reporting.AlphaFeasibilityReportingError as exc:
+        raise AlphaFeasibilityWorkflowError("first_index_weight_invalid") from exc
+    if not blocked and (
+        first_index_weight is None
+        or first_index_weight["missing_required_data_fields"]
+        or first_index_weight["provider_payload_sha256"] is None
+        or first_index_weight["normalized_content_sha256"] is None
+    ):
+        raise AlphaFeasibilityWorkflowError("ready_first_index_weight_incomplete")
 
     counts = result.get("actual_tushare_request_count_by_endpoint")
     if not isinstance(counts, Mapping) or set(counts) != set(reporting.ALLOWED_ENDPOINTS):
@@ -296,6 +312,11 @@ def _reporting_data_summary(result: Mapping[str, Any]) -> dict[str, Any]:
     unexplained_gap_count = result.get("unexplained_market_data_gap_count")
     if type(unexplained_gap_count) is not int or unexplained_gap_count < 0:
         raise AlphaFeasibilityWorkflowError("unexplained_market_data_gap_count_invalid")
+    no_initial_price_count = result.get("ineligible_no_initial_price_count")
+    if type(no_initial_price_count) is not int or no_initial_price_count < 0:
+        raise AlphaFeasibilityWorkflowError(
+            "ineligible_no_initial_price_count_invalid"
+        )
 
     provenance: dict[str, str | None] = {}
     for field in (
@@ -311,7 +332,6 @@ def _reporting_data_summary(result: Mapping[str, Any]) -> dict[str, Any]:
             raise AlphaFeasibilityWorkflowError(f"{field}_invalid")
         provenance[field] = value
 
-    blocked = stage in BLOCKED_STAGES
     terminal = result.get("terminal_status")
     expected_blocked_terminal = (
         "BLOCKED_ADAPTER_PROTOCOL"
@@ -338,6 +358,7 @@ def _reporting_data_summary(result: Mapping[str, Any]) -> dict[str, Any]:
 
     return {
         "actual_tushare_request_count_by_endpoint": safe_counts,
+        "first_index_weight": first_index_weight,
         "coverage_start": reporting.COVERAGE_START,
         "coverage_end": reporting.COVERAGE_END,
         "pit_months_expected": reporting.PIT_MONTHS_EXPECTED,
@@ -347,6 +368,7 @@ def _reporting_data_summary(result: Mapping[str, Any]) -> dict[str, Any]:
         "stock_basic_request_count": 0,
         "security_master_pit_status": data_lane.SECURITY_MASTER_PIT_STATUS,
         **decision_counts,
+        "ineligible_no_initial_price_count": no_initial_price_count,
         "unexplained_market_data_gap_count": unexplained_gap_count,
         **provenance,
         **{field: _coverage_status(result.get(field)) for field in _COVERAGE_FIELDS},
@@ -553,6 +575,7 @@ def _safe_report_summary(report: Mapping[str, Any], report_path: Path) -> dict[s
     fields = (
         "commit_sha",
         "actual_tushare_request_count_by_endpoint",
+        "first_index_weight",
         "stock_basic_status",
         "stock_basic_request_count",
         "security_master_pit_status",
@@ -563,6 +586,7 @@ def _safe_report_summary(report: Mapping[str, Any], report_path: Path) -> dict[s
         "union_instrument_count",
         "valid_candidate_count_by_decision",
         "insufficient_history_count_by_decision",
+        "ineligible_no_initial_price_count",
         "unexplained_market_data_gap_count",
         "collection_plan_sha256",
         "pit_membership_manifest_sha256",
@@ -643,6 +667,7 @@ def run_workflow(
             ),
             "generated_at": evidence_timestamp.isoformat(),
             "actual_tushare_request_count_by_endpoint": counts,
+            "first_index_weight": None,
             "coverage_start": reporting.COVERAGE_START,
             "coverage_end": reporting.COVERAGE_END,
             "pit_months_expected": reporting.PIT_MONTHS_EXPECTED,
@@ -653,6 +678,7 @@ def run_workflow(
             "security_master_pit_status": data_lane.SECURITY_MASTER_PIT_STATUS,
             "valid_candidate_count_by_decision": {},
             "insufficient_history_count_by_decision": {},
+            "ineligible_no_initial_price_count": 0,
             "unexplained_market_data_gap_count": 0,
             "collection_plan_sha256": plan.plan_sha256,
             "pit_membership_manifest_sha256": None,
@@ -706,6 +732,7 @@ def run_workflow(
                 field: data_summary[field]
                 for field in (
                     "actual_tushare_request_count_by_endpoint",
+                    "first_index_weight",
                     "coverage_start",
                     "coverage_end",
                     "pit_months_expected",
@@ -716,6 +743,7 @@ def run_workflow(
                     "security_master_pit_status",
                     "valid_candidate_count_by_decision",
                     "insufficient_history_count_by_decision",
+                    "ineligible_no_initial_price_count",
                     "unexplained_market_data_gap_count",
                     *_COVERAGE_FIELDS,
                     "locked_test_status",

@@ -85,6 +85,9 @@ ONE = Decimal("1")
 ANNUALIZATION_SESSIONS = Decimal("252")
 _EPSILON = Decimal("1e-24")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+MINIMUM_VALID_CONTROLLED_SESSIONS = ALPHA_LOOKBACK_SESSIONS + 1
+INELIGIBLE_INSUFFICIENT_HISTORY = "ineligible_insufficient_history"
+INELIGIBLE_NO_INITIAL_PRICE = "ineligible_no_initial_price"
 
 
 class AlphaFeasibilityError(ValueError):
@@ -266,6 +269,39 @@ class AlphaFeasibilityInput:
     suspensions: Iterable[SuspensionRecord]
     benchmark_id: str = "000906.SH"
     pit_admission: PITAdmissionArtifacts | None = None
+
+
+@dataclass(frozen=True, slots=True)
+class HistoryEligibilityRecord:
+    """One causal history-eligibility conclusion for a PIT member/decision."""
+
+    decision_date: date
+    instrument_id: str
+    eligibility: bool
+    reason: str | None
+
+    def __post_init__(self) -> None:
+        if type(self.decision_date) is not date:
+            raise AlphaFeasibilityDataError(
+                "history eligibility decision_date must be an exact date"
+            )
+        instrument_id = str(self.instrument_id).strip().upper()
+        if not instrument_id or type(self.eligibility) is not bool:
+            raise AlphaFeasibilityDataError("history eligibility identity is invalid")
+        allowed_reasons = {
+            INELIGIBLE_INSUFFICIENT_HISTORY,
+            INELIGIBLE_NO_INITIAL_PRICE,
+        }
+        if self.eligibility:
+            if self.reason is not None:
+                raise AlphaFeasibilityDataError(
+                    "eligible history record cannot carry an ineligible reason"
+                )
+        elif self.reason not in allowed_reasons:
+            raise AlphaFeasibilityDataError(
+                "ineligible history record requires a controlled reason"
+            )
+        object.__setattr__(self, "instrument_id", instrument_id)
 
 
 def _canonical_evidence_sha256(value: Mapping[str, Any]) -> str:
@@ -738,6 +774,9 @@ class _PreparedInput:
     signal_by_key: Mapping[tuple[date, str], SignalBar]
     benchmark_id: str
     suspended: frozenset[tuple[date, str]]
+    calendar_position: Mapping[date, int]
+    first_signal_position: Mapping[str, int]
+    first_membership_date: Mapping[str, date]
 
 
 @dataclass(frozen=True, slots=True)
@@ -809,12 +848,15 @@ def _prepare(inputs: AlphaFeasibilityInput, *, required_end: date) -> _PreparedI
 
     memberships: list[PITMembershipSnapshot] = []
     union_members: set[str] = set()
+    first_membership_date: dict[str, date] = {}
     for snapshot in inputs.memberships:
         if type(snapshot) is not PITMembershipSnapshot:
             raise AlphaFeasibilityDataError("memberships require PITMembershipSnapshot rows")
         _check_row_date(snapshot.snapshot_date, "PIT snapshot_date", inputs)
         memberships.append(snapshot)
         union_members.update(snapshot.members)
+        for instrument_id in snapshot.members:
+            first_membership_date.setdefault(instrument_id, snapshot.snapshot_date)
     if not memberships:
         raise AlphaFeasibilityDataError("PIT memberships are empty")
     snapshot_dates = [item.snapshot_date for item in memberships]
@@ -886,10 +928,10 @@ def _prepare(inputs: AlphaFeasibilityInput, *, required_end: date) -> _PreparedI
             bar = stock_by_key.get(key)
             if key in suspended:
                 if last_close is None:
-                    raise AlphaFeasibilityDataError(
-                        "suspended signal carry lacks a prior economic value:"
-                        f"{trading_date}:{instrument_id}"
-                    )
+                    # A full-session suspension before the first observable
+                    # economic value is an explicit ineligibility conclusion,
+                    # never a zero or forward-filled signal value.
+                    continue
                 stock_by_key[key] = SignalBar(
                     trading_date=trading_date,
                     instrument_id=instrument_id,
@@ -905,10 +947,15 @@ def _prepare(inputs: AlphaFeasibilityInput, *, required_end: date) -> _PreparedI
     # real bar or a same-day suspension-derived carry.  This prevents a warmup
     # gap from silently changing the cross-sectional ranker's eligible set.
     calendar_position = {item: index for index, item in enumerate(trading_dates)}
-    for instrument_id, relevant_dates in by_instrument_dates.items():
-        ordered_dates = sorted(relevant_dates)
+    first_signal_position: dict[str, int] = {}
+    signal_dates_by_instrument: dict[str, list[date]] = defaultdict(list)
+    for trading_date, instrument_id in stock_by_key:
+        signal_dates_by_instrument[instrument_id].append(trading_date)
+    for instrument_id, signal_dates in signal_dates_by_instrument.items():
+        ordered_dates = sorted(signal_dates)
         first_index = calendar_position[ordered_dates[0]]
         last_index = calendar_position[ordered_dates[-1]]
+        first_signal_position[instrument_id] = first_index
         for trading_date in trading_dates[first_index : last_index + 1]:
             if (trading_date, instrument_id) not in stock_by_key:
                 raise AlphaFeasibilityDataError(
@@ -932,6 +979,9 @@ def _prepare(inputs: AlphaFeasibilityInput, *, required_end: date) -> _PreparedI
         signal_by_key,
         benchmark_id,
         frozenset(suspended),
+        calendar_position,
+        first_signal_position,
+        first_membership_date,
     )
 
 
@@ -952,6 +1002,92 @@ def select_pit_membership(
         )
     latest = max(visible, key=lambda item: item.snapshot_date)
     return tuple(latest.members)
+
+
+def _history_eligibility_records(
+    prepared: _PreparedInput,
+    *,
+    decision_date: date,
+    instrument_ids: Sequence[str],
+) -> tuple[HistoryEligibilityRecord, ...]:
+    """Conclude history eligibility for every PIT member without scoring it."""
+
+    ids = tuple(str(value).strip().upper() for value in instrument_ids)
+    if not ids or any(not value for value in ids) or len(ids) != len(set(ids)):
+        raise AlphaFeasibilityDataError(
+            "history eligibility PIT members must be non-empty and unique"
+        )
+    decision_position = prepared.calendar_position.get(decision_date)
+    if decision_position is None:
+        raise AlphaFeasibilityDataError(
+            "history eligibility decision is outside the controlled calendar"
+        )
+
+    records: list[HistoryEligibilityRecord] = []
+    for instrument_id in ids:
+        first_membership = prepared.first_membership_date.get(instrument_id)
+        if first_membership is None or first_membership > decision_date:
+            raise AlphaFeasibilityDataError(
+                "PIT member lacks a causal first-membership conclusion:"
+                f"{decision_date}:{instrument_id}"
+            )
+        decision_key = (decision_date, instrument_id)
+        first_signal_position = prepared.first_signal_position.get(instrument_id)
+        if decision_key not in prepared.signal_by_key:
+            no_signal_yet = (
+                first_signal_position is None
+                or first_signal_position > decision_position
+            )
+            if (
+                no_signal_yet
+                and (first_membership, instrument_id) in prepared.suspended
+                and decision_key in prepared.suspended
+            ):
+                records.append(
+                    HistoryEligibilityRecord(
+                        decision_date,
+                        instrument_id,
+                        False,
+                        INELIGIBLE_NO_INITIAL_PRICE,
+                    )
+                )
+                continue
+            if decision_key in prepared.suspended:
+                raise AlphaFeasibilityDataError(
+                    "suspended PIT member lacks prior economic value:"
+                    f"{decision_date}:{instrument_id}"
+                )
+            raise AlphaFeasibilityDataError(
+                "non-suspended PIT member lacks decision-date signal:"
+                f"{decision_date}:{instrument_id}"
+            )
+        if first_signal_position is None or first_signal_position > decision_position:
+            raise AlphaFeasibilityDataError(
+                "decision-date signal lacks a causal first observation:"
+                f"{decision_date}:{instrument_id}"
+            )
+        valid_session_count = decision_position - first_signal_position + 1
+        records.append(
+            HistoryEligibilityRecord(
+                decision_date,
+                instrument_id,
+                valid_session_count >= MINIMUM_VALID_CONTROLLED_SESSIONS,
+                (
+                    None
+                    if valid_session_count >= MINIMUM_VALID_CONTROLLED_SESSIONS
+                    else INELIGIBLE_INSUFFICIENT_HISTORY
+                ),
+            )
+        )
+
+    if (
+        len(records) != len(ids)
+        or {item.instrument_id for item in records} != set(ids)
+    ):
+        raise AlphaFeasibilityDataError(
+            "not every PIT member has one history eligibility conclusion"
+        )
+    return tuple(records)
 
 
 def rank_alpha_feasibility_universe(
@@ -1016,18 +1152,15 @@ def _validate_split_coverage(
     checked_dates = (prepared.trading_dates[first_index - 1],) + report_dates
     for checked_date in checked_dates:
         members = select_pit_membership(prepared.memberships, checked_date)
-        for instrument_id in members:
-            key = (checked_date, instrument_id)
-            if key not in prepared.signal_by_key:
-                if key in prepared.suspended:
-                    raise AlphaFeasibilityDataError(
-                        "suspended PIT member lacks prior economic value:"
-                        f"{checked_date}:{instrument_id}"
-                    )
-                raise AlphaFeasibilityDataError(
-                    "non-suspended PIT member lacks decision-date signal:"
-                    f"{checked_date}:{instrument_id}"
-                )
+        records = _history_eligibility_records(
+            prepared,
+            decision_date=checked_date,
+            instrument_ids=members,
+        )
+        if {item.instrument_id for item in records} != set(members):
+            raise AlphaFeasibilityDataError(
+                "split coverage lacks a history eligibility conclusion"
+            )
     return report_dates
 
 
@@ -1053,14 +1186,58 @@ def _build_decision(
 ) -> AlphaFeasibilityDecision:
     sessions = tuple(day for day in prepared.trading_dates if day <= decision_date)
     members = select_pit_membership(prepared.memberships, decision_date)
-    ranking = rank_alpha_feasibility_universe(
+    history_records = _history_eligibility_records(
+        prepared,
         decision_date=decision_date,
-        sessions=sessions,
         instrument_ids=members,
-        signal_index=prepared.signal_by_key,
-        benchmark_id=prepared.benchmark_id,
-        suspended=prepared.suspended,
     )
+    alpha_members = tuple(
+        item.instrument_id for item in history_records if item.eligibility
+    )
+    scored_rows = (
+        rank_alpha_feasibility_universe(
+            decision_date=decision_date,
+            sessions=sessions,
+            instrument_ids=alpha_members,
+            signal_index=prepared.signal_by_key,
+            benchmark_id=prepared.benchmark_id,
+            suspended=prepared.suspended,
+        )
+        if alpha_members
+        else ()
+    )
+    history_ineligible_rows = tuple(
+        TechnicalRankRow(
+            instrument_id=item.instrument_id,
+            factors=None,
+            z_scores=None,
+            composite_score=None,
+            rank=None,
+            percentile=None,
+            eligibility=False,
+            entry_eligible=False,
+            hold_eligible=False,
+            exclusion_codes=(str(item.reason),),
+        )
+        for item in history_records
+        if not item.eligibility
+    )
+    ranking = tuple(
+        sorted(
+            (*scored_rows, *history_ineligible_rows),
+            key=lambda row: (
+                row.rank is None,
+                row.rank if row.rank is not None else 10**9,
+                row.instrument_id,
+            ),
+        )
+    )
+    if len(ranking) != len(members) or {
+        row.instrument_id for row in ranking
+    } != set(members):
+        raise AlphaFeasibilityDataError(
+            "not every PIT member has one final eligibility conclusion"
+        )
     required = sessions[-(ALPHA_LOOKBACK_SESSIONS + 1):]
     benchmark_rows = [
         {"close": str(prepared.signal_by_key[(day, prepared.benchmark_id)].close)}
@@ -1506,6 +1683,9 @@ __all__ = [
     "FROZEN_EXPOSURE_POLICY",
     "HOLD_PERCENTILE",
     "HOLD_SCORE_EXCLUSIVE",
+    "HistoryEligibilityRecord",
+    "INELIGIBLE_INSUFFICIENT_HISTORY",
+    "INELIGIBLE_NO_INITIAL_PRICE",
     "LATEST_ALLOWED_DATE",
     "LOCKED_TEST_CONSUMED",
     "LOCKED_TEST_STATUS",
@@ -1513,6 +1693,7 @@ __all__ = [
     "LockedTestStatus",
     "MAX_POSITIONS",
     "MAX_POSITION_WEIGHT",
+    "MINIMUM_VALID_CONTROLLED_SESSIONS",
     "MINIMUM_COMMISSION_MODELED",
     "PITAdmissionArtifacts",
     "PITMembershipSnapshot",

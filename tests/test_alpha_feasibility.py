@@ -6,7 +6,9 @@ from hashlib import sha256
 import json
 from types import SimpleNamespace
 import unittest
+from unittest import mock
 
+from research.strategy_workspace import alpha_feasibility as af
 from research.strategy_workspace.alpha_feasibility import (
     AlphaFeasibilityDataError,
     AlphaFeasibilityInput,
@@ -362,6 +364,80 @@ class AlphaFeasibilityEngineTests(unittest.TestCase):
         self.assertTrue(result.nav)
         self.assertEqual(admission.manifest["union_instrument_count"], 31)
         self.assertIn(early_only, admission.manifest["union_instrument_ids"])
+
+    def test_new_member_history_ineligibility_does_not_block_cross_section(self) -> None:
+        new_member = "900001.SH"
+        introduction = date(2023, 10, 5)
+        replacement_members = self.instrument_ids[:-1] + (new_member,)
+        memberships, admission = _pit_fixture(
+            self.instrument_ids,
+            same_month_early=("2023-10", replacement_members),
+        )
+        first_price_date = next(day for day in self.sessions if day > introduction)
+        new_member_bars = []
+        for day_number, session in enumerate(
+            day for day in self.sessions if day >= first_price_date
+        ):
+            close = D("70") + D(day_number) * D("0.01")
+            new_member_bars.append(
+                SignalBar(session, new_member, close, close * D("1.001"))
+            )
+        inputs = AlphaFeasibilityInput(
+            coverage_start=date(2017, 7, 1),
+            coverage_end=date(2023, 12, 31),
+            trading_dates=self.sessions,
+            memberships=memberships,
+            stock_signal_bars=(*self.stock_bars, *new_member_bars),
+            benchmark_signal_bars=self.benchmark_bars,
+            suspensions=(SuspensionRecord(introduction, new_member),),
+            pit_admission=admission,
+        )
+
+        prepared = af._prepare(inputs, required_end=date(2023, 12, 29))
+        introduction_records = af._history_eligibility_records(
+            prepared,
+            decision_date=introduction,
+            instrument_ids=replacement_members,
+        )
+        self.assertEqual(len(introduction_records), len(replacement_members))
+        first_record = next(
+            item for item in introduction_records if item.instrument_id == new_member
+        )
+        self.assertIs(first_record.eligibility, False)
+        self.assertEqual(first_record.reason, "ineligible_no_initial_price")
+        self.assertNotIn((introduction, new_member), prepared.signal_by_key)
+
+        next_records = af._history_eligibility_records(
+            prepared,
+            decision_date=first_price_date,
+            instrument_ids=replacement_members,
+        )
+        next_record = next(
+            item for item in next_records if item.instrument_id == new_member
+        )
+        self.assertIs(next_record.eligibility, False)
+        self.assertEqual(next_record.reason, "ineligible_insufficient_history")
+
+        original_ranker = af.rank_alpha_feasibility_universe
+        with mock.patch.object(
+            af,
+            "rank_alpha_feasibility_universe",
+            wraps=original_ranker,
+        ) as ranker:
+            result = af.run_alpha_feasibility(split="validation", inputs=inputs)
+        relevant_calls = [
+            item
+            for item in ranker.call_args_list
+            if introduction <= item.kwargs["decision_date"] < date(2023, 10, 20)
+        ]
+        self.assertTrue(relevant_calls)
+        self.assertTrue(
+            all(
+                new_member not in item.kwargs["instrument_ids"]
+                for item in relevant_calls
+            )
+        )
+        self.assertTrue(result.nav)
 
     def test_every_manifest_snapshot_requires_one_matching_monthly_check(self) -> None:
         early_members = self.instrument_ids[:-1] + ("900001.SH",)

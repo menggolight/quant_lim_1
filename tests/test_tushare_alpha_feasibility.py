@@ -335,11 +335,21 @@ class TushareResponseEnvelopeTests(unittest.TestCase):
                 self.assertNotIn("controlled error object", diagnostic)
                 self.assertNotIn("opaque error detail", diagnostic)
 
-    def test_data_internal_contract_keeps_stable_outer_code_and_diagnostic_subclass(self):
+    def test_data_internal_contract_keeps_stable_outer_code_and_precise_subclass(self):
         invalid_payloads = (
             (
                 self._payload(data={"fields": list(self.task.fields), "items": self.rows, "extra": 1}),
-                "response_data_fields_differ_from_contract",
+                "data_required_value_invalid",
+            ),
+            (
+                self._payload(data={"fields": "exchange,cal_date", "items": self.rows}),
+                "data_fields_not_array",
+            ),
+            (
+                self._payload(
+                    data={"fields": ["exchange", "cal_date", "", "pretrade_date"], "items": self.rows}
+                ),
+                "data_field_name_invalid",
             ),
             (
                 self._payload(
@@ -348,19 +358,24 @@ class TushareResponseEnvelopeTests(unittest.TestCase):
                         "items": self.rows,
                     }
                 ),
-                "response_fields_not_unique_string_array",
+                "data_duplicate_fields",
             ),
             (
-                self._payload(data={"fields": list(reversed(self.task.fields)), "items": self.rows}),
-                "response_fields_differ_from_contract",
+                self._payload(
+                    data={
+                        "fields": ["exchange", "cal_date", "is_open"],
+                        "items": [["SSE", "20170701", 0]],
+                    }
+                ),
+                "data_required_fields_missing",
             ),
             (
                 self._payload(data={"fields": list(self.task.fields), "items": {}}),
-                "response_items_not_array",
+                "data_item_width_mismatch",
             ),
             (
                 self._payload(data={"fields": list(self.task.fields), "items": [["SSE"]]}),
-                "response_row_shape_invalid",
+                "data_item_width_mismatch",
             ),
             (
                 self._payload(data={"fields": list(self.task.fields), "items": self.rows * 2}),
@@ -807,6 +822,71 @@ class TushareResponseEnvelopeTests(unittest.TestCase):
         )
         self.assertEqual(result["actual_tushare_request_count_by_endpoint"]["index_weight"], 1)
 
+    def test_first_month_pit_failure_stops_before_remaining_72_requests(self):
+        raw = response_bytes(
+            "index_weight",
+            [["000906.SH", "600000.SH", "20171229", "100.000"]],
+        )
+        transport = FakeTransport(lambda **_kwargs: raw)
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            result = run_backfill(
+                CONFIG,
+                temporary,
+                TOKEN,
+                transport=transport,
+                generated_at=NOW,
+                sleeper=lambda _seconds: None,
+            )
+
+        self.assertEqual(len(transport.calls), 1)
+        self.assertEqual(result["stage_status"], "BLOCKED_PIT_MEMBERSHIP")
+        self.assertEqual(result["terminal_status"], "BLOCKED_DATA")
+        self.assertEqual(
+            result["remaining_blockers"],
+            ["component_count_requires_controlled_adjustment_evidence"],
+        )
+        self.assertEqual(
+            result["actual_tushare_request_count_by_endpoint"]["index_weight"],
+            1,
+        )
+
+    def test_valid_first_month_gate_continues_without_repeating_first_request(self):
+        first_rows = [
+            ["000906.SH", f"{index:06d}.SZ", "20171229", "0.125"]
+            for index in range(1, 801)
+        ]
+        invalid_second = json.dumps(
+            {"code": 0, "msg": None},
+            separators=(",", ":"),
+        ).encode("utf-8")
+
+        def callback(**kwargs):
+            if kwargs["params"]["start_date"] == "20171201":
+                return response_bytes("index_weight", first_rows)
+            return invalid_second
+
+        transport = FakeTransport(callback)
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            result = run_backfill(
+                CONFIG,
+                temporary,
+                TOKEN,
+                transport=transport,
+                generated_at=NOW,
+                sleeper=lambda _seconds: None,
+            )
+
+        self.assertEqual(len(transport.calls), 2)
+        self.assertEqual(
+            [call["params"]["start_date"] for call in transport.calls],
+            ["20171201", "20180101"],
+        )
+        self.assertEqual(result["terminal_status"], "BLOCKED_ADAPTER_PROTOCOL")
+        self.assertEqual(
+            result["actual_tushare_request_count_by_endpoint"]["index_weight"],
+            2,
+        )
+
     def test_request_id_is_excluded_from_normalized_pit_membership_identity(self):
         task = self.plan.pit_tasks[0]
         members = tuple(f"{index:06d}.SZ" for index in range(1, 801))
@@ -879,6 +959,311 @@ class TushareResponseEnvelopeTests(unittest.TestCase):
         serialized = canonical_json_bytes(manifests[0])
         for request_id in request_ids:
             self.assertNotIn(request_id.encode("utf-8"), serialized)
+
+
+class TushareIndexWeightSemanticProjectionTests(unittest.TestCase):
+    def setUp(self):
+        self.plan = load_config_and_build_plan(CONFIG)
+        self.task = self.plan.pit_tasks[0]
+        self.values = {
+            "index_code": "000906.SH",
+            "con_code": "600000.SH",
+            "trade_date": "20171229",
+            "weight": "0.125",
+            "index_name": "CSI 800 A",
+        }
+
+    def _payload(
+        self,
+        fields,
+        *,
+        values=None,
+        data_extensions=None,
+        root_extensions=None,
+        items=None,
+    ):
+        active = dict(self.values if values is None else values)
+        rows = items if items is not None else [[active[field] for field in fields]]
+        data = {"fields": list(fields), "items": rows}
+        data.update(data_extensions or {})
+        payload = {"code": 0, "msg": None, "data": data}
+        payload.update(root_extensions or {})
+        return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+    def _validate(self, raw):
+        return taf.validate_response_bytes(
+            self.task,
+            raw,
+            token=TOKEN,
+            http_status=200,
+        )
+
+    def _assert_category(self, raw, category):
+        with self.assertRaises(AlphaFeasibilityDataError) as raised:
+            self._validate(raw)
+        self.assertEqual(raised.exception.code, "data_payload_invalid")
+        self.assertEqual(
+            raised.exception.diagnostic["data_failure_category"], category
+        )
+        return raised.exception
+
+    def test_canonical_reordered_and_extra_fields_project_by_semantic_name(self):
+        canonical_fields = list(self.task.fields)
+        reordered_fields = ["weight", "index_code", "trade_date", "con_code"]
+        extra_fields = [*canonical_fields, "index_name"]
+        canonical = self._validate(self._payload(canonical_fields))
+        reordered = self._validate(self._payload(reordered_fields))
+        extra_a = self._validate(self._payload(extra_fields))
+        changed = dict(self.values, index_name="CSI 800 B")
+        extra_b = self._validate(self._payload(extra_fields, values=changed))
+
+        expected_row = {
+            field: self.values[field] for field in self.task.fields
+        }
+        for response in (canonical, reordered, extra_a, extra_b):
+            self.assertEqual(dict(response.rows[0]), expected_row)
+            self.assertEqual(set(response.rows[0]), set(self.task.fields))
+            self.assertEqual(response.required_data_fields, self.task.fields)
+            self.assertEqual(response.missing_required_data_fields, ())
+            self.assertEqual(response.data_row_count, 1)
+        self.assertTrue(canonical.field_order_matches_canonical)
+        self.assertFalse(reordered.field_order_matches_canonical)
+        self.assertTrue(extra_a.field_order_matches_canonical)
+        self.assertEqual(extra_a.extra_data_fields, ("index_name",))
+        self.assertEqual(
+            canonical.normalized_content_sha256,
+            reordered.normalized_content_sha256,
+        )
+        self.assertEqual(
+            canonical.normalized_content_sha256,
+            extra_a.normalized_content_sha256,
+        )
+        self.assertEqual(
+            extra_a.normalized_content_sha256,
+            extra_b.normalized_content_sha256,
+        )
+        self.assertNotEqual(
+            canonical.provider_payload_sha256,
+            reordered.provider_payload_sha256,
+        )
+        self.assertNotEqual(
+            canonical.provider_payload_sha256,
+            extra_a.provider_payload_sha256,
+        )
+        self.assertNotEqual(
+            extra_a.provider_payload_sha256,
+            extra_b.provider_payload_sha256,
+        )
+        self.assertNotEqual(
+            extra_a.extra_data_field_value_sha256_by_field["index_name"],
+            extra_b.extra_data_field_value_sha256_by_field["index_name"],
+        )
+
+    def test_field_contract_failures_are_precise_and_keep_safe_row_count(self):
+        canonical = list(self.task.fields)
+        cases = (
+            (
+                self._payload(
+                    canonical[:-1],
+                    items=[[self.values[field] for field in canonical[:-1]]],
+                ),
+                "data_required_fields_missing",
+            ),
+            (
+                self._payload(
+                    [*canonical, "weight"],
+                    items=[[
+                        *[self.values[field] for field in canonical],
+                        self.values["weight"],
+                    ]],
+                ),
+                "data_duplicate_fields",
+            ),
+            (
+                self._payload(canonical, items=[["000906.SH"]]),
+                "data_item_width_mismatch",
+            ),
+            (
+                self._payload(
+                    canonical,
+                    data_extensions={"unexpected": "ignored-never"},
+                ),
+                "data_required_value_invalid",
+            ),
+            (
+                self._payload(
+                    canonical,
+                    values=dict(self.values, weight="not-a-number"),
+                ),
+                "data_required_value_invalid",
+            ),
+        )
+        for raw, category in cases:
+            with self.subTest(category=category):
+                raised = self._assert_category(raw, category)
+                self.assertEqual(raised.diagnostic["data_row_count"], 1)
+                self.assertEqual(
+                    raised.diagnostic["required_data_fields"], canonical
+                )
+
+        invalid_name = self._payload(
+            ["index_code", "con_code", "trade_date", "token"],
+            items=[["000906.SH", "600000.SH", "20171229", "secret-value"]],
+        )
+        raised = self._assert_category(invalid_name, "data_field_name_invalid")
+        serialized = canonical_json_bytes(raised.diagnostic)
+        self.assertNotIn(b'"token"', serialized)
+        self.assertNotIn(b"secret-value", serialized)
+        self.assertRegex(
+            raised.diagnostic["observed_data_fields"][-1],
+            r"^sha256:[0-9a-f]{64}$",
+        )
+
+        invalid_extra = self._payload(
+            [*canonical, "bad-field"],
+            items=[[
+                *[self.values[field] for field in canonical],
+                "unsafe-extra-value",
+            ]],
+        )
+        raised = self._assert_category(invalid_extra, "data_field_name_invalid")
+        self.assertEqual(raised.diagnostic["missing_required_data_fields"], [])
+        self.assertTrue(raised.diagnostic["field_order_matches_canonical"])
+        self.assertNotIn(
+            b"unsafe-extra-value",
+            canonical_json_bytes(raised.diagnostic),
+        )
+
+        non_array = {
+            "code": 0,
+            "msg": None,
+            "data": {"fields": "not-an-array", "items": [[1], [2]]},
+        }
+        raised = self._assert_category(
+            json.dumps(non_array, separators=(",", ":")).encode("utf-8"),
+            "data_fields_not_array",
+        )
+        self.assertEqual(raised.diagnostic["data_row_count"], 2)
+
+    def test_has_more_is_the_only_safe_data_extension(self):
+        canonical = list(self.task.fields)
+        accepted = self._validate(
+            self._payload(canonical, data_extensions={"has_more": False})
+        )
+        self.assertEqual(dict(accepted.rows[0])["con_code"], "600000.SH")
+        for value, category in (
+            (True, "potential_upstream_truncation"),
+            (0, "data_required_value_invalid"),
+            ("false", "data_required_value_invalid"),
+        ):
+            with self.subTest(value=value):
+                self._assert_category(
+                    self._payload(canonical, data_extensions={"has_more": value}),
+                    category,
+                )
+
+    def test_reordered_extra_payload_replays_without_network_or_strategy_leak(self):
+        fields = ["index_name", "weight", "con_code", "index_code", "trade_date"]
+        raw = self._payload(
+            fields,
+            data_extensions={"has_more": False},
+            root_extensions={
+                "detail": "safe provider detail",
+                "request_id": "semantic-projection-request",
+            },
+        )
+        transport = FakeTransport(lambda **_kwargs: raw)
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            store = CreateOnlyTaskStore(temporary)
+            first = store.execute(
+                self.task,
+                token=TOKEN,
+                transport=transport,
+                timeout_seconds=1,
+                maximum_response_bytes=taf.MAXIMUM_RESPONSE_BYTES,
+            )
+            never = FakeTransport(
+                lambda **_kwargs: self.fail("sealed semantic response must replay")
+            )
+            replay = store.execute(
+                self.task,
+                token=TOKEN,
+                transport=never,
+                timeout_seconds=1,
+                maximum_response_bytes=taf.MAXIMUM_RESPONSE_BYTES,
+            )
+            artifact = json.loads(
+                store.response_path(self.task).read_text(encoding="utf-8")
+            )
+            persisted_provider = json.loads(
+                store.raw_path(self.task).read_text(encoding="utf-8")
+            )
+
+        self.assertEqual(len(transport.calls), 1)
+        self.assertEqual(never.calls, [])
+        self.assertTrue(replay.replayed)
+        self.assertEqual(first.provider_payload_sha256, replay.provider_payload_sha256)
+        self.assertEqual(
+            first.normalized_content_sha256,
+            replay.normalized_content_sha256,
+        )
+        self.assertEqual(artifact["schema_version"], taf.RESPONSE_SCHEMA_VERSION)
+        self.assertEqual(artifact["observed_data_fields"], fields)
+        self.assertEqual(artifact["extra_data_fields"], ["index_name"])
+        self.assertNotIn("index_name", artifact["rows"][0])
+        self.assertEqual(persisted_provider["data"]["fields"], fields)
+        self.assertNotIn("detail", persisted_provider)
+        self.assertNotIn("request_id", persisted_provider)
+
+    def test_index_weight_rows_sort_by_full_canonical_primary_key(self):
+        fields = list(self.task.fields)
+        items = [
+            ["000906.SH", "600001.SH", "20171229", "0.125"],
+            ["000906.SH", "600000.SH", "20171229", "0.125"],
+        ]
+        result = self._validate(self._payload(fields, items=items))
+        self.assertEqual(
+            [row["con_code"] for row in result.rows],
+            ["600000.SH", "600001.SH"],
+        )
+
+    def test_first_failure_summary_uses_precise_safe_field_diagnostic(self):
+        fields = ["index_code", "con_code", "trade_date"]
+        raw = self._payload(
+            fields,
+            items=[["000906.SH", "600000.SH", "20171229"]],
+            root_extensions={"request_id": "missing-weight-request"},
+        )
+        transport = FakeTransport(lambda **_kwargs: raw)
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            result = run_backfill(
+                CONFIG,
+                temporary,
+                TOKEN,
+                transport=transport,
+                generated_at=NOW,
+                sleeper=lambda _seconds: None,
+            )
+            quarantine = json.loads(
+                next((Path(temporary) / "quarantine").glob("*.json")).read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        first = result["first_index_weight"]
+        self.assertEqual(result["remaining_blockers"], ["data_required_fields_missing"])
+        self.assertEqual(result["terminal_status"], "BLOCKED_ADAPTER_PROTOCOL")
+        self.assertEqual(first["observed_data_fields"], fields)
+        self.assertEqual(first["required_data_fields"], list(self.task.fields))
+        self.assertEqual(first["missing_required_data_fields"], ["weight"])
+        self.assertEqual(first["extra_data_fields"], [])
+        self.assertFalse(first["field_order_matches_canonical"])
+        self.assertEqual(first["data_row_count"], 1)
+        self.assertRegex(first["provider_payload_sha256"], r"^[0-9a-f]{64}$")
+        self.assertIsNone(first["normalized_content_sha256"])
+        self.assertEqual(quarantine["data_row_count"], 1)
+        self.assertEqual(quarantine["missing_required_data_fields"], ["weight"])
+        self.assertNotIn("missing-weight-request", json.dumps(quarantine))
 
 
 class TushareCreateOnlyTests(unittest.TestCase):
@@ -995,6 +1380,64 @@ class TushareCreateOnlyTests(unittest.TestCase):
             self.assertEqual(never.calls, [])
             for path, expected in before.items():
                 self.assertEqual((path.read_bytes(), path.stat().st_mtime_ns), expected)
+
+    def test_v3_response_replays_read_only_without_inventing_provider_hash(self):
+        task = self._trade_calendar_task()
+        raw = response_bytes(
+            "trade_cal", [["SSE", "20170701", 0, "20170630"]]
+        )
+        validated = taf.validate_response_bytes(task, raw)
+        rows = [dict(row) for row in validated.rows]
+        receipt = {
+            "observed_root_fields": ["code", "data", "msg"],
+            "semantic_core_fields": ["code", "data", "msg"],
+            "transport_extension_field_names": [],
+            "transport_extension_type_by_field": {},
+            "transport_extension_value_sha256_by_field": {},
+            "transport_extensions_sha256": hashlib.sha256(b"{}").hexdigest(),
+            "transport_extensions_byte_count": 2,
+            "raw_transport_sha256": hashlib.sha256(raw).hexdigest(),
+            "token_leak_check": "PASSED",
+        }
+        sealed = {
+            "schema_version": "tushare-alpha-feasibility-task-response.v3",
+            "state": "RESPONSE_VALIDATED",
+            "task_id": task.task_id,
+            "endpoint": task.endpoint,
+            "plan_sha256": task.plan_sha256,
+            "raw_response_sha256": hashlib.sha256(raw).hexdigest(),
+            "wire_response_sha256": hashlib.sha256(raw).hexdigest(),
+            "transport_receipt": receipt,
+            "raw_response_persisted": True,
+            "normalized_rows_sha256": canonical_sha256(rows),
+            "normalized_content_sha256": validated.normalized_content_sha256,
+            "row_count": len(rows),
+            "isolated_future_delist_date_count": 0,
+            "isolated_non_union_row_count": 0,
+            "rows": rows,
+            "locked_test_status": dict(LOCKED_TEST_STATUS),
+            "locked_test_consumed": False,
+        }
+        sealed["response_artifact_sha256"] = canonical_sha256(sealed)
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            store = CreateOnlyTaskStore(temporary)
+            store.started_path(task).parent.mkdir(parents=True)
+            store.raw_path(task).parent.mkdir(parents=True)
+            store.started_path(task).write_bytes(
+                canonical_json_bytes(taf._started_payload(task))
+            )
+            store.raw_path(task).write_bytes(raw)
+            store.response_path(task).write_bytes(canonical_json_bytes(sealed))
+            before = store.response_path(task).read_bytes()
+            replay = self._execute(
+                store,
+                task,
+                FakeTransport(lambda **_kwargs: self.fail("v3 must not resend")),
+            )
+            self.assertEqual(store.response_path(task).read_bytes(), before)
+        self.assertTrue(replay.replayed)
+        self.assertIsNone(replay.provider_payload_sha256)
+        self.assertEqual(replay.observed_data_fields, task.fields)
 
     def test_v1_sealed_receipt_is_rejected_read_only_and_never_modified(self):
         task = self._trade_calendar_task()
@@ -1194,7 +1637,7 @@ class TushareCreateOnlyTests(unittest.TestCase):
                 CreateOnlyTaskStore(temporary),
                 task,
                 FakeTransport(lambda **_kwargs: raw),
-                "invalid_is_open",
+                "data_required_value_invalid",
             )
 
     def test_forged_future_task_and_scope_mismatch_never_reach_transport(self):
@@ -1360,6 +1803,7 @@ class BackfillLineageAndManifestTests(unittest.TestCase):
         self.coverage = taf.HistoryCoverageResult(
             report=MappingProxyType(
                 {
+                    "schema_version": taf.HISTORY_COVERAGE_SCHEMA_VERSION,
                     "generated_at": NOW.isoformat(),
                     "coverage_start": "2017-07-01",
                     "coverage_end": "2023-12-31",
@@ -1372,6 +1816,7 @@ class BackfillLineageAndManifestTests(unittest.TestCase):
                     "security_master_pit_status": taf.SECURITY_MASTER_PIT_STATUS,
                     "valid_candidate_count_by_decision": {"2018-01-02": 1},
                     "insufficient_history_count_by_decision": {"2018-01-02": 0},
+                    "ineligible_no_initial_price_count": 0,
                     "unexplained_market_data_gap_count": 0,
                 }
             ),
@@ -1466,7 +1911,7 @@ class BackfillLineageAndManifestTests(unittest.TestCase):
             for name, endpoint in endpoints.items()
         }
         unsigned = {
-            "schema_version": "tushare-alpha-feasibility-manifest.v2",
+            "schema_version": "tushare-alpha-feasibility-manifest.v3",
             "experiment_id": "a-share-technical-alpha-feasibility-tushare-p1-v1",
             "generated_at": NOW.isoformat(),
             "coverage_start": "2017-07-01",
@@ -1482,6 +1927,7 @@ class BackfillLineageAndManifestTests(unittest.TestCase):
             "union_instrument_count": 1,
             "valid_candidate_count_by_decision": {"2023-12-28": 1},
             "insufficient_history_count_by_decision": {"2023-12-28": 0},
+            "ineligible_no_initial_price_count": 0,
             "unexplained_market_data_gap_count": 0,
             "datasets": datasets,
             "data_status": "READY",
@@ -1592,7 +2038,7 @@ class BoundedHistoryCoverageTests(unittest.TestCase):
             return []
         self.fail(f"unexpected endpoint {task.endpoint}")
 
-    def test_three_plus_one_batches_pass_and_daily_code_mismatch_blocks(self):
+    def test_three_plus_one_batches_pass_and_missing_member_daily_fails_closed(self):
         store = InMemoryCompletedStore(self.rows_for_task)
         result = taf.validate_history_coverage_from_store(
             self.plan,
@@ -1626,7 +2072,7 @@ class BoundedHistoryCoverageTests(unittest.TestCase):
         )
         self.assertFalse(blocked.passed)
         self.assertIn(
-            "index_weight_daily_code_mismatch",
+            "unexplained_market_data_gap",
             {item["reason"] for item in blocked.report["blockers"]},
         )
 
@@ -1680,6 +2126,52 @@ class BoundedHistoryCoverageTests(unittest.TestCase):
             sum(result.report["insufficient_history_count_by_decision"].values()),
             0,
         )
+        self.assertEqual(result.report["ineligible_no_initial_price_count"], 1)
+
+    def test_member_with_no_price_ever_is_ineligible_when_suspension_is_complete(self):
+        recent_code = "600003.SH"
+        introduction = next(
+            date.fromisoformat(item["snapshot_date"])
+            for item in self.pit_snapshots
+            if item["snapshot_date"].startswith("2023-12")
+        )
+        snapshots = deepcopy(self.pit_snapshots)
+        for snapshot in snapshots:
+            if date.fromisoformat(snapshot["snapshot_date"]) < introduction:
+                snapshot["members"] = [
+                    member
+                    for member in snapshot["members"]
+                    if member["instrument_id"] != recent_code
+                ]
+
+        def no_initial_price_rows(task):
+            rows = self.rows_for_task(task)
+            if task.endpoint in {"daily", "adj_factor"}:
+                return [row for row in rows if row["ts_code"] != recent_code]
+            if task.endpoint == "suspend_d" and recent_code in task.scope_instruments:
+                return [
+                    {
+                        "ts_code": recent_code,
+                        "trade_date": item.strftime("%Y%m%d"),
+                        "suspend_timing": None,
+                        "suspend_type": "S",
+                    }
+                    for item in self.open_dates
+                    if item >= introduction
+                ]
+            return rows
+
+        result = taf.validate_history_coverage_from_store(
+            self.plan,
+            self.codes,
+            self.tasks,
+            InMemoryCompletedStore(no_initial_price_rows),
+            pit_snapshots=snapshots,
+            generated_at=NOW,
+        )
+        self.assertTrue(result.passed)
+        self.assertEqual(result.report["unexplained_market_data_gap_count"], 0)
+        self.assertGreater(result.report["ineligible_no_initial_price_count"], 0)
 
 
 class PitMembershipTests(unittest.TestCase):
@@ -1920,6 +2412,23 @@ class TotalReturnAndCoverageTests(unittest.TestCase):
             [row["trading_date"] for row in leading_suspension],
             ["2017-07-04"],
         )
+
+        no_initial_price = build_total_return_panel(
+            ["20170703", "20170704"],
+            self.basic,
+            [],
+            [],
+            [
+                {
+                    "ts_code": "600000.SH",
+                    "trade_date": trading_date,
+                    "suspend_timing": None,
+                    "suspend_type": "S",
+                }
+                for trading_date in ("20170703", "20170704")
+            ],
+        )
+        self.assertEqual(no_initial_price, [])
 
     def test_non_suspension_missing_daily_fails_closed(self):
         later_bar = {
