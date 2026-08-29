@@ -1,8 +1,8 @@
 """Fail-closed Tushare data lane for the Alpha Feasibility experiment.
 
 This module is deliberately independent from the formal small-account backtest
-and from the Tushare SDK.  It only speaks the seven standard, read-only
-endpoints frozen in ``a_share_technical_alpha_feasibility.v1.json``.  The
+and from the Tushare SDK.  It only speaks the six standard, read-only
+endpoints frozen in ``a_share_technical_alpha_feasibility.v2.json``.  The
 collector has three important properties:
 
 * configuration and the complete request plan are checked before a credential
@@ -44,13 +44,13 @@ from research.market_data.tushare_diagnostic import classify_message_category
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = (
-    REPOSITORY_ROOT / "configs" / "a_share_technical_alpha_feasibility.v1.json"
+    REPOSITORY_ROOT / "configs" / "a_share_technical_alpha_feasibility.v2.json"
 )
 OFFICIAL_API_HOST = "api.tushare.pro"
 OFFICIAL_API_PATH = "/"
 OFFICIAL_API_URL = "https://api.tushare.pro"
 ABSOLUTE_CUTOFF = date(2023, 12, 31)
-PLAN_SCHEMA_VERSION = "tushare-alpha-feasibility-plan.v1"
+PLAN_SCHEMA_VERSION = "tushare-alpha-feasibility-plan.v2"
 TASK_SCHEMA_VERSION = "tushare-alpha-feasibility-task.v1"
 STARTED_SCHEMA_VERSION = "tushare-alpha-feasibility-task-started.v1"
 RESPONSE_SCHEMA_VERSION = "tushare-alpha-feasibility-task-response.v3"
@@ -58,7 +58,7 @@ LEGACY_RESPONSE_SCHEMA_VERSION = "tushare-alpha-feasibility-task-response.v2"
 QUARANTINE_SCHEMA_VERSION = "tushare-alpha-feasibility-quarantine.v3"
 PIT_REPORT_SCHEMA_VERSION = "pit-membership-coverage-report.v1"
 PIT_MANIFEST_SCHEMA_VERSION = "pit-membership-manifest.v1"
-HISTORY_MANIFEST_SCHEMA_VERSION = "tushare-alpha-feasibility-manifest.v1"
+HISTORY_MANIFEST_SCHEMA_VERSION = "tushare-alpha-feasibility-manifest.v2"
 RESPONSE_SCHEMA_PATH = (
     REPOSITORY_ROOT / "schemas" / "tushare_alpha_feasibility_task_response.v3.json"
 )
@@ -73,8 +73,13 @@ ALLOWED_ENDPOINTS = (
     "adj_factor",
     "index_daily",
     "suspend_d",
-    "stock_basic",
 )
+STOCK_BASIC_STATUS = "DEFERRED_NOT_REQUIRED_FOR_ALPHA_FEASIBILITY"
+STOCK_BASIC_REQUEST_COUNT = 0
+SECURITY_MASTER_PIT_STATUS = "NOT_IMPLEMENTED_NOT_REQUIRED_IN_P1"
+MINIMUM_VALID_CONTROLLED_SESSIONS = 121
+INSUFFICIENT_HISTORY_STATUS = "ineligible_insufficient_history"
+UNEXPLAINED_MARKET_DATA_GAP_STATUS = "unexplained_market_data_gap"
 LOCKED_TEST_STATUS = MappingProxyType(
     {"access": "NOT_ACCESSED", "download": "NOT_DOWNLOADED", "run": "NOT_RUN"}
 )
@@ -83,15 +88,6 @@ EXPECTED_FIELDS: Mapping[str, tuple[str, ...]] = MappingProxyType(
     {
         "trade_cal": ("exchange", "cal_date", "is_open", "pretrade_date"),
         "index_weight": ("index_code", "con_code", "trade_date", "weight"),
-        "stock_basic": (
-            "ts_code",
-            "symbol",
-            "name",
-            "exchange",
-            "list_status",
-            "list_date",
-            "delist_date",
-        ),
         "daily": (
             "ts_code",
             "trade_date",
@@ -132,7 +128,6 @@ POTENTIAL_TRUNCATION_LIMIT: Mapping[str, int] = MappingProxyType(
     {
         "trade_cal": 10_000,
         "index_weight": 10_000,
-        "stock_basic": 6_000,
         "daily": 6_000,
         "adj_factor": 6_000,
         "suspend_d": 5_000,
@@ -583,42 +578,12 @@ def _reject_response_post_cutoff_dates(
     task: "CollectionTask",
     root: Mapping[str, Any],
 ) -> None:
-    """Scan every successful response string before normalization/persistence.
+    """Scan every successful in-scope data payload before persistence."""
 
-    ``stock_basic.delist_date`` is the sole field-aware exception: the frozen
-    contract explicitly isolates a post-cutoff delisting date to ``null`` and
-    persists only the sanitized envelope. Transport extensions are excluded
-    from market-data cutoff checks and normalized consumer identity; only the
-    validated ``data`` payload enters either path.
-    """
-
-    if task.endpoint != "stock_basic":
-        _reject_embedded_post_cutoff_date(
-            root["data"],
-            "post_cutoff_response_date",
-        )
-        return
-    data = root["data"]
-    fields = data["fields"]
-    items = data["items"]
-    delist_index = fields.index("delist_date")
     _reject_embedded_post_cutoff_date(
-        {key: value for key, value in data.items() if key != "items"},
+        root["data"],
         "post_cutoff_response_date",
     )
-    for item in items:
-        if not isinstance(item, list) or len(item) != len(fields):
-            # The row-shape validator below will fail closed before persistence.
-            continue
-        code = item[fields.index("ts_code")]
-        if type(code) is str and code not in task.scope_instruments:
-            # stock_basic is an all-market endpoint. Unrelated rows are never
-            # strategy inputs and their bodies are never persisted; retain only
-            # their aggregate isolation count and the wire response hash.
-            continue
-        for index, value in enumerate(item):
-            if index != delist_index:
-                _reject_embedded_post_cutoff_date(value, "post_cutoff_response_date")
 
 
 def _require_mapping(value: Any, code: str) -> Mapping[str, Any]:
@@ -674,7 +639,7 @@ def validate_experiment_config(
         raise AlphaFeasibilityDataError("config_root_not_object")
     _scan_date_literals(config)
     _reject_embedded_post_cutoff_date(config, "post_cutoff_config_date")
-    if config.get("schema_version") != "technical-alpha-feasibility-experiment.v1":
+    if config.get("schema_version") != "technical-alpha-feasibility-experiment.v2":
         raise AlphaFeasibilityDataError("unexpected_experiment_schema")
     if config.get("research_status") != "research_alpha_feasibility_only":
         raise AlphaFeasibilityDataError("unexpected_research_status")
@@ -798,7 +763,6 @@ def validate_experiment_config(
     exact_params = {
         "trade_cal": {"exchange": "SSE", "start_date": "20170701", "end_date": "20231231"},
         "index_weight": {"index_code": "000906.SH"},
-        "stock_basic": {"exchange": ""},
         "daily": {"start_date": "20170701", "end_date": "20231231"},
         "adj_factor": {"start_date": "20170701", "end_date": "20231231"},
         "suspend_d": {"start_date": "20170701", "end_date": "20231231"},
@@ -815,9 +779,28 @@ def validate_experiment_config(
     for endpoint, expected_size in expected_batch_sizes.items():
         if requests[endpoint].get("instrument_batch_size") != expected_size:
             raise AlphaFeasibilityDataError("history_batch_size_differs_from_contract")
-    statuses = requests["stock_basic"].get("list_statuses")
-    if statuses != ["L", "D", "P"]:
-        raise AlphaFeasibilityDataError("stock_basic_statuses_must_equal_l_d_p")
+    if config.get("stock_basic_status") != STOCK_BASIC_STATUS:
+        raise AlphaFeasibilityDataError("stock_basic_status_changed")
+    stock_basic_request_count = config.get("stock_basic_request_count")
+    if (
+        type(stock_basic_request_count) is not int
+        or stock_basic_request_count != STOCK_BASIC_REQUEST_COUNT
+    ):
+        raise AlphaFeasibilityDataError("stock_basic_request_count_must_be_zero")
+    if config.get("security_master_pit_status") != SECURITY_MASTER_PIT_STATUS:
+        raise AlphaFeasibilityDataError("security_master_pit_status_changed")
+    total_return = _require_mapping(
+        config.get("signal_total_return"), "missing_signal_total_return_config"
+    )
+    if (
+        total_return.get("minimum_valid_controlled_sessions")
+        != MINIMUM_VALID_CONTROLLED_SESSIONS
+        or total_return.get("insufficient_history_policy")
+        != INSUFFICIENT_HISTORY_STATUS
+        or total_return.get("non_suspension_missing_daily_policy")
+        != "unexplained_market_data_gap_fail_closed"
+    ):
+        raise AlphaFeasibilityDataError("history_eligibility_contract_changed")
     if config.get("locked_test_status") != dict(LOCKED_TEST_STATUS):
         raise AlphaFeasibilityDataError("locked_test_status_changed")
     if config.get("locked_test_consumed") is not False:
@@ -856,10 +839,6 @@ def _validate_wire_request_contract(
         expected = {"exchange": "SSE", **fixed_window}
     elif endpoint == "index_daily":
         expected = {"ts_code": "000906.SH", **fixed_window}
-    elif endpoint == "stock_basic":
-        if values.get("list_status") not in {"L", "D", "P"}:
-            raise AlphaFeasibilityDataError("stock_basic_status_not_allowed")
-        expected = {"exchange": "", "list_status": values["list_status"]}
     elif endpoint == "index_weight":
         if set(values) != {"index_code", "start_date", "end_date"}:
             raise AlphaFeasibilityDataError("index_weight_params_differ_from_contract")
@@ -899,9 +878,6 @@ def _validate_wire_request_contract(
         if endpoint in {"daily", "adj_factor", "suspend_d"}:
             if not scope:
                 raise AlphaFeasibilityDataError("task_scope_missing")
-        elif endpoint == "stock_basic":
-            if not scope:
-                raise AlphaFeasibilityDataError("stock_basic_union_scope_missing")
         elif scope:
             raise AlphaFeasibilityDataError("unexpected_task_scope")
 
@@ -1055,19 +1031,6 @@ def build_history_plan(
         raise AlphaFeasibilityDataError("invalid_or_empty_union")
     requests = plan.config["requests"]
     tasks: list[CollectionTask] = []
-    stock = requests["stock_basic"]
-    for status in stock["list_statuses"]:
-        params = dict(stock["params"])
-        params["list_status"] = status
-        tasks.append(
-            _task(
-                "stock_basic",
-                params,
-                stock["fields"],
-                plan.plan_sha256,
-                scope_instruments=instruments,
-            )
-        )
     trade_cal = requests["trade_cal"]
     tasks.append(_task("trade_cal", trade_cal["params"], trade_cal["fields"], plan.plan_sha256))
     index_daily = requests["index_daily"]
@@ -2326,6 +2289,18 @@ def actual_tushare_request_count_by_endpoint(
     return counts
 
 
+def _strict_request_counts(value: Mapping[str, int]) -> dict[str, int]:
+    if not isinstance(value, Mapping) or set(value) != set(ALLOWED_ENDPOINTS):
+        raise AlphaFeasibilityDataError("request_count_endpoint_set_invalid")
+    counts: dict[str, int] = {}
+    for endpoint in ALLOWED_ENDPOINTS:
+        count = value[endpoint]
+        if type(count) is not int or count < 0:
+            raise AlphaFeasibilityDataError("request_count_value_invalid")
+        counts[endpoint] = count
+    return counts
+
+
 def execute_tasks(
     tasks: Sequence[CollectionTask],
     *,
@@ -2808,7 +2783,7 @@ def validate_history_coverage(
 ) -> HistoryCoverageResult:
     """Fail closed on missing history, except same-day ``S`` suspensions."""
 
-    required = {"stock_basic", "trade_cal", "daily", "adj_factor", "suspend_d", "index_daily"}
+    required = {"trade_cal", "daily", "adj_factor", "suspend_d", "index_daily"}
     if not required.issubset(rows_by_endpoint):
         missing = sorted(required - set(rows_by_endpoint))
         report = {
@@ -2821,6 +2796,13 @@ def validate_history_coverage(
             "adj_factor_coverage_status": "BLOCKED_DATA",
             "suspension_coverage_status": "BLOCKED_DATA",
             "benchmark_coverage_status": "BLOCKED_DATA",
+            "stock_basic_status": STOCK_BASIC_STATUS,
+            "stock_basic_request_count": STOCK_BASIC_REQUEST_COUNT,
+            "security_master_pit_status": SECURITY_MASTER_PIT_STATUS,
+            "history_eligibility_status": INSUFFICIENT_HISTORY_STATUS,
+            "valid_candidate_count_by_decision": {},
+            "insufficient_history_count_by_decision": {},
+            "unexplained_market_data_gap_count": 0,
             "blockers": [{"reason": "missing_endpoint_artifacts", "endpoints": missing}],
             "locked_test_status": dict(LOCKED_TEST_STATUS),
             "locked_test_consumed": False,
@@ -2902,36 +2884,35 @@ def validate_history_coverage(
     else:
         benchmark_status = "BLOCKED_DATA"
 
-    basic_rows = list(rows_by_endpoint["stock_basic"])
-    basic_by_code: dict[str, Mapping[str, Any]] = {}
+    snapshot_members_by_date: list[tuple[date, tuple[str, ...]]] = []
     try:
-        for row in basic_rows:
-            code = _normalized_code(row["ts_code"])
-            if code not in union_set:
-                raise AlphaFeasibilityDataError("stock_basic_contains_non_union_instrument")
-            if code in basic_by_code:
-                raise AlphaFeasibilityDataError("duplicate_stock_basic_across_statuses")
-            basic_by_code[code] = row
-        if set(basic_by_code) != union_set:
-            raise AlphaFeasibilityDataError("stock_basic_union_incomplete")
-        if pit_snapshots is not None:
-            for snapshot in pit_snapshots:
-                snapshot_date = _parse_date(
-                    snapshot.get("snapshot_date"), "pit_snapshot_date"
+        if pit_snapshots is None:
+            raise AlphaFeasibilityDataError("pit_snapshots_required_for_history_coverage")
+        _validate_pit_snapshot_month_coverage(plan, pit_snapshots)
+        for snapshot in pit_snapshots:
+            snapshot_date = _parse_date(
+                snapshot.get("snapshot_date"), "pit_snapshot_date"
+            )
+            raw_members = snapshot.get("members")
+            if not isinstance(raw_members, (list, tuple)):
+                raise AlphaFeasibilityDataError("pit_snapshot_members_invalid")
+            members: list[str] = []
+            for member in raw_members:
+                code = (
+                    member.get("instrument_id")
+                    if isinstance(member, Mapping)
+                    else member
                 )
-                members = snapshot.get("members")
-                if not isinstance(members, (list, tuple)):
-                    raise AlphaFeasibilityDataError("pit_snapshot_members_invalid")
-                for member in members:
-                    code = (
-                        member.get("instrument_id")
-                        if isinstance(member, Mapping)
-                        else member
+                if type(code) is not str or _PIT_COMPONENT_CODE.fullmatch(code) is None:
+                    raise AlphaFeasibilityDataError("pit_snapshot_member_code_invalid")
+                if code not in union_set:
+                    raise AlphaFeasibilityDataError(
+                        "pit_member_outside_index_weight_union"
                     )
-                    if code not in basic_by_code:
-                        raise AlphaFeasibilityDataError("pit_member_missing_stock_basic")
-                    if _parse_date(basic_by_code[code]["list_date"], "list_date") > snapshot_date:
-                        raise AlphaFeasibilityDataError("pit_member_not_listed_by_snapshot_date")
+                members.append(code)
+            if len(members) != len(set(members)):
+                raise AlphaFeasibilityDataError("pit_snapshot_members_duplicate")
+            snapshot_members_by_date.append((snapshot_date, tuple(sorted(members))))
     except AlphaFeasibilityDataError as exc:
         blockers.append({"reason": exc.code})
 
@@ -2940,11 +2921,12 @@ def validate_history_coverage(
     adj_status = "COMPLETE"
     daily_index: dict[tuple[str, str], Mapping[str, Any]] = {}
     suspend_index: dict[tuple[str, str], Mapping[str, Any]] = {}
+    adj_index: dict[tuple[str, str], Mapping[str, Any]] = {}
     adj_by_code: dict[str, list[tuple[date, Decimal]]] = {code: [] for code in union}
     try:
         daily_index = _unique_rows("daily", rows_by_endpoint["daily"])
-        if any(key[0] not in union_set for key in daily_index):
-            raise AlphaFeasibilityDataError("daily_contains_non_union_instrument")
+        if {key[0] for key in daily_index} != union_set:
+            raise AlphaFeasibilityDataError("index_weight_daily_code_mismatch")
         if any(key[1] not in set(open_dates) for key in daily_index):
             raise AlphaFeasibilityDataError("daily_row_not_on_open_session")
     except AlphaFeasibilityDataError as exc:
@@ -2976,51 +2958,190 @@ def validate_history_coverage(
         adj_status = "BLOCKED_DATA"
         blockers.append({"reason": exc.code})
 
-    missing_daily: list[tuple[str, str]] = []
-    missing_adj: list[tuple[str, str]] = []
-    unexplained_missing: list[tuple[str, str]] = []
-    if open_dates and set(basic_by_code) == union_set:
-        for code in union:
-            basic = basic_by_code[code]
-            listed = max(warmup, _parse_date(basic["list_date"], "list_date"))
-            delisted = (
-                min(end, _parse_date(basic["delist_date"], "delist_date"))
-                if basic.get("delist_date")
-                else end
+    missing_adj: set[tuple[str, str]] = set()
+    for key in daily_index:
+        code, trade_date_text = key
+        if _is_full_session_suspension(suspend_index.get(key)):
+            continue
+        trade_date = _parse_date(trade_date_text, "daily_trade_date")
+        if not adj_by_code[code] or adj_by_code[code][0][0] > trade_date:
+            missing_adj.add(key)
+    if missing_adj:
+        adj_status = "BLOCKED_DATA"
+    explained_suspension_missing: set[tuple[str, str]] = set()
+    unexplained_missing: set[tuple[str, str]] = set()
+    valid_candidate_count_by_decision: dict[str, int] = {}
+    insufficient_history_count_by_decision: dict[str, int] = {}
+    if (
+        open_dates
+        and snapshot_members_by_date
+        and daily_status == "COMPLETE"
+        and suspension_status == "COMPLETE"
+        and adj_status == "COMPLETE"
+    ):
+        try:
+            open_date_values = tuple(
+                _parse_date(item, "open_session") for item in open_dates
             )
-            factors = adj_by_code.get(code, [])
-            factor_index = 0
-            latest_factor: Decimal | None = None
-            has_prior_economic_value = False
-            for trade_date_text in open_dates:
-                trade_date = _parse_date(trade_date_text, "trade_date")
-                if trade_date < listed or trade_date > delisted:
+            open_position = {
+                trading_date: index for index, trading_date in enumerate(open_date_values)
+            }
+            development_start = _parse_date(
+                plan.config["dates"]["development_start"], "development_start"
+            )
+            report_dates = tuple(
+                item for item in open_date_values if development_start <= item <= end
+            )
+            if len(report_dates) < 2 or open_position[report_dates[0]] == 0:
+                raise AlphaFeasibilityDataError("decision_calendar_window_incomplete")
+            first_decision = open_date_values[open_position[report_dates[0]] - 1]
+            decision_dates = (first_decision, *report_dates[:-1])
+
+            valid_signal_keys: set[tuple[str, str]] = set()
+            first_real_position: dict[str, int] = {}
+            for code in union:
+                has_prior_economic_value = False
+                for position, trade_date_text in enumerate(open_dates):
+                    key = (code, trade_date_text)
+                    if _is_full_session_suspension(suspend_index.get(key)):
+                        if has_prior_economic_value:
+                            valid_signal_keys.add(key)
+                    elif key in daily_index:
+                        first_real_position.setdefault(code, position)
+                        has_prior_economic_value = True
+                        valid_signal_keys.add(key)
+
+            first_membership_position: dict[str, int] = {}
+            for snapshot_date, members in snapshot_members_by_date:
+                if snapshot_date not in open_position:
+                    raise AlphaFeasibilityDataError(
+                        "pit_snapshot_not_on_controlled_open_session"
+                    )
+                snapshot_position = open_position[snapshot_date]
+                for code in members:
+                    first_membership_position.setdefault(code, snapshot_position)
+
+            # Keep the panel and the engine's existing global-contiguity guard
+            # aligned: after the first real price, an observed series may not
+            # contain an unexplained interior hole, even while temporarily out
+            # of the index.  A trailing period is checked only when PIT makes it
+            # causally required below.
+            for code in union:
+                first_position = first_real_position.get(code)
+                observed_positions = [
+                    position
+                    for position, trade_date_text in enumerate(open_dates)
+                    if (code, trade_date_text) in daily_index
+                    or (code, trade_date_text) in suspend_index
+                ]
+                if first_position is None or not observed_positions:
                     continue
-                key = (code, trade_date_text)
-                if key not in daily_index:
-                    missing_daily.append(key)
-                    suspension = suspend_index.get(key)
-                    if not _is_full_session_suspension(suspension) or not has_prior_economic_value:
-                        unexplained_missing.append(key)
-                else:
-                    has_prior_economic_value = True
-                while factor_index < len(factors) and factors[factor_index][0] <= trade_date:
-                    latest_factor = factors[factor_index][1]
-                    factor_index += 1
-                # The standard Tushare adj_factor endpoint is a daily series.
-                # Requiring a same-session observation detects silent middle or
-                # tail truncation; the panel still performs a causal as-of join
-                # and therefore never consumes a future factor.
-                if key in daily_index and key not in adj_index:
-                    missing_adj.append(key)
+                for position in range(first_position, max(observed_positions) + 1):
+                    key = (code, open_dates[position])
+                    if key not in valid_signal_keys:
+                        unexplained_missing.add(key)
+
+            for decision_date in decision_dates:
+                visible = [
+                    item
+                    for item in snapshot_members_by_date
+                    if item[0] <= decision_date
+                ]
+                if not visible:
+                    raise AlphaFeasibilityDataError(
+                        "no_pit_snapshot_visible_for_decision"
+                    )
+                members = max(visible, key=lambda item: item[0])[1]
+                decision_position = open_position[decision_date]
+                window_start = max(
+                    0,
+                    decision_position - (MINIMUM_VALID_CONTROLLED_SESSIONS - 1),
+                )
+                window_positions = range(window_start, decision_position + 1)
+                valid_count = 0
+                insufficient_count = 0
+                for code in members:
+                    decision_key = (code, _compact(decision_date))
+                    if decision_key not in valid_signal_keys:
+                        first_position = first_real_position.get(code)
+                        first_membership = first_membership_position.get(code)
+                        if (
+                            _is_full_session_suspension(
+                                suspend_index.get(decision_key)
+                            )
+                            and first_membership is not None
+                            and decision_position >= first_membership
+                            and (
+                                first_position is None
+                                or decision_position < first_position
+                            )
+                        ):
+                            # A first-observation full-session suspension has
+                            # no earlier economic value to freeze.  It is an
+                            # individual history-ineligibility, not an
+                            # unexplained non-suspension data gap.
+                            insufficient_count += 1
+                            continue
+                        unexplained_missing.add(decision_key)
+                        continue
+                    first_position = first_real_position.get(code)
+                    has_gap = False
+                    has_pre_observation_prefix = False
+                    for position in window_positions:
+                        key = (code, open_dates[position])
+                        if key in valid_signal_keys:
+                            if key not in daily_index:
+                                explained_suspension_missing.add(key)
+                            elif key in missing_adj:
+                                missing_adj.add(key)
+                            continue
+                        first_membership = first_membership_position.get(code)
+                        if (
+                            _is_full_session_suspension(suspend_index.get(key))
+                            and first_position is not None
+                            and position < first_position
+                            and first_membership is not None
+                            and position >= first_membership
+                        ):
+                            has_pre_observation_prefix = True
+                            continue
+                        if (
+                            first_position is not None
+                            and position < first_position
+                            and (first_membership is None or position < first_membership)
+                        ):
+                            has_pre_observation_prefix = True
+                            continue
+                        unexplained_missing.add(key)
+                        has_gap = True
+                    if has_gap:
+                        continue
+                    if (
+                        len(window_positions)
+                        < MINIMUM_VALID_CONTROLLED_SESSIONS
+                        or has_pre_observation_prefix
+                    ):
+                        insufficient_count += 1
+                    elif not _is_full_session_suspension(
+                        suspend_index.get(decision_key)
+                    ):
+                        valid_count += 1
+                decision_text = _iso(decision_date)
+                valid_candidate_count_by_decision[decision_text] = valid_count
+                insufficient_history_count_by_decision[
+                    decision_text
+                ] = insufficient_count
+
+        except AlphaFeasibilityDataError as exc:
+            blockers.append({"reason": exc.code})
     if unexplained_missing:
         daily_status = "BLOCKED_DATA"
         suspension_status = "BLOCKED_DATA"
         blockers.append(
             {
-                "reason": "non_suspension_missing_daily",
+                "reason": UNEXPLAINED_MARKET_DATA_GAP_STATUS,
                 "count": len(unexplained_missing),
-                "sample": [list(item) for item in unexplained_missing[:20]],
+                "sample": [list(item) for item in sorted(unexplained_missing)[:20]],
             }
         )
     if missing_adj:
@@ -3029,7 +3150,7 @@ def validate_history_coverage(
             {
                 "reason": "missing_causal_adj_factor",
                 "count": len(missing_adj),
-                "sample": [list(item) for item in missing_adj[:20]],
+                "sample": [list(item) for item in sorted(missing_adj)[:20]],
             }
         )
     passed = not blockers
@@ -3046,9 +3167,19 @@ def validate_history_coverage(
         "adj_factor_coverage_status": adj_status,
         "suspension_coverage_status": suspension_status,
         "benchmark_coverage_status": benchmark_status,
-        "same_day_suspension_explained_missing_daily_count": len(missing_daily)
-        - len(unexplained_missing),
+        "stock_basic_status": STOCK_BASIC_STATUS,
+        "stock_basic_request_count": STOCK_BASIC_REQUEST_COUNT,
+        "security_master_pit_status": SECURITY_MASTER_PIT_STATUS,
+        "history_eligibility_status": INSUFFICIENT_HISTORY_STATUS,
+        "valid_candidate_count_by_decision": valid_candidate_count_by_decision,
+        "insufficient_history_count_by_decision": (
+            insufficient_history_count_by_decision
+        ),
+        "same_day_suspension_explained_missing_daily_count": len(
+            explained_suspension_missing
+        ),
         "non_suspension_missing_daily_count": len(unexplained_missing),
+        "unexplained_market_data_gap_count": len(unexplained_missing),
         "missing_causal_adj_factor_count": len(missing_adj),
         "terminal_session_next_session": None,
         "blockers": blockers,
@@ -3086,12 +3217,6 @@ def validate_history_coverage_from_store(
         raise AlphaFeasibilityDataError("global_history_task_plan_invalid")
     calendar_rows = list(load_task(by_endpoint["trade_cal"][0]).rows)
     benchmark_rows = list(load_task(by_endpoint["index_daily"][0]).rows)
-    basic_rows: list[Mapping[str, Any]] = []
-    for task in by_endpoint["stock_basic"]:
-        basic_rows.extend(load_task(task).rows)
-    basic_by_code = {row["ts_code"]: row for row in basic_rows}
-    if set(basic_by_code) != set(union_instruments) or len(basic_by_code) != len(basic_rows):
-        raise AlphaFeasibilityDataError("stock_basic_union_incomplete")
     adj_by_code = {
         task.scope_instruments[0]: task
         for task in by_endpoint["adj_factor"]
@@ -3121,7 +3246,9 @@ def validate_history_coverage_from_store(
                 else:
                     raise AlphaFeasibilityDataError("pit_snapshot_members_invalid")
                 if code not in union_set:
-                    raise AlphaFeasibilityDataError("pit_member_missing_stock_basic")
+                    raise AlphaFeasibilityDataError(
+                        "pit_member_outside_index_weight_union"
+                    )
                 if code in scope_set:
                     scoped_members.append(member)
             filtered.append({**dict(snapshot), "members": scoped_members})
@@ -3143,7 +3270,6 @@ def validate_history_coverage_from_store(
                 plan,
                 list(scope),
                 {
-                    "stock_basic": [basic_by_code[code] for code in scope],
                     "trade_cal": calendar_rows,
                     "daily": daily_rows,
                     "adj_factor": adj_rows,
@@ -3160,7 +3286,7 @@ def validate_history_coverage_from_store(
     trading_dates = partials[0].trading_dates
     if any(part.trading_dates != trading_dates for part in partials):
         raise AlphaFeasibilityDataError("batch_calendar_replay_mismatch")
-    blockers = sorted(
+    blocker_reasons = sorted(
         {
             str(item.get("reason", "history_coverage_incomplete"))
             for part in partials
@@ -3169,6 +3295,47 @@ def validate_history_coverage_from_store(
         }
     )
     passed = all(part.passed for part in partials)
+    decision_keys = sorted(
+        {
+            key
+            for part in partials
+            for key in part.report.get("valid_candidate_count_by_decision", {})
+        }
+        | {
+            key
+            for part in partials
+            for key in part.report.get("insufficient_history_count_by_decision", {})
+        }
+    )
+    valid_candidate_count_by_decision = {
+        key: sum(
+            int(part.report.get("valid_candidate_count_by_decision", {}).get(key, 0))
+            for part in partials
+        )
+        for key in decision_keys
+    }
+    insufficient_history_count_by_decision = {
+        key: sum(
+            int(
+                part.report.get("insufficient_history_count_by_decision", {}).get(
+                    key, 0
+                )
+            )
+            for part in partials
+        )
+        for key in decision_keys
+    }
+    if passed and not decision_keys:
+        raise AlphaFeasibilityDataError("decision_history_counts_missing")
+    if passed:
+        expected_decision_keys = set(decision_keys)
+        for part in partials:
+            if set(part.report.get("valid_candidate_count_by_decision", {})) != (
+                expected_decision_keys
+            ) or set(
+                part.report.get("insufficient_history_count_by_decision", {})
+            ) != expected_decision_keys:
+                raise AlphaFeasibilityDataError("decision_history_count_keys_mismatch")
     report = {
         "schema_version": "tushare-alpha-feasibility-history-coverage.v1",
         "experiment_id": plan.config["experiment_id"],
@@ -3198,6 +3365,14 @@ def validate_history_coverage_from_store(
             if all(part.report["benchmark_coverage_status"] == "COMPLETE" for part in partials)
             else "BLOCKED_DATA"
         ),
+        "stock_basic_status": STOCK_BASIC_STATUS,
+        "stock_basic_request_count": STOCK_BASIC_REQUEST_COUNT,
+        "security_master_pit_status": SECURITY_MASTER_PIT_STATUS,
+        "history_eligibility_status": INSUFFICIENT_HISTORY_STATUS,
+        "valid_candidate_count_by_decision": valid_candidate_count_by_decision,
+        "insufficient_history_count_by_decision": (
+            insufficient_history_count_by_decision
+        ),
         "same_day_suspension_explained_missing_daily_count": sum(
             int(part.report["same_day_suspension_explained_missing_daily_count"])
             for part in partials
@@ -3205,11 +3380,44 @@ def validate_history_coverage_from_store(
         "non_suspension_missing_daily_count": sum(
             int(part.report["non_suspension_missing_daily_count"]) for part in partials
         ),
+        "unexplained_market_data_gap_count": sum(
+            int(part.report["unexplained_market_data_gap_count"])
+            for part in partials
+        ),
         "missing_causal_adj_factor_count": sum(
             int(part.report["missing_causal_adj_factor_count"]) for part in partials
         ),
         "terminal_session_next_session": None,
-        "blockers": [{"reason": item} for item in blockers],
+        "blockers": [
+            (
+                {
+                    "reason": UNEXPLAINED_MARKET_DATA_GAP_STATUS,
+                    "count": sum(
+                        int(part.report["unexplained_market_data_gap_count"])
+                        for part in partials
+                    ),
+                    "sample": [
+                        list(item)
+                        for item in sorted(
+                            {
+                                tuple(sample)
+                                for part in partials
+                                for blocker in part.report.get("blockers", [])
+                                if isinstance(blocker, Mapping)
+                                and blocker.get("reason")
+                                == UNEXPLAINED_MARKET_DATA_GAP_STATUS
+                                for sample in blocker.get("sample", [])
+                                if isinstance(sample, (list, tuple))
+                                and len(sample) == 2
+                            }
+                        )[:20]
+                    ],
+                }
+                if reason == UNEXPLAINED_MARKET_DATA_GAP_STATUS
+                else {"reason": reason}
+            )
+            for reason in blocker_reasons
+        ],
         "locked_test_status": dict(LOCKED_TEST_STATUS),
         "locked_test_consumed": False,
     }
@@ -3246,11 +3454,6 @@ def build_history_manifest(
         "adj_factor": "complete" if coverage.report.get("adj_factor_coverage_status") == "COMPLETE" else "invalid",
         "suspend_d": "complete" if coverage.report.get("suspension_coverage_status") == "COMPLETE" else "invalid",
         "index_daily": "complete" if coverage.report.get("benchmark_coverage_status") == "COMPLETE" else "invalid",
-        "stock_basic": (
-            "complete"
-            if completed_by_endpoint["stock_basic"] == expected_by_endpoint["stock_basic"]
-            else "partial"
-        ),
     }
     for endpoint in tuple(status_by_endpoint):
         if completed_by_endpoint[endpoint] == 0:
@@ -3301,16 +3504,11 @@ def build_history_manifest(
             "normalized_content_sha256": canonical_sha256(pit_snapshots) if pit_snapshots else None,
             "issues": [] if pit_ready else ["pit_membership_missing"],
         },
-        "security_master": dataset("stock_basic", status_by_endpoint["stock_basic"]),
         "daily": dataset("daily", status_by_endpoint["daily"]),
         "adj_factor": dataset("adj_factor", status_by_endpoint["adj_factor"]),
         "suspension": dataset("suspend_d", status_by_endpoint["suspend_d"]),
         "benchmark": dataset("index_daily", status_by_endpoint["index_daily"]),
     }
-    # Security master has point metadata rather than a time-series date field.
-    if datasets["security_master"]["status"] == "complete":
-        datasets["security_master"]["coverage_start"] = plan.config["dates"]["signal_warmup_start"]
-        datasets["security_master"]["coverage_end"] = plan.config["dates"]["validation_end"]
     blockers = sorted(
         {
             str(item.get("reason", "history_coverage_incomplete"))
@@ -3319,8 +3517,10 @@ def build_history_manifest(
         }
     )
     complete = coverage.passed and len(results) == len(tasks) and pit_ready
+    if complete and int(coverage.report.get("unexplained_market_data_gap_count", 0)) != 0:
+        raise AlphaFeasibilityDataError("ready_history_contains_unexplained_gap")
     counts = (
-        {endpoint: int(request_counts.get(endpoint, 0)) for endpoint in ALLOWED_ENDPOINTS}
+        _strict_request_counts(request_counts)
         if request_counts is not None
         else {
             endpoint: (73 if endpoint == "index_weight" and pit_ready else 0)
@@ -3336,11 +3536,23 @@ def build_history_manifest(
             "coverage_start": plan.config["dates"]["signal_warmup_start"],
             "coverage_end": plan.config["dates"]["validation_end"],
             "actual_tushare_request_count_by_endpoint": counts,
+            "stock_basic_status": STOCK_BASIC_STATUS,
+            "stock_basic_request_count": STOCK_BASIC_REQUEST_COUNT,
+            "security_master_pit_status": SECURITY_MASTER_PIT_STATUS,
             "pit_months_expected": 73,
             "pit_months_observed": (
                 int(pit_result.coverage_report["pit_months_observed"]) if pit_result else 0
             ),
             "union_instrument_count": len(pit_result.union_instruments) if pit_result else 0,
+            "valid_candidate_count_by_decision": dict(
+                coverage.report.get("valid_candidate_count_by_decision", {})
+            ),
+            "insufficient_history_count_by_decision": dict(
+                coverage.report.get("insufficient_history_count_by_decision", {})
+            ),
+            "unexplained_market_data_gap_count": int(
+                coverage.report.get("unexplained_market_data_gap_count", 0)
+            ),
             "datasets": datasets,
             "data_status": "READY" if complete else "BLOCKED_DATA",
             "remaining_blockers": blockers if blockers else ([] if complete else ["history_tasks_incomplete"]),
@@ -3400,7 +3612,6 @@ def build_history_manifest_from_store(
     }
     coverage_status = {
         "trade_cal": "COMPLETE" if coverage.trading_dates else "BLOCKED_DATA",
-        "stock_basic": "COMPLETE" if len(summaries["stock_basic"]) == expected["stock_basic"] else "BLOCKED_DATA",
         "daily": coverage.report.get("daily_coverage_status"),
         "adj_factor": coverage.report.get("adj_factor_coverage_status"),
         "suspend_d": coverage.report.get("suspension_coverage_status"),
@@ -3452,7 +3663,6 @@ def build_history_manifest_from_store(
             "normalized_content_sha256": canonical_sha256(pit_snapshots) if pit_snapshots else None,
             "issues": [] if pit_result.passed else ["pit_membership_missing"],
         },
-        "security_master": dataset("stock_basic"),
         "daily": dataset("daily"),
         "adj_factor": dataset("adj_factor"),
         "suspension": dataset("suspend_d"),
@@ -3467,8 +3677,10 @@ def build_history_manifest_from_store(
     )
     complete = coverage.passed and all(
         len(summaries[endpoint]) == expected[endpoint]
-        for endpoint in ("trade_cal", "stock_basic", "daily", "adj_factor", "suspend_d", "index_daily")
+        for endpoint in ("trade_cal", "daily", "adj_factor", "suspend_d", "index_daily")
     )
+    if complete and int(coverage.report.get("unexplained_market_data_gap_count", 0)) != 0:
+        raise AlphaFeasibilityDataError("ready_history_contains_unexplained_gap")
     return MappingProxyType(
         _self_hashed(
             {
@@ -3477,12 +3689,26 @@ def build_history_manifest_from_store(
                 "generated_at": _generated_at(generated_at),
                 "coverage_start": plan.config["dates"]["signal_warmup_start"],
                 "coverage_end": plan.config["dates"]["validation_end"],
-                "actual_tushare_request_count_by_endpoint": {
-                    endpoint: int(request_counts.get(endpoint, 0)) for endpoint in ALLOWED_ENDPOINTS
-                },
+                "actual_tushare_request_count_by_endpoint": _strict_request_counts(
+                    request_counts
+                ),
+                "stock_basic_status": STOCK_BASIC_STATUS,
+                "stock_basic_request_count": STOCK_BASIC_REQUEST_COUNT,
+                "security_master_pit_status": SECURITY_MASTER_PIT_STATUS,
                 "pit_months_expected": 73,
                 "pit_months_observed": int(pit_result.coverage_report["pit_months_observed"]),
                 "union_instrument_count": len(pit_result.union_instruments),
+                "valid_candidate_count_by_decision": dict(
+                    coverage.report.get("valid_candidate_count_by_decision", {})
+                ),
+                "insufficient_history_count_by_decision": dict(
+                    coverage.report.get(
+                        "insufficient_history_count_by_decision", {}
+                    )
+                ),
+                "unexplained_market_data_gap_count": int(
+                    coverage.report.get("unexplained_market_data_gap_count", 0)
+                ),
                 "datasets": datasets,
                 "data_status": "READY" if complete else "BLOCKED_DATA",
                 "remaining_blockers": blockers if blockers else ([] if complete else ["history_tasks_incomplete"]),
@@ -3519,7 +3745,7 @@ def publish_history_artifacts(
 
 def build_total_return_panel(
     trading_dates: Iterable[date | str],
-    stock_basic_rows: Sequence[Mapping[str, Any]],
+    instrument_ids: Sequence[str],
     daily_rows: Sequence[Mapping[str, Any]],
     adj_factor_rows: Sequence[Mapping[str, Any]],
     suspension_rows: Sequence[Mapping[str, Any]],
@@ -3558,18 +3784,20 @@ def build_total_return_panel(
     if start > end or end > ABSOLUTE_CUTOFF:
         raise AlphaFeasibilityDataError("panel_date_boundary_invalid")
 
-    basics: dict[str, Mapping[str, Any]] = {}
-    for row in stock_basic_rows:
-        code = _normalized_code(row["ts_code"])
-        if code in basics:
-            raise AlphaFeasibilityDataError("duplicate_stock_basic_across_statuses")
-        basics[code] = row
+    instruments = tuple(sorted(instrument_ids))
+    if (
+        not instruments
+        or len(instruments) != len(set(instruments))
+        or any(_PIT_COMPONENT_CODE.fullmatch(code) is None for code in instruments)
+    ):
+        raise AlphaFeasibilityDataError("invalid_panel_instrument_union")
+    instrument_set = set(instruments)
     daily = _unique_rows("daily", daily_rows)
     suspensions = _unique_rows("suspend_d", suspension_rows)
     adj_index = _unique_rows("adj_factor", adj_factor_rows)
-    if any(code not in basics for code, _trade_date in daily):
-        raise AlphaFeasibilityDataError("daily_contains_non_panel_instrument")
-    if any(code not in basics for code, _trade_date in suspensions):
+    if {code for code, _trade_date in daily} != instrument_set:
+        raise AlphaFeasibilityDataError("index_weight_daily_code_mismatch")
+    if any(code not in instrument_set for code, _trade_date in suspensions):
         raise AlphaFeasibilityDataError("suspension_contains_non_panel_instrument")
     for endpoint_rows, date_field in (
         (daily_rows, "trade_date"),
@@ -3578,9 +3806,11 @@ def build_total_return_panel(
     ):
         if any(_parse_date(row[date_field], date_field) > ABSOLUTE_CUTOFF for row in endpoint_rows):
             raise AlphaFeasibilityDataError("post_cutoff_panel_input")
-    factors: dict[str, list[tuple[date, Decimal, str]]] = {code: [] for code in basics}
+    factors: dict[str, list[tuple[date, Decimal, str]]] = {
+        code: [] for code in instruments
+    }
     for (code, trade_date), row in adj_index.items():
-        if code not in basics:
+        if code not in instrument_set:
             raise AlphaFeasibilityDataError("adj_factor_contains_non_panel_instrument")
         factor, text = _decimal(row["adj_factor"], "adj_factor", minimum=Decimal("0"))
         if factor <= 0:
@@ -3590,20 +3820,30 @@ def build_total_return_panel(
         values.sort(key=lambda item: item[0])
 
     panel: list[dict[str, Any]] = []
-    for code in sorted(basics):
-        basic = basics[code]
-        listed = max(start, _parse_date(basic["list_date"], "list_date"))
-        delisted = (
-            min(end, _parse_date(basic["delist_date"], "delist_date"))
-            if basic.get("delist_date")
-            else end
-        )
+    for code in instruments:
+        real_dates = [
+            _parse_date(trade_date, "daily_trade_date")
+            for instrument, trade_date in daily
+            if instrument == code
+            and not _is_full_session_suspension(
+                suspensions.get((instrument, trade_date))
+            )
+        ]
+        observed_dates = real_dates + [
+            _parse_date(trade_date, "suspension_trade_date")
+            for instrument, trade_date in suspensions
+            if instrument == code
+        ]
+        if not real_dates:
+            raise AlphaFeasibilityDataError("index_weight_daily_code_mismatch")
+        first_real = max(start, min(real_dates))
+        last_observed = min(end, max(observed_dates))
         factor_values = factors[code]
         factor_cursor = 0
         latest_factor: tuple[date, Decimal, str] | None = None
         previous_economic_value: Decimal | None = None
         for trading_date in parsed_dates:
-            if trading_date < listed or trading_date > delisted:
+            if trading_date < first_real or trading_date > last_observed:
                 continue
             while (
                 factor_cursor < len(factor_values)
@@ -3616,7 +3856,9 @@ def build_total_return_panel(
             suspension = suspensions.get(key)
             if _is_full_session_suspension(suspension):
                 if previous_economic_value is None:
-                    raise AlphaFeasibilityDataError("suspension_without_prior_economic_value")
+                    # No security master exists in P1.  A leading suspension is
+                    # not allowed to invent a pre-observation price.
+                    continue
                 raw_values: dict[str, str | None] = {
                     "open": None,
                     "high": None,
@@ -3655,7 +3897,9 @@ def build_total_return_panel(
                     "suspend_type": "S",
                 }
             elif bar is None:
-                raise AlphaFeasibilityDataError("non_suspension_missing_daily")
+                raise AlphaFeasibilityDataError(
+                    UNEXPLAINED_MARKET_DATA_GAP_STATUS
+                )
             else:
                 if latest_factor is None:
                     raise AlphaFeasibilityDataError("missing_causal_adj_factor")
@@ -3870,6 +4114,9 @@ def _blocked_summary(
             expected_tasks,
             plan_sha256=plan.plan_sha256,
         ),
+        "stock_basic_status": STOCK_BASIC_STATUS,
+        "stock_basic_request_count": STOCK_BASIC_REQUEST_COUNT,
+        "security_master_pit_status": SECURITY_MASTER_PIT_STATUS,
         "request_count_semantics": "durable_network_call_started_claim",
         "coverage_start": plan.config["dates"]["signal_warmup_start"],
         "coverage_end": plan.config["dates"]["validation_end"],
@@ -3878,6 +4125,23 @@ def _blocked_summary(
             pit_result.coverage_report.get("pit_months_observed", 0) if pit_result else 0
         ),
         "union_instrument_count": len(pit_result.union_instruments) if pit_result else 0,
+        "valid_candidate_count_by_decision": (
+            dict(coverage.report.get("valid_candidate_count_by_decision", {}))
+            if coverage
+            else {}
+        ),
+        "insufficient_history_count_by_decision": (
+            dict(
+                coverage.report.get("insufficient_history_count_by_decision", {})
+            )
+            if coverage
+            else {}
+        ),
+        "unexplained_market_data_gap_count": (
+            int(coverage.report.get("unexplained_market_data_gap_count", 0))
+            if coverage
+            else 0
+        ),
         "daily_coverage_status": (
             coverage.report.get("daily_coverage_status", "BLOCKED_DATA")
             if coverage
@@ -3925,6 +4189,13 @@ def _blocked_history_coverage(
         "adj_factor_coverage_status": "BLOCKED_DATA",
         "suspension_coverage_status": "BLOCKED_DATA",
         "benchmark_coverage_status": "BLOCKED_DATA",
+        "stock_basic_status": STOCK_BASIC_STATUS,
+        "stock_basic_request_count": STOCK_BASIC_REQUEST_COUNT,
+        "security_master_pit_status": SECURITY_MASTER_PIT_STATUS,
+        "history_eligibility_status": INSUFFICIENT_HISTORY_STATUS,
+        "valid_candidate_count_by_decision": {},
+        "insufficient_history_count_by_decision": {},
+        "unexplained_market_data_gap_count": 0,
         "same_day_suspension_explained_missing_daily_count": 0,
         "non_suspension_missing_daily_count": 0,
         "missing_causal_adj_factor_count": 0,
@@ -4130,12 +4401,24 @@ def run_backfill(
             (*plan.pit_tasks, *history_tasks),
             plan_sha256=plan.plan_sha256,
         ),
+        "stock_basic_status": STOCK_BASIC_STATUS,
+        "stock_basic_request_count": STOCK_BASIC_REQUEST_COUNT,
+        "security_master_pit_status": SECURITY_MASTER_PIT_STATUS,
         "request_count_semantics": "durable_network_call_started_claim",
         "coverage_start": coverage.report["coverage_start"],
         "coverage_end": coverage.report["coverage_end"],
         "pit_months_expected": 73,
         "pit_months_observed": pit_result.coverage_report["pit_months_observed"],
         "union_instrument_count": len(pit_result.union_instruments),
+        "valid_candidate_count_by_decision": dict(
+            coverage.report["valid_candidate_count_by_decision"]
+        ),
+        "insufficient_history_count_by_decision": dict(
+            coverage.report["insufficient_history_count_by_decision"]
+        ),
+        "unexplained_market_data_gap_count": int(
+            coverage.report["unexplained_market_data_gap_count"]
+        ),
         "daily_coverage_status": coverage.report["daily_coverage_status"],
         "adj_factor_coverage_status": coverage.report["adj_factor_coverage_status"],
         "suspension_coverage_status": coverage.report["suspension_coverage_status"],
@@ -4193,7 +4476,7 @@ def load_feasibility_inputs(
     try:
         validate_json_schema(
             manifest,
-            Path(repository_root) / "schemas" / "tushare_alpha_feasibility_manifest.v1.json",
+            Path(repository_root) / "schemas" / "tushare_alpha_feasibility_manifest.v2.json",
         )
     except SchemaValidationError as exc:
         raise AlphaFeasibilityDataError("history_manifest_schema_invalid") from exc
@@ -4246,31 +4529,29 @@ def load_feasibility_inputs(
         endpoint: [task for task in expected_history_tasks if task.endpoint == endpoint]
         for endpoint in ALLOWED_ENDPOINTS
     }
-    basic_rows: list[Mapping[str, Any]] = []
-    for task in by_endpoint["stock_basic"]:
-        basic_rows.extend(store._load_response(task).rows)
-    basic_by_code = {row["ts_code"]: row for row in basic_rows}
     adj_by_code = {task.scope_instruments[0]: task for task in by_endpoint["adj_factor"]}
     suspend_by_scope = {task.scope_instruments: task for task in by_endpoint["suspend_d"]}
 
+    def panel_for_task(daily_task: CollectionTask) -> list[dict[str, Any]]:
+        scope = daily_task.scope_instruments
+        daily_rows = store._load_response(daily_task).rows
+        adj_rows: list[Mapping[str, Any]] = []
+        for code in scope:
+            adj_rows.extend(store._load_response(adj_by_code[code]).rows)
+        suspension_rows = store._load_response(suspend_by_scope[scope]).rows
+        return build_total_return_panel(
+            coverage.trading_dates,
+            list(scope),
+            daily_rows,
+            adj_rows,
+            suspension_rows,
+            coverage_start=plan.config["dates"]["signal_warmup_start"],
+            coverage_end=plan.config["dates"]["validation_end"],
+        )
+
     def signal_rows() -> Iterable[dict[str, Any]]:
         for daily_task in by_endpoint["daily"]:
-            scope = daily_task.scope_instruments
-            daily_rows = store._load_response(daily_task).rows
-            adj_rows: list[Mapping[str, Any]] = []
-            for code in scope:
-                adj_rows.extend(store._load_response(adj_by_code[code]).rows)
-            suspension_rows = store._load_response(suspend_by_scope[scope]).rows
-            batch = build_total_return_panel(
-                coverage.trading_dates,
-                [basic_by_code[code] for code in scope],
-                daily_rows,
-                adj_rows,
-                suspension_rows,
-                coverage_start=plan.config["dates"]["signal_warmup_start"],
-                coverage_end=plan.config["dates"]["validation_end"],
-            )
-            yield from batch
+            yield from panel_for_task(daily_task)
 
     benchmark_rows = store._load_response(by_endpoint["index_daily"][0]).rows
     benchmark_bars = [
@@ -4284,14 +4565,14 @@ def load_feasibility_inputs(
     ]
 
     def suspension_records() -> Iterable[dict[str, Any]]:
-        for task in by_endpoint["suspend_d"]:
-            for row in store._load_response(task).rows:
-                if _is_full_session_suspension(row):
+        for daily_task in by_endpoint["daily"]:
+            for row in panel_for_task(daily_task):
+                if row["is_suspended_carry"]:
                     yield {
-                        "trading_date": _iso(_parse_date(row["trade_date"], "suspension_date")),
+                        "trading_date": row["trading_date"],
                         "ts_code": row["ts_code"],
                         "instrument_id": row["ts_code"],
-                        "suspend_type": row["suspend_type"],
+                        "suspend_type": "S",
                     }
     snapshots = [
         {

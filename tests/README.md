@@ -48,7 +48,7 @@ Tushare Alpha Feasibility P1 专项：
 python -m unittest tests.test_tushare_alpha_feasibility tests.test_alpha_feasibility tests.test_alpha_feasibility_reporting tests.test_run_alpha_feasibility -v
 ```
 
-该组使用注入 transport 和内存反例验证73个月PIT、create-only重放、严格`code/msg/data` semantic core、通用受控transport extensions、九类协议稳定码、2 MiB响应/256 KiB扩展/8层嵌套等资源上限，以及`raw_transport_sha256`、`transport_extensions_sha256`、`normalized_content_sha256`三层身份隔离。用例覆盖`request_id`、多形态`detail`和未来未知字段可接受但不进入内容哈希，secret/Token/非JSON扩展失败关闭，以及非零上游code即使伴随合法扩展也必须进入权限、限频、账户认证、参数、服务端或未知错误分类并保持`BLOCKED_DATA`。该组还覆盖data内部严格契约、响应截止隔离、因果复权、停牌carry、完整日历、D+1开盘时序、冻结成本/Exposure、16项指标和四种终态；不访问网络，也不导入四个Locked Test模块。真实Tushare结果必须由独立CLI运行证据确认。
+该组使用注入 transport 和内存反例验证73个月PIT、P1.3六接口计划、`stock_basic`零请求/延期状态、121日个股资格、代码并集一致性、停牌解释、异常行情缺口关闭、create-only重放、严格`code/msg/data` semantic core、通用受控transport extensions、九类协议稳定码、2 MiB响应/256 KiB扩展/8层嵌套等资源上限，以及`raw_transport_sha256`、`transport_extensions_sha256`、`normalized_content_sha256`三层身份隔离。用例覆盖`request_id`、多形态`detail`和未来未知字段可接受但不进入内容哈希，secret/Token/非JSON扩展失败关闭，以及非零上游code即使伴随合法扩展也必须进入权限、限频、账户认证、参数、服务端或未知错误分类并保持`BLOCKED_DATA`。该组还覆盖data内部严格契约、响应截止隔离、因果复权、停牌carry、完整日历、D+1开盘时序、冻结成本/Exposure、16项指标和四种终态；不访问网络，也不导入四个Locked Test模块。真实Tushare结果必须由独立CLI运行证据确认。
 
 该组验证政策哈希、普通空意图拒绝、显式现金意图、风险退出普通换手豁免、物理受阻不连坐、intent/attempt跨重启幂等、旧SQLite迁移、账户CAS、规范化报价包、内部日历相邻性、费用后仓位上限、D日收盘触发后下一受控session退出、逐日重试、永久no-reentry latch，以及日频现金/持仓/NAV/回撤/三类仓位重放。它不包含Alpha/仓位模型、正式PIT数据、官方日历/行情registry或Locked Test运行；Gate approval也尚未直接绑定独立费率表，因此这些测试不能证明策略有效或Paper准入。
 

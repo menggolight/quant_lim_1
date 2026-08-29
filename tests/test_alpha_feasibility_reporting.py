@@ -25,18 +25,23 @@ def _counts() -> dict[str, int]:
         "adj_factor": 401,
         "index_daily": 1,
         "suspend_d": 401,
-        "stock_basic": 3,
     }
 
 
 def _complete_data() -> dict[str, object]:
     return {
         "actual_tushare_request_count_by_endpoint": _counts(),
+        "stock_basic_status": "DEFERRED_NOT_REQUIRED_FOR_ALPHA_FEASIBILITY",
+        "stock_basic_request_count": 0,
+        "security_master_pit_status": "NOT_IMPLEMENTED_NOT_REQUIRED_IN_P1",
         "coverage_start": "2017-07-01",
         "coverage_end": "2023-12-31",
         "pit_months_expected": 73,
         "pit_months_observed": 73,
         "union_instrument_count": 1200,
+        "valid_candidate_count_by_decision": {"2023-01-03": 1199},
+        "insufficient_history_count_by_decision": {"2023-01-03": 1},
+        "unexplained_market_data_gap_count": 0,
         "collection_plan_sha256": "1" * 64,
         "pit_membership_manifest_sha256": "2" * 64,
         "history_manifest_sha256": "3" * 64,
@@ -62,6 +67,9 @@ def _blocked_data() -> dict[str, object]:
         {
             "pit_months_observed": 72,
             "union_instrument_count": 0,
+            "valid_candidate_count_by_decision": {},
+            "insufficient_history_count_by_decision": {},
+            "unexplained_market_data_gap_count": 0,
             "daily_coverage_status": "not_run",
             "adj_factor_coverage_status": "not_run",
             "suspension_coverage_status": "not_run",
@@ -168,6 +176,28 @@ class AlphaFeasibilityReportingTests(unittest.TestCase):
         self.assertEqual(self.experiment["frozen_implementation"], reporting.FROZEN_IMPLEMENTATION)
         self.assertEqual(tuple(self.experiment["source"]["allowed_endpoints"]), reporting.ALLOWED_ENDPOINTS)
         self.assertEqual(set(self.experiment["requests"]), set(reporting.ALLOWED_ENDPOINTS))
+        self.assertEqual(
+            reporting.ALLOWED_ENDPOINTS,
+            (
+                "trade_cal",
+                "index_weight",
+                "daily",
+                "adj_factor",
+                "index_daily",
+                "suspend_d",
+            ),
+        )
+        self.assertNotIn("stock_basic", self.experiment["requests"])
+        self.assertEqual(
+            self.experiment["stock_basic_status"],
+            "DEFERRED_NOT_REQUIRED_FOR_ALPHA_FEASIBILITY",
+        )
+        self.assertEqual(self.experiment["stock_basic_request_count"], 0)
+        self.assertIs(type(self.experiment["stock_basic_request_count"]), int)
+        self.assertEqual(
+            self.experiment["security_master_pit_status"],
+            "NOT_IMPLEMENTED_NOT_REQUIRED_IN_P1",
+        )
         self.assertEqual(self.experiment["dates"], reporting.DATES)
         self.assertEqual(self.experiment["portfolio"], reporting.PORTFOLIO)
         self.assertEqual(self.experiment["costs"], reporting.COSTS)
@@ -189,6 +219,19 @@ class AlphaFeasibilityReportingTests(unittest.TestCase):
         self.assertEqual(report["locked_test_status"], reporting.LOCKED_TEST_STATUS)
         self.assertIs(report["locked_test_consumed"], False)
         self.assertEqual(report["safety"], reporting.SAFETY)
+        self.assertEqual(
+            report["stock_basic_status"],
+            "DEFERRED_NOT_REQUIRED_FOR_ALPHA_FEASIBILITY",
+        )
+        self.assertEqual(report["stock_basic_request_count"], 0)
+        self.assertIs(type(report["stock_basic_request_count"]), int)
+        self.assertEqual(
+            report["security_master_pit_status"],
+            "NOT_IMPLEMENTED_NOT_REQUIRED_IN_P1",
+        )
+        self.assertEqual(report["valid_candidate_count_by_decision"], {})
+        self.assertEqual(report["insufficient_history_count_by_decision"], {})
+        self.assertEqual(report["unexplained_market_data_gap_count"], 0)
         self.assertEqual(
             set(report["actual_tushare_request_count_by_endpoint"]),
             set(reporting.ALLOWED_ENDPOINTS),
@@ -264,7 +307,16 @@ class AlphaFeasibilityReportingTests(unittest.TestCase):
 
     def test_complete_report_go_candidate_and_all_sixteen_metrics(self) -> None:
         report = self._completed()
+        self.assertEqual(report["schema_version"], "technical-alpha-feasibility-report.v2")
         self.assertEqual(report["terminal_status"], "ALPHA_FEASIBILITY_GO_CANDIDATE")
+        self.assertEqual(
+            report["valid_candidate_count_by_decision"], {"2023-01-03": 1199}
+        )
+        self.assertEqual(
+            report["insufficient_history_count_by_decision"], {"2023-01-03": 1}
+        )
+        self.assertEqual(report["unexplained_market_data_gap_count"], 0)
+        self.assertEqual(report["stock_basic_request_count"], 0)
         for split in ("development_metrics", "validation_metrics"):
             self.assertEqual(set(report[split]), {"base", "stress"})
             for scenario in ("base", "stress"):
@@ -371,10 +423,8 @@ class AlphaFeasibilityReportingTests(unittest.TestCase):
                 generated_at=GENERATED_AT,
             )
 
-    def test_request_counts_require_exactly_seven_nonnegative_integer_keys(self) -> None:
-        data = _complete_data()
-        data["actual_tushare_request_count_by_endpoint"].pop("daily")
-        with self.assertRaisesRegex(reporting.AlphaFeasibilityReportingError, "exactly the seven"):
+    def test_request_counts_require_exactly_six_strict_nonnegative_integer_keys(self) -> None:
+        def build(data: dict[str, object]) -> None:
             reporting.build_completed_alpha_feasibility_report(
                 commit_sha=COMMIT_SHA,
                 data_summary=data,
@@ -383,6 +433,156 @@ class AlphaFeasibilityReportingTests(unittest.TestCase):
                 experiment=self.experiment,
                 generated_at=GENERATED_AT,
             )
+
+        mutations = {
+            "missing": lambda data: data[
+                "actual_tushare_request_count_by_endpoint"
+            ].pop("daily"),
+            "stock_basic_extra": lambda data: data[
+                "actual_tushare_request_count_by_endpoint"
+            ].__setitem__("stock_basic", 0),
+            "bool": lambda data: data[
+                "actual_tushare_request_count_by_endpoint"
+            ].__setitem__("daily", True),
+            "float": lambda data: data[
+                "actual_tushare_request_count_by_endpoint"
+            ].__setitem__("daily", 1.0),
+            "negative": lambda data: data[
+                "actual_tushare_request_count_by_endpoint"
+            ].__setitem__("daily", -1),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                data = _complete_data()
+                mutate(data)
+                with self.assertRaises(reporting.AlphaFeasibilityReportingError):
+                    build(data)
+
+    def test_v2_fixed_fields_and_decision_maps_have_strict_contracts(self) -> None:
+        def build(data: dict[str, object]) -> None:
+            reporting.build_completed_alpha_feasibility_report(
+                commit_sha=COMMIT_SHA,
+                data_summary=data,
+                development_metrics=_development(),
+                validation_metrics=_validation(),
+                experiment=self.experiment,
+                generated_at=GENERATED_AT,
+            )
+
+        mutations = {
+            "stock_status_missing": lambda data: data.pop("stock_basic_status"),
+            "stock_status": lambda data: data.__setitem__(
+                "stock_basic_status", "READY"
+            ),
+            "stock_count_missing": lambda data: data.pop(
+                "stock_basic_request_count"
+            ),
+            "stock_count_nonzero": lambda data: data.__setitem__(
+                "stock_basic_request_count", 1
+            ),
+            "stock_count_bool": lambda data: data.__setitem__(
+                "stock_basic_request_count", False
+            ),
+            "stock_count_float": lambda data: data.__setitem__(
+                "stock_basic_request_count", 0.0
+            ),
+            "stock_count_string": lambda data: data.__setitem__(
+                "stock_basic_request_count", "0"
+            ),
+            "security_master_status": lambda data: data.__setitem__(
+                "security_master_pit_status", "READY"
+            ),
+            "security_master_status_missing": lambda data: data.pop(
+                "security_master_pit_status"
+            ),
+            "valid_map_missing": lambda data: data.pop(
+                "valid_candidate_count_by_decision"
+            ),
+            "valid_map_not_object": lambda data: data.__setitem__(
+                "valid_candidate_count_by_decision", []
+            ),
+            "valid_map_bool": lambda data: data.__setitem__(
+                "valid_candidate_count_by_decision", {"2023-01-03": True}
+            ),
+            "valid_map_float": lambda data: data.__setitem__(
+                "valid_candidate_count_by_decision", {"2023-01-03": 1.0}
+            ),
+            "valid_map_negative": lambda data: data.__setitem__(
+                "valid_candidate_count_by_decision", {"2023-01-03": -1}
+            ),
+            "future_decision": lambda data: data.__setitem__(
+                "insufficient_history_count_by_decision", {"2024-01-02": 1}
+            ),
+            "insufficient_map_missing": lambda data: data.pop(
+                "insufficient_history_count_by_decision"
+            ),
+            "invalid_decision": lambda data: data.__setitem__(
+                "insufficient_history_count_by_decision", {"2023-02-30": 1}
+            ),
+            "decision_key_mismatch": lambda data: data.__setitem__(
+                "insufficient_history_count_by_decision", {"2023-01-04": 1}
+            ),
+            "gap_bool": lambda data: data.__setitem__(
+                "unexplained_market_data_gap_count", False
+            ),
+            "gap_missing": lambda data: data.pop(
+                "unexplained_market_data_gap_count"
+            ),
+            "gap_float": lambda data: data.__setitem__(
+                "unexplained_market_data_gap_count", 0.0
+            ),
+            "gap_negative": lambda data: data.__setitem__(
+                "unexplained_market_data_gap_count", -1
+            ),
+        }
+        for name, mutate in mutations.items():
+            with self.subTest(name=name):
+                data = _complete_data()
+                mutate(data)
+                with self.assertRaises(reporting.AlphaFeasibilityReportingError):
+                    build(data)
+
+    def test_ready_data_rejects_unexplained_gap_but_blocked_report_preserves_count(self) -> None:
+        ready = _complete_data()
+        ready["unexplained_market_data_gap_count"] = 1
+        with self.assertRaises(reporting.AlphaFeasibilityReportingError):
+            reporting.build_completed_alpha_feasibility_report(
+                commit_sha=COMMIT_SHA,
+                data_summary=ready,
+                development_metrics=_development(),
+                validation_metrics=_validation(),
+                experiment=self.experiment,
+                generated_at=GENERATED_AT,
+            )
+
+        blocked = _blocked_data()
+        blocked.update(
+            {
+                "pit_months_observed": 73,
+                "union_instrument_count": 1200,
+                "daily_coverage_status": "blocked",
+                "adj_factor_coverage_status": "complete",
+                "suspension_coverage_status": "blocked",
+                "benchmark_coverage_status": "complete",
+                "data_status": "BLOCKED_DATA",
+                "remaining_blockers": ["unexplained_market_data_gap"],
+                "valid_candidate_count_by_decision": {"2023-01-03": 1199},
+                "insufficient_history_count_by_decision": {"2023-01-03": 1},
+                "unexplained_market_data_gap_count": 2,
+            }
+        )
+        report = reporting.build_blocked_alpha_feasibility_report(
+            commit_sha=COMMIT_SHA,
+            data_summary=blocked,
+            experiment=self.experiment,
+            generated_at=GENERATED_AT,
+        )
+        self.assertEqual(report["terminal_status"], "BLOCKED_DATA")
+        self.assertEqual(report["unexplained_market_data_gap_count"], 2)
+        self.assertEqual(
+            report["insufficient_history_count_by_decision"], {"2023-01-03": 1}
+        )
+        self.assertIsNone(report["development_metrics"])
 
     def test_rehashed_terminal_and_concentration_drift_are_rejected(self) -> None:
         report = self._completed()

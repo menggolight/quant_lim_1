@@ -1,7 +1,7 @@
 """Run the independent, pre-Locked Tushare Alpha Feasibility workflow.
 
 The command has no Paper, broker, account, order, or Locked Test capability.
-It first validates the frozen experiment (including the seven-endpoint
+It first validates the frozen experiment (including the six-endpoint
 allowlist and the absolute 2023-12-31 cutoff), and only then delegates token
 lookup and create-only collection to the data lane.
 """
@@ -24,7 +24,7 @@ from research.strategy_workspace import alpha_feasibility as engine
 from research.strategy_workspace import alpha_feasibility_reporting as reporting
 
 
-DEFAULT_OUTPUT_ROOT = Path("data/tmp/alpha-feasibility/tushare-p1-v1")
+DEFAULT_OUTPUT_ROOT = Path("data/tmp/alpha-feasibility/tushare-p1-v2")
 PRECOLLECTION_BLOCKED_EVIDENCE_FILENAME = "precollection_blocked_evidence.json"
 SAFE_BLOCKER = re.compile(r"^[a-z0-9_]{3,96}$")
 COMPACT_DATE = re.compile(
@@ -256,6 +256,47 @@ def _reporting_data_summary(result: Mapping[str, Any]) -> dict[str, Any]:
     if pit_observed > reporting.PIT_MONTHS_EXPECTED:
         raise AlphaFeasibilityWorkflowError("pit_months_observed_invalid")
 
+    if result.get("stock_basic_status") != data_lane.STOCK_BASIC_STATUS:
+        raise AlphaFeasibilityWorkflowError("stock_basic_status_drift")
+    stock_basic_request_count = result.get("stock_basic_request_count")
+    if type(stock_basic_request_count) is not int or stock_basic_request_count != 0:
+        raise AlphaFeasibilityWorkflowError("stock_basic_request_count_invalid")
+    if (
+        result.get("security_master_pit_status")
+        != data_lane.SECURITY_MASTER_PIT_STATUS
+    ):
+        raise AlphaFeasibilityWorkflowError("security_master_pit_status_drift")
+
+    decision_counts: dict[str, dict[str, int]] = {}
+    for field in (
+        "valid_candidate_count_by_decision",
+        "insufficient_history_count_by_decision",
+    ):
+        supplied = result.get(field)
+        if not isinstance(supplied, Mapping):
+            raise AlphaFeasibilityWorkflowError(f"{field}_invalid")
+        normalized: dict[str, int] = {}
+        for key, value in supplied.items():
+            if type(key) is not str:
+                raise AlphaFeasibilityWorkflowError(f"{field}_invalid")
+            try:
+                parsed_key = date.fromisoformat(key)
+            except ValueError as exc:
+                raise AlphaFeasibilityWorkflowError(f"{field}_invalid") from exc
+            if parsed_key.isoformat() != key or parsed_key > engine.LATEST_ALLOWED_DATE:
+                raise AlphaFeasibilityWorkflowError(f"{field}_invalid")
+            if type(value) is not int or value < 0:
+                raise AlphaFeasibilityWorkflowError(f"{field}_invalid")
+            normalized[key] = value
+        decision_counts[field] = dict(sorted(normalized.items()))
+    if set(decision_counts["valid_candidate_count_by_decision"]) != set(
+        decision_counts["insufficient_history_count_by_decision"]
+    ):
+        raise AlphaFeasibilityWorkflowError("decision_count_keys_mismatch")
+    unexplained_gap_count = result.get("unexplained_market_data_gap_count")
+    if type(unexplained_gap_count) is not int or unexplained_gap_count < 0:
+        raise AlphaFeasibilityWorkflowError("unexplained_market_data_gap_count_invalid")
+
     provenance: dict[str, str | None] = {}
     for field in (
         "collection_plan_sha256",
@@ -289,6 +330,11 @@ def _reporting_data_summary(result: Mapping[str, Any]) -> dict[str, Any]:
         raise AlphaFeasibilityWorkflowError("ready_data_has_blockers")
     if not blocked and any(value is None for value in provenance.values()):
         raise AlphaFeasibilityWorkflowError("ready_data_provenance_incomplete")
+    if not blocked and (
+        unexplained_gap_count != 0
+        or not decision_counts["valid_candidate_count_by_decision"]
+    ):
+        raise AlphaFeasibilityWorkflowError("ready_history_eligibility_invalid")
 
     return {
         "actual_tushare_request_count_by_endpoint": safe_counts,
@@ -297,6 +343,11 @@ def _reporting_data_summary(result: Mapping[str, Any]) -> dict[str, Any]:
         "pit_months_expected": reporting.PIT_MONTHS_EXPECTED,
         "pit_months_observed": pit_observed,
         "union_instrument_count": union_count,
+        "stock_basic_status": data_lane.STOCK_BASIC_STATUS,
+        "stock_basic_request_count": 0,
+        "security_master_pit_status": data_lane.SECURITY_MASTER_PIT_STATUS,
+        **decision_counts,
+        "unexplained_market_data_gap_count": unexplained_gap_count,
         **provenance,
         **{field: _coverage_status(result.get(field)) for field in _COVERAGE_FIELDS},
         "data_status": "READY" if stage == READY_STAGE else stage,
@@ -502,11 +553,17 @@ def _safe_report_summary(report: Mapping[str, Any], report_path: Path) -> dict[s
     fields = (
         "commit_sha",
         "actual_tushare_request_count_by_endpoint",
+        "stock_basic_status",
+        "stock_basic_request_count",
+        "security_master_pit_status",
         "coverage_start",
         "coverage_end",
         "pit_months_expected",
         "pit_months_observed",
         "union_instrument_count",
+        "valid_candidate_count_by_decision",
+        "insufficient_history_count_by_decision",
+        "unexplained_market_data_gap_count",
         "collection_plan_sha256",
         "pit_membership_manifest_sha256",
         "history_manifest_sha256",
@@ -591,6 +648,12 @@ def run_workflow(
             "pit_months_expected": reporting.PIT_MONTHS_EXPECTED,
             "pit_months_observed": 0,
             "union_instrument_count": 0,
+            "stock_basic_status": data_lane.STOCK_BASIC_STATUS,
+            "stock_basic_request_count": 0,
+            "security_master_pit_status": data_lane.SECURITY_MASTER_PIT_STATUS,
+            "valid_candidate_count_by_decision": {},
+            "insufficient_history_count_by_decision": {},
+            "unexplained_market_data_gap_count": 0,
             "collection_plan_sha256": plan.plan_sha256,
             "pit_membership_manifest_sha256": None,
             "history_manifest_sha256": None,
@@ -648,6 +711,12 @@ def run_workflow(
                     "pit_months_expected",
                     "pit_months_observed",
                     "union_instrument_count",
+                    "stock_basic_status",
+                    "stock_basic_request_count",
+                    "security_master_pit_status",
+                    "valid_candidate_count_by_decision",
+                    "insufficient_history_count_by_decision",
+                    "unexplained_market_data_gap_count",
                     *_COVERAGE_FIELDS,
                     "locked_test_status",
                     "locked_test_consumed",

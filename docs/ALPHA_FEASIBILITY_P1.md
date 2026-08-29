@@ -6,14 +6,14 @@
 
 - 市场、策略、请求参数和消费者数据日期只允许 `2017-07-01..2023-12-31`；Development 为 `2018-01-01..2022-12-31`，Validation 为 `2023-01-01..2023-12-31`。`generated_at` 仅记录真实审计生成时点，不是市场数据、信号日期或 Locked Test 日期，任何消费者不得将其解释为特征。
 - 2024—2025 Locked Test 在配置、请求、缓存、DataFrame、消费者和报告层均不可达，固定为 `NOT_ACCESSED / NOT_DOWNLOADED / NOT_RUN`、`locked_test_consumed=false`。
-- Tushare 仅允许标准只读 `trade_cal`、`index_weight`、`daily`、`adj_factor`、`index_daily`、`suspend_d`、`stock_basic`；不用 `pro_bar`、`*_vip`、Choice、券商、账户或订单接口，也不做字段级 BaoStock fallback。
+- P1.3 仅允许标准只读 `trade_cal`、`index_weight`、`daily`、`adj_factor`、`index_daily`、`suspend_d` 六个接口；`stock_basic` 延期且请求数固定为0，不下载当前快照，也不建设历史时点 security master。仍不用 `pro_bar`、`*_vip`、Choice、券商、账户或订单接口，也不做字段级 BaoStock fallback。
 - 六因子、权重、entry/hold 门槛、Exposure 阈值、最多3只、单只40%及0/30/60/100%总仓位均由源文件 SHA-256 绑定，运行时再次核验实际 ranker 与 Exposure 源码。
 
 ## 数据门
 
 标准入口先逐月请求 `000906.SH` 的 `2017-12..2023-12` 共73个 `index_weight` 窗口。每月必须存在合法截面、代码唯一、权重非负且权重和落在逐行末位精度推导的容差内。成分数不是800时，只有绑定中证指数公司正式证据、月份、截面日、实际数量、原因和源文件哈希的受控说明才可放行；否则阶段状态为 `BLOCKED_PIT_MEMBERSHIP`，最终状态为 `BLOCKED_DATA`，不会规划股票历史任务。
 
-PIT 通过后，只对73个月合法截面的成员并集回填。所有请求在本地形成不含 Token 的参数指纹、started claim、规范化响应哈希和 create-only 产物；完整任务离线重放，已开始但没有持久化响应的远端调用按歧义失败关闭，不自动重发。上游响应或错误字段一旦出现 `2024-01-01` 及以后日期，在进入消费者前隔离且不保存原始正文。
+PIT 通过后，只对73个月合法截面的成员并集回填。每个决策日只能选择当日或之前最新合法 `index_weight` 截面；`con_code` 必须是沪深A股格式，并与 `daily.ts_code` 并集精确一致。不得用当前成分、`stock_basic` 或其他当前快照回填历史。所有请求在本地形成不含 Token 的参数指纹、started claim、规范化响应哈希和 create-only 产物；完整任务离线重放，已开始但没有持久化响应的远端调用按歧义失败关闭，不自动重发。上游响应或错误字段一旦出现 `2024-01-01` 及以后日期，在进入消费者前隔离且不保存原始正文。
 
 Tushare HTTP 根包络分为严格 `semantic_core` 与受控 `transport_extensions`。`semantic_core` 必须且只能按语义解释 `code/msg/data`：根必须是无重复key的JSON object，`code`必须是int且不接受bool，`msg`只能是string或null；`code=0`时`data`必须是object，`code!=0`时`data`只能是null或受控错误object。缺少核心字段或类型漂移一律失败关闭。非零`code`仍须按结构化code、msg和HTTP状态进入权限、限频、账户认证、参数、服务端或未知上游错误分类；扩展字段存在不能绕过非零`code`。
 
@@ -28,11 +28,12 @@ Tushare HTTP 根包络分为严格 `semantic_core` 与受控 `transport_extensio
 历史完整性要求：
 
 - `trade_cal` 覆盖每个自然日并校验 `pretrade_date`、年度开市日数量和窗口内下一交易日映射；末日不跨到2024。
-- `stock_basic` 分别请求 `L/D/P` 并逐行核对响应状态，只用于上市日、退市日、代码和交易所校验。
 - `daily` 保存未复权 OHLCV 及单位；`adj_factor` 只做当日或之前 as-of；`index_daily` 完整覆盖每个开市日。
-- 上市日至退市日之间的每个开市日必须有 `daily`，或有同日全日 `suspend_d` 且已有前一经济价值；其他缺口失败关闭。本轮不实现退市终值，也不因已知退市日提前卖出。
+- 每个决策日按121个有效受控交易日判断个股资格：不足121日只记 `ineligible_insufficient_history`，不阻断整月；报告同时记录有效候选数和历史不足数。
+- 首个可观察价格以前不填充价格。已有经济价值后的缺失日只有同日全时段 `suspend_d` 才能冻结沿用；非停牌内部缺口记 `unexplained_market_data_gap` 并失败关闭，不补0、不前向填充成交价格，也不跨 Provider 补字段。
+- `stock_basic_status=DEFERRED_NOT_REQUIRED_FOR_ALPHA_FEASIBILITY`、`stock_basic_request_count=0`、`security_master_pit_status=NOT_IMPLEMENTED_NOT_REQUIRED_IN_P1` 是配置、manifest、CLI 和最终报告的固定契约；`stock_basic` 缺失本身不得成为 `BLOCKED_DATA`。
 
-正式数据产物位于忽略提交的 `data/tmp/alpha-feasibility/tushare-p1-v1/`，其中至少包括：
+正式数据产物位于忽略提交的 `data/tmp/alpha-feasibility/tushare-p1-v2/`，其中至少包括：
 
 - `pit_membership_coverage_report.json`
 - `pit_membership_manifest.json`
@@ -52,8 +53,8 @@ Tushare HTTP 根包络分为严格 `semantic_core` 与受控 `transport_extensio
 
 ```powershell
 python -m operations.run_alpha_feasibility all `
-  --config configs/a_share_technical_alpha_feasibility.v1.json `
-  --output-root data/tmp/alpha-feasibility/tushare-p1-v1
+  --config configs/a_share_technical_alpha_feasibility.v2.json `
+  --output-root data/tmp/alpha-feasibility/tushare-p1-v2
 ```
 
 `data` 子命令只完成数据门；默认 `all` 在数据验签通过后运行 Development/Validation 的 base/stress。禁止参数搜索、按2023结果重训或调整阈值。终态只有：
@@ -64,5 +65,7 @@ python -m operations.run_alpha_feasibility all `
 - `BLOCKED_ADAPTER_PROTOCOL`：Tushare HTTP/JSON包络或data结构违反严格适配器契约；报告不含 Development/Validation 指标。
 
 即使为 GO candidate，也只是后续工程候选，不是实盘收益、Paper 准入、股票推荐或交易授权。
+
+最终报告还固定输出 `stock_basic_status`、`stock_basic_request_count`、`security_master_pit_status`、`valid_candidate_count_by_decision`、`insufficient_history_count_by_decision` 与 `unexplained_market_data_gap_count`；Locked Test 三项状态保持 `NOT_ACCESSED / NOT_DOWNLOADED / NOT_RUN`，`locked_test_consumed=false`。
 
 为避免 IEEE-754 舍入把极小越界误判为通过，报告中的收益率、回撤、换手、成本、Exposure 和集中度均以 canonical decimal string 持久化；门禁使用 `Decimal` 精确比较。

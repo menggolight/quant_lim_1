@@ -2,7 +2,7 @@
 
 The module deliberately consumes plain mappings.  It never reads raw market
 data or backtest rows, and it never opens a Locked Test path.  Its only jobs are
-to bind already-aggregated Development/Validation evidence to the frozen V1
+to bind already-aggregated Development/Validation evidence to the frozen V2
 experiment, derive the pre-registered terminal gate, and publish one immutable
 self-hashed report.
 """
@@ -13,7 +13,7 @@ import json
 import os
 import re
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timedelta, timezone
+from datetime import date, datetime, timedelta, timezone
 from decimal import Decimal
 from hashlib import sha256
 from pathlib import Path
@@ -25,25 +25,29 @@ from research.strategy_workspace.contracts import canonical_json_bytes, canonica
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = (
-    REPOSITORY_ROOT / "configs" / "a_share_technical_alpha_feasibility.v1.json"
+    REPOSITORY_ROOT / "configs" / "a_share_technical_alpha_feasibility.v2.json"
 )
 EXPERIMENT_SCHEMA_PATH = (
-    REPOSITORY_ROOT / "schemas" / "technical_alpha_feasibility_experiment.v1.json"
+    REPOSITORY_ROOT / "schemas" / "technical_alpha_feasibility_experiment.v2.json"
 )
 REPORT_SCHEMA_PATH = (
-    REPOSITORY_ROOT / "schemas" / "technical_alpha_feasibility_report.v1.json"
+    REPOSITORY_ROOT / "schemas" / "technical_alpha_feasibility_report.v2.json"
 )
 ALPHA_FEASIBILITY_ENGINE_PATH = (
     REPOSITORY_ROOT / "research" / "strategy_workspace" / "alpha_feasibility.py"
 )
 
 REPORT_FILENAME = "alpha_feasibility_report.json"
-REPORT_SCHEMA_VERSION = "technical-alpha-feasibility-report.v1"
+REPORT_SCHEMA_VERSION = "technical-alpha-feasibility-report.v2"
 EXPERIMENT_ID = "a-share-technical-alpha-feasibility-tushare-p1-v1"
 COVERAGE_START = "2017-07-01"
 COVERAGE_END = "2023-12-31"
 PIT_MONTHS_EXPECTED = 73
 CHINA_TZ = timezone(timedelta(hours=8), name="Asia/Shanghai")
+
+STOCK_BASIC_STATUS = "DEFERRED_NOT_REQUIRED_FOR_ALPHA_FEASIBILITY"
+STOCK_BASIC_REQUEST_COUNT = 0
+SECURITY_MASTER_PIT_STATUS = "NOT_IMPLEMENTED_NOT_REQUIRED_IN_P1"
 
 ALLOWED_ENDPOINTS = (
     "trade_cal",
@@ -52,7 +56,6 @@ ALLOWED_ENDPOINTS = (
     "adj_factor",
     "index_daily",
     "suspend_d",
-    "stock_basic",
 )
 ADAPTER_PROTOCOL_BLOCKERS = frozenset(
     {
@@ -152,11 +155,11 @@ GATE = {
     "validation_driven_retraining_forbidden": True,
 }
 
-# This is the canonical-JSON hash of the complete checked-in V1 experiment.
+# This is the canonical-JSON hash of the complete checked-in V2 experiment.
 # It makes otherwise loose object sections in the JSON Schema fail closed too,
 # while remaining insensitive to whitespace and object key ordering.
 EXPECTED_EXPERIMENT_CANONICAL_SHA256 = (
-    "a053b92fdb4d3bcd2f8a636db6388b508d52777300043d2a25ab968fbbeb364b"
+    "3338cbd852d3eec4adfef57a71855d80bdbcfd5db2bbcef94b8c06410de5d94f"
 )
 
 METRIC_FIELDS = (
@@ -255,8 +258,21 @@ def _require_exact(
         raise AlphaFeasibilityReportingError(f"experiment config {field} drift")
 
 
+def _require_exact_typed(
+    supplied: Mapping[str, Any],
+    field: str,
+    expected: Any,
+    *,
+    context: str,
+) -> Any:
+    value = supplied.get(field)
+    if type(value) is not type(expected) or value != expected:
+        raise AlphaFeasibilityReportingError(f"{context} {field} drift")
+    return value
+
+
 def validate_experiment_config(experiment: Mapping[str, Any]) -> dict[str, Any]:
-    """Validate the whole V1 config and the bytes of all frozen files."""
+    """Validate the whole V2 config and the bytes of all frozen files."""
 
     if not isinstance(experiment, Mapping):
         raise AlphaFeasibilityReportingError("experiment config must be a mapping")
@@ -268,10 +284,28 @@ def validate_experiment_config(experiment: Mapping[str, Any]) -> dict[str, Any]:
             f"experiment config schema violation: {exc}"
         ) from exc
 
-    _require_exact(candidate, "schema_version", "technical-alpha-feasibility-experiment.v1")
+    _require_exact(candidate, "schema_version", "technical-alpha-feasibility-experiment.v2")
     _require_exact(candidate, "experiment_id", EXPERIMENT_ID)
     _require_exact(candidate, "strategy_id", "a-share-technical-momentum-adaptive-v1")
     _require_exact(candidate, "research_status", "research_alpha_feasibility_only")
+    _require_exact_typed(
+        candidate,
+        "stock_basic_status",
+        STOCK_BASIC_STATUS,
+        context="experiment config",
+    )
+    _require_exact_typed(
+        candidate,
+        "stock_basic_request_count",
+        STOCK_BASIC_REQUEST_COUNT,
+        context="experiment config",
+    )
+    _require_exact_typed(
+        candidate,
+        "security_master_pit_status",
+        SECURITY_MASTER_PIT_STATUS,
+        context="experiment config",
+    )
     _require_exact(candidate, "frozen_implementation", FROZEN_IMPLEMENTATION)
     _require_exact(candidate, "dates", DATES)
     _require_exact(candidate, "portfolio", PORTFOLIO)
@@ -451,12 +485,68 @@ def _unique_strings(values: Any, field: str) -> list[str]:
 def _request_counts(value: Any) -> dict[str, int]:
     if not isinstance(value, Mapping) or set(value) != set(ALLOWED_ENDPOINTS):
         raise AlphaFeasibilityReportingError(
-            "actual_tushare_request_count_by_endpoint must contain exactly the seven allowed endpoints"
+            "actual_tushare_request_count_by_endpoint must contain exactly the six allowed endpoints"
         )
     return {
         endpoint: _nonnegative_integer(value[endpoint], f"request count {endpoint}")
         for endpoint in ALLOWED_ENDPOINTS
     }
+
+
+def _fixed_data_contract(
+    summary: Mapping[str, Any], *, blocked_defaults: bool
+) -> dict[str, Any]:
+    result: dict[str, Any] = {}
+    for field, expected in (
+        ("stock_basic_status", STOCK_BASIC_STATUS),
+        ("stock_basic_request_count", STOCK_BASIC_REQUEST_COUNT),
+        ("security_master_pit_status", SECURITY_MASTER_PIT_STATUS),
+    ):
+        if field not in summary:
+            if not blocked_defaults:
+                raise AlphaFeasibilityReportingError(
+                    f"data summary {field} is missing"
+                )
+            result[field] = expected
+            continue
+        result[field] = _require_exact_typed(
+            summary,
+            field,
+            expected,
+            context="data summary",
+        )
+    return result
+
+
+def _decision_count_map(value: Any, field: str) -> dict[str, int]:
+    if not isinstance(value, Mapping):
+        raise AlphaFeasibilityReportingError(f"{field} must be a mapping")
+    cutoff = date.fromisoformat(COVERAGE_END)
+    normalized: dict[str, int] = {}
+    for decision_key, count in value.items():
+        if not isinstance(decision_key, str):
+            raise AlphaFeasibilityReportingError(
+                f"{field} keys must be ISO dates"
+            )
+        try:
+            decision_date = date.fromisoformat(decision_key)
+        except ValueError as exc:
+            raise AlphaFeasibilityReportingError(
+                f"{field} keys must be valid ISO dates"
+            ) from exc
+        if decision_date.isoformat() != decision_key:
+            raise AlphaFeasibilityReportingError(
+                f"{field} keys must be canonical ISO dates"
+            )
+        if decision_date > cutoff:
+            raise AlphaFeasibilityReportingError(
+                f"{field} contains a decision date after {COVERAGE_END}"
+            )
+        normalized[decision_key] = _nonnegative_integer(
+            count,
+            f"{field}[{decision_key}]",
+        )
+    return {key: normalized[key] for key in sorted(normalized)}
 
 
 def _coverage_status(summary: Mapping[str, Any], field: str, *, blocked_defaults: bool) -> str:
@@ -496,6 +586,10 @@ def _normalize_data_summary(
     if summary.get("pit_months_expected", PIT_MONTHS_EXPECTED) != PIT_MONTHS_EXPECTED:
         raise AlphaFeasibilityReportingError("pit_months_expected differs from frozen range")
 
+    fixed_data_contract = _fixed_data_contract(
+        summary,
+        blocked_defaults=blocked_defaults,
+    )
     default_counts = {endpoint: 0 for endpoint in ALLOWED_ENDPOINTS}
     raw_counts = summary.get("actual_tushare_request_count_by_endpoint")
     if raw_counts is None and blocked_defaults:
@@ -508,6 +602,31 @@ def _normalize_data_summary(
     union_count = _nonnegative_integer(union_count, "union_instrument_count")
     if pit_observed > PIT_MONTHS_EXPECTED:
         raise AlphaFeasibilityReportingError("pit_months_observed exceeds expected months")
+
+    raw_valid_candidate_counts = summary.get("valid_candidate_count_by_decision")
+    raw_insufficient_history_counts = summary.get(
+        "insufficient_history_count_by_decision"
+    )
+    if blocked_defaults:
+        if raw_valid_candidate_counts is None:
+            raw_valid_candidate_counts = {}
+        if raw_insufficient_history_counts is None:
+            raw_insufficient_history_counts = {}
+    valid_candidate_counts = _decision_count_map(
+        raw_valid_candidate_counts,
+        "valid_candidate_count_by_decision",
+    )
+    insufficient_history_counts = _decision_count_map(
+        raw_insufficient_history_counts,
+        "insufficient_history_count_by_decision",
+    )
+    unexplained_gap_count = _nonnegative_integer(
+        summary.get(
+            "unexplained_market_data_gap_count",
+            0 if blocked_defaults else None,
+        ),
+        "unexplained_market_data_gap_count",
+    )
 
     allow_missing_provenance = (
         blocked_defaults
@@ -551,11 +670,15 @@ def _normalize_data_summary(
 
     return {
         "actual_tushare_request_count_by_endpoint": counts,
+        **fixed_data_contract,
         "coverage_start": COVERAGE_START,
         "coverage_end": COVERAGE_END,
         "pit_months_expected": PIT_MONTHS_EXPECTED,
         "pit_months_observed": pit_observed,
         "union_instrument_count": union_count,
+        "valid_candidate_count_by_decision": valid_candidate_counts,
+        "insufficient_history_count_by_decision": insufficient_history_counts,
+        "unexplained_market_data_gap_count": unexplained_gap_count,
         **provenance,
         **{
             field: _coverage_status(summary, field, blocked_defaults=blocked_defaults)
@@ -824,11 +947,23 @@ def _report_base(
         "actual_tushare_request_count_by_endpoint": data_summary[
             "actual_tushare_request_count_by_endpoint"
         ],
+        "stock_basic_status": data_summary["stock_basic_status"],
+        "stock_basic_request_count": data_summary["stock_basic_request_count"],
+        "security_master_pit_status": data_summary["security_master_pit_status"],
         "coverage_start": data_summary["coverage_start"],
         "coverage_end": data_summary["coverage_end"],
         "pit_months_expected": data_summary["pit_months_expected"],
         "pit_months_observed": data_summary["pit_months_observed"],
         "union_instrument_count": data_summary["union_instrument_count"],
+        "valid_candidate_count_by_decision": data_summary[
+            "valid_candidate_count_by_decision"
+        ],
+        "insufficient_history_count_by_decision": data_summary[
+            "insufficient_history_count_by_decision"
+        ],
+        "unexplained_market_data_gap_count": data_summary[
+            "unexplained_market_data_gap_count"
+        ],
         "collection_plan_sha256": data_summary["collection_plan_sha256"],
         "pit_membership_manifest_sha256": data_summary[
             "pit_membership_manifest_sha256"
@@ -924,6 +1059,29 @@ def _assert_completed_data(data: Mapping[str, Any]) -> None:
         raise AlphaFeasibilityReportingError("completed report requires all PIT months")
     if data["union_instrument_count"] <= 0:
         raise AlphaFeasibilityReportingError("completed report requires a non-empty union")
+    valid_candidate_counts = data["valid_candidate_count_by_decision"]
+    insufficient_history_counts = data["insufficient_history_count_by_decision"]
+    if not valid_candidate_counts or not insufficient_history_counts:
+        raise AlphaFeasibilityReportingError(
+            "completed report requires non-empty decision count maps"
+        )
+    if set(valid_candidate_counts) != set(insufficient_history_counts):
+        raise AlphaFeasibilityReportingError(
+            "completed report decision count map keys must match exactly"
+        )
+    if any(
+        valid_candidate_counts[decision]
+        + insufficient_history_counts[decision]
+        > data["union_instrument_count"]
+        for decision in valid_candidate_counts
+    ):
+        raise AlphaFeasibilityReportingError(
+            "completed report decision counts cannot exceed the instrument union"
+        )
+    if data["unexplained_market_data_gap_count"] != 0:
+        raise AlphaFeasibilityReportingError(
+            "completed report requires zero unexplained market-data gaps"
+        )
     if any(
         data[field] is None
         for field in (
@@ -1125,6 +1283,9 @@ __all__ = [
     "PIT_MONTHS_EXPECTED",
     "REPORT_FILENAME",
     "SAFETY",
+    "SECURITY_MASTER_PIT_STATUS",
+    "STOCK_BASIC_REQUEST_COUNT",
+    "STOCK_BASIC_STATUS",
     "build_blocked_alpha_feasibility_report",
     "build_blocked_report",
     "build_completed_alpha_feasibility_report",

@@ -3,6 +3,7 @@ from __future__ import annotations
 import copy
 import io
 import json
+import sys
 import tempfile
 import unittest
 from decimal import Decimal
@@ -26,7 +27,6 @@ def _counts() -> dict[str, int]:
         "adj_factor": 1,
         "index_daily": 1,
         "suspend_d": 1,
-        "stock_basic": 3,
     }
 
 
@@ -46,11 +46,21 @@ def _backfill(*, stage: str, blocker: str | None = None) -> dict[str, object]:
         ),
         "generated_at": GENERATED_AT,
         "actual_tushare_request_count_by_endpoint": _counts(),
+        "stock_basic_status": "DEFERRED_NOT_REQUIRED_FOR_ALPHA_FEASIBILITY",
+        "stock_basic_request_count": 0,
+        "security_master_pit_status": "NOT_IMPLEMENTED_NOT_REQUIRED_IN_P1",
         "coverage_start": "2017-07-01",
         "coverage_end": "2023-12-31",
         "pit_months_expected": 73,
         "pit_months_observed": 72 if blocked else 73,
         "union_instrument_count": 0 if blocked else 1,
+        "valid_candidate_count_by_decision": (
+            {} if blocked else {"2023-01-03": 1}
+        ),
+        "insufficient_history_count_by_decision": (
+            {} if blocked else {"2023-01-03": 0}
+        ),
+        "unexplained_market_data_gap_count": 0,
         "collection_plan_sha256": "1" * 64,
         "pit_membership_manifest_sha256": "2" * 64,
         "history_manifest_sha256": None if blocked else "3" * 64,
@@ -148,6 +158,15 @@ def _study() -> SimpleNamespace:
 
 
 class RunAlphaFeasibilityCliTests(unittest.TestCase):
+    def test_locked_test_modules_are_never_imported(self) -> None:
+        forbidden = (
+            "tests.test_strategy_workspace_admission",
+            "tests.test_strategy_workspace_evaluation",
+            "tests.test_strategy_workspace_experiment",
+            "tests.test_strategy_workspace_top_decile_backtest",
+        )
+        self.assertTrue(all(name not in sys.modules for name in forbidden))
+
     def test_adapter_protocol_failure_sets_remain_exactly_aligned(self) -> None:
         expected = {
             "duplicate_json_key",
@@ -175,6 +194,9 @@ class RunAlphaFeasibilityCliTests(unittest.TestCase):
             "forbidden_endpoint": lambda value: value["source"][
                 "allowed_endpoints"
             ].append("daily_basic"),
+            "stock_basic_endpoint": lambda value: value["source"][
+                "allowed_endpoints"
+            ].append("stock_basic"),
         }
         for name, mutate in mutations.items():
             with self.subTest(name=name), tempfile.TemporaryDirectory() as temp_dir:
@@ -199,6 +221,118 @@ class RunAlphaFeasibilityCliTests(unittest.TestCase):
                 self.assertEqual(code, 2)
                 backfill.assert_not_called()
                 self.assertFalse(output_root.exists())
+
+    def test_reporting_boundary_enforces_v2_fixed_fields_maps_and_gap_types(self) -> None:
+        invalid_mutations = {
+            "request_count_missing": lambda result: result[
+                "actual_tushare_request_count_by_endpoint"
+            ].pop("daily"),
+            "request_count_stock_extra": lambda result: result[
+                "actual_tushare_request_count_by_endpoint"
+            ].__setitem__("stock_basic", 0),
+            "request_count_bool": lambda result: result[
+                "actual_tushare_request_count_by_endpoint"
+            ].__setitem__("daily", True),
+            "stock_status_missing": lambda result: result.pop(
+                "stock_basic_status"
+            ),
+            "stock_status_drift": lambda result: result.__setitem__(
+                "stock_basic_status", "READY"
+            ),
+            "stock_count_missing": lambda result: result.pop(
+                "stock_basic_request_count"
+            ),
+            "stock_count_nonzero": lambda result: result.__setitem__(
+                "stock_basic_request_count", 1
+            ),
+            "stock_count_bool": lambda result: result.__setitem__(
+                "stock_basic_request_count", False
+            ),
+            "stock_count_float": lambda result: result.__setitem__(
+                "stock_basic_request_count", 0.0
+            ),
+            "security_master_status_missing": lambda result: result.pop(
+                "security_master_pit_status"
+            ),
+            "security_master_status_drift": lambda result: result.__setitem__(
+                "security_master_pit_status", "READY"
+            ),
+            "valid_map_missing": lambda result: result.pop(
+                "valid_candidate_count_by_decision"
+            ),
+            "valid_map_not_object": lambda result: result.__setitem__(
+                "valid_candidate_count_by_decision", []
+            ),
+            "valid_map_bool": lambda result: result.__setitem__(
+                "valid_candidate_count_by_decision", {"2023-01-03": True}
+            ),
+            "valid_map_float": lambda result: result.__setitem__(
+                "valid_candidate_count_by_decision", {"2023-01-03": 1.0}
+            ),
+            "insufficient_map_missing": lambda result: result.pop(
+                "insufficient_history_count_by_decision"
+            ),
+            "insufficient_map_negative": lambda result: result.__setitem__(
+                "insufficient_history_count_by_decision", {"2023-01-03": -1}
+            ),
+            "future_decision": lambda result: result.__setitem__(
+                "insufficient_history_count_by_decision", {"2024-01-02": 1}
+            ),
+            "invalid_decision": lambda result: result.__setitem__(
+                "insufficient_history_count_by_decision", {"2023-02-30": 1}
+            ),
+            "decision_key_mismatch": lambda result: result.__setitem__(
+                "insufficient_history_count_by_decision", {"2023-01-04": 0}
+            ),
+            "gap_missing": lambda result: result.pop(
+                "unexplained_market_data_gap_count"
+            ),
+            "gap_bool": lambda result: result.__setitem__(
+                "unexplained_market_data_gap_count", False
+            ),
+            "gap_float": lambda result: result.__setitem__(
+                "unexplained_market_data_gap_count", 0.0
+            ),
+            "gap_negative": lambda result: result.__setitem__(
+                "unexplained_market_data_gap_count", -1
+            ),
+            "ready_gap": lambda result: result.__setitem__(
+                "unexplained_market_data_gap_count", 1
+            ),
+        }
+        for name, mutate in invalid_mutations.items():
+            with self.subTest(name=name):
+                result = _backfill(stage=cli.READY_STAGE)
+                mutate(result)
+                with self.assertRaises(cli.AlphaFeasibilityWorkflowError):
+                    cli._reporting_data_summary(result)
+
+        summary = cli._reporting_data_summary(_backfill(stage=cli.READY_STAGE))
+        self.assertEqual(
+            set(summary["actual_tushare_request_count_by_endpoint"]),
+            set(cli.reporting.ALLOWED_ENDPOINTS),
+        )
+        self.assertNotIn(
+            "stock_basic", summary["actual_tushare_request_count_by_endpoint"]
+        )
+        self.assertEqual(
+            summary["stock_basic_status"],
+            "DEFERRED_NOT_REQUIRED_FOR_ALPHA_FEASIBILITY",
+        )
+        self.assertEqual(summary["stock_basic_request_count"], 0)
+        self.assertIs(type(summary["stock_basic_request_count"]), int)
+        self.assertEqual(
+            summary["security_master_pit_status"],
+            "NOT_IMPLEMENTED_NOT_REQUIRED_IN_P1",
+        )
+        self.assertEqual(
+            summary["valid_candidate_count_by_decision"], {"2023-01-03": 1}
+        )
+        self.assertEqual(
+            summary["insufficient_history_count_by_decision"],
+            {"2023-01-03": 0},
+        )
+        self.assertEqual(summary["unexplained_market_data_gap_count"], 0)
 
     def test_pit_block_publishes_blocked_report_and_never_enters_alpha(self) -> None:
         blocked = _backfill(stage="BLOCKED_PIT_MEMBERSHIP")
@@ -237,8 +371,69 @@ class RunAlphaFeasibilityCliTests(unittest.TestCase):
         self.assertIsNone(report["validation_metrics"])
         self.assertEqual(report["locked_test_status"], cli.LOCKED_TEST_STATUS)
         self.assertIs(report["locked_test_consumed"], False)
+        self.assertEqual(report["stock_basic_request_count"], 0)
+        self.assertEqual(report["valid_candidate_count_by_decision"], {})
+        self.assertEqual(report["insufficient_history_count_by_decision"], {})
+        self.assertEqual(report["unexplained_market_data_gap_count"], 0)
         self.assertNotIn("super-secret-token-value", serialized)
         self.assertNotIn("2024-01-01", serialized)
+
+    def test_unexplained_gap_block_preserves_count_and_never_enters_alpha(self) -> None:
+        blocked = _backfill(
+            stage="BLOCKED_DATA", blocker="unexplained_market_data_gap"
+        )
+        blocked.update(
+            {
+                "pit_months_observed": 73,
+                "union_instrument_count": 1,
+                "valid_candidate_count_by_decision": {"2023-01-03": 0},
+                "insufficient_history_count_by_decision": {"2023-01-03": 1},
+                "unexplained_market_data_gap_count": 2,
+                "adj_factor_coverage_status": "COMPLETE",
+                "benchmark_coverage_status": "COMPLETE",
+            }
+        )
+        with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
+            cli.data_lane,
+            "run_backfill_from_environment",
+            return_value=blocked,
+        ), mock.patch.object(
+            cli.data_lane, "load_feasibility_inputs"
+        ) as load_inputs, mock.patch.object(
+            cli.engine, "run_alpha_feasibility_study"
+        ) as run_alpha, mock.patch.object(
+            cli, "_current_commit_sha", return_value=COMMIT_SHA
+        ), mock.patch("sys.stdout", new_callable=io.StringIO) as stdout:
+            code = cli.main(
+                [
+                    "all",
+                    "--output-root",
+                    temp_dir,
+                    "--generated-at",
+                    GENERATED_AT,
+                ]
+            )
+            summary = json.loads(stdout.getvalue())
+            report = json.loads(
+                (Path(temp_dir) / "alpha_feasibility_report.json").read_text(
+                    encoding="utf-8"
+                )
+            )
+
+        self.assertEqual(code, 1)
+        self.assertEqual(summary["terminal_status"], "BLOCKED_DATA")
+        self.assertEqual(report["terminal_status"], "BLOCKED_DATA")
+        self.assertEqual(report["remaining_blockers"], ["unexplained_market_data_gap"])
+        self.assertEqual(summary["unexplained_market_data_gap_count"], 2)
+        self.assertEqual(report["unexplained_market_data_gap_count"], 2)
+        self.assertEqual(
+            report["insufficient_history_count_by_decision"],
+            {"2023-01-03": 1},
+        )
+        self.assertIsNone(report["development_metrics"])
+        self.assertIsNone(report["validation_metrics"])
+        load_inputs.assert_not_called()
+        run_alpha.assert_not_called()
 
     def test_adapter_protocol_block_retains_distinct_terminal_and_skips_alpha(self) -> None:
         blocked = _backfill(stage="BLOCKED_ADAPTER_PROTOCOL")
@@ -390,6 +585,18 @@ class RunAlphaFeasibilityCliTests(unittest.TestCase):
             report["actual_tushare_request_count_by_endpoint"],
             {endpoint: 0 for endpoint in cli.reporting.ALLOWED_ENDPOINTS},
         )
+        self.assertEqual(report["stock_basic_request_count"], 0)
+        self.assertEqual(
+            report["stock_basic_status"],
+            "DEFERRED_NOT_REQUIRED_FOR_ALPHA_FEASIBILITY",
+        )
+        self.assertEqual(
+            report["security_master_pit_status"],
+            "NOT_IMPLEMENTED_NOT_REQUIRED_IN_P1",
+        )
+        self.assertEqual(report["valid_candidate_count_by_decision"], {})
+        self.assertEqual(report["insufficient_history_count_by_decision"], {})
+        self.assertEqual(report["unexplained_market_data_gap_count"], 0)
 
     def test_precollection_block_replays_byte_identically_without_timestamp(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir, mock.patch.object(
@@ -469,6 +676,15 @@ class RunAlphaFeasibilityCliTests(unittest.TestCase):
         self.assertIs(report["safety"]["automatic_order_submission"], False)
         self.assertEqual(report["locked_test_status"], cli.LOCKED_TEST_STATUS)
         self.assertIs(report["locked_test_consumed"], False)
+        self.assertEqual(
+            report["valid_candidate_count_by_decision"], {"2023-01-03": 1}
+        )
+        self.assertEqual(
+            report["insufficient_history_count_by_decision"],
+            {"2023-01-03": 0},
+        )
+        self.assertEqual(report["unexplained_market_data_gap_count"], 0)
+        self.assertEqual(report["stock_basic_request_count"], 0)
 
     def test_missing_adjusted_open_fails_before_alpha_engine(self) -> None:
         loaded = _loaded_inputs()
@@ -493,6 +709,15 @@ class RunAlphaFeasibilityCliTests(unittest.TestCase):
             summary = json.loads(stdout.getvalue())
         self.assertEqual(code, 0)
         self.assertEqual(summary["stage_status"], cli.READY_STAGE)
+        self.assertEqual(summary["stock_basic_request_count"], 0)
+        self.assertEqual(
+            summary["valid_candidate_count_by_decision"], {"2023-01-03": 1}
+        )
+        self.assertEqual(
+            summary["insufficient_history_count_by_decision"],
+            {"2023-01-03": 0},
+        )
+        self.assertEqual(summary["unexplained_market_data_gap_count"], 0)
         self.assertEqual(summary["locked_test_status"], cli.LOCKED_TEST_STATUS)
         self.assertIs(summary["locked_test_consumed"], False)
         load_inputs.assert_not_called()

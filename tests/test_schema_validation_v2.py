@@ -458,16 +458,19 @@ class Draft202012SchemaValidationTests(unittest.TestCase):
         quarantine_extra["detail_value"] = "must never persist"
         self.assert_schema_rejects(quarantine_extra, quarantine_schema)
 
-    def test_tushare_experiment_schema_caps_full_response_at_two_mib(self) -> None:
+    def test_tushare_v2_experiment_defers_stock_basic_and_caps_response(self) -> None:
         config = json.loads(
             (
                 Path(__file__).resolve().parents[1]
                 / "configs"
-                / "a_share_technical_alpha_feasibility.v1.json"
+                / "a_share_technical_alpha_feasibility.v2.json"
             ).read_text(encoding="utf-8")
         )
-        schema_name = "technical_alpha_feasibility_experiment.v1.json"
+        schema_name = "technical_alpha_feasibility_experiment.v2.json"
         validate_json_schema(config, SCHEMA_ROOT / schema_name)
+        self.assertNotIn("stock_basic", config["source"]["allowed_endpoints"])
+        self.assertNotIn("stock_basic", config["requests"])
+        self.assertEqual(config["stock_basic_request_count"], 0)
         oversized = deepcopy(config)
         oversized["source"]["maximum_response_bytes"] = 2 * 1024 * 1024 + 1
         self.assert_schema_rejects(oversized, schema_name)

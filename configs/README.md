@@ -7,7 +7,8 @@
 | 文件 | 职责 |
 |---|---|
 | `a_share_technical_momentum_adaptive.v1.json` | 当前唯一正式研究主线的冻结实验：既有六因子/Exposure参数、九类正式数据、双价格、Development/Validation/Locked物理边界与全关闭安全状态；当前数据门为 `BLOCKED` |
-| `a_share_technical_alpha_feasibility.v1.json` | 独立P1可行性门：只允许7个Tushare标准只读接口与2017-07至2023-12，哈希绑定既有Alpha实际ranker/Exposure，冻结小数权重、D+1开盘时序、base/stress成本和三种终态；不授予正式数据、Paper或交易准入 |
+| `a_share_technical_alpha_feasibility.v2.json` | 当前独立P1.3可行性门：只允许6个Tushare标准只读接口与2017-07至2023-12，`stock_basic`延期且请求固定为0；冻结既有Alpha/ranker/Exposure、组合、时序、成本和日期切分，不授予正式数据、Paper或交易准入 |
+| `a_share_technical_alpha_feasibility.v1.json` | P1.2历史兼容配置；包含已延期的`stock_basic`，标准P1入口不再默认读取 |
 | `strategy_adaptive_exposure.v2.json` | A股1万元自适应仓位V2的P0契约：月净收益10%仅作挑战报告，目标总仓位0%—100%、显式现金意图、风险退出优先和严格样本外边界；P0安全运行时已实现，但未实现Alpha/仓位模型且不具备Paper或交易准入 |
 | `strategy_quality_growth.v1.json` | A股1万元质量成长V1的六因子、PIT数据门、Top2仓位、成本、风险、历史门、Paper与降级诊断真源；当前 `blocked_missing_pit_data` |
 | `market_data.v1.json` | BaoStock 默认主源、Provider allowlist、dataset-specific admission、整批 fallback、三层存储和可选核验政策 |

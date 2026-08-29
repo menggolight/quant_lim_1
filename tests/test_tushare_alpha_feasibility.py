@@ -36,7 +36,7 @@ from research.market_data.validation import validate_json_schema
 
 
 ROOT = Path(__file__).resolve().parents[1]
-CONFIG = ROOT / "configs" / "a_share_technical_alpha_feasibility.v1.json"
+CONFIG = ROOT / "configs" / "a_share_technical_alpha_feasibility.v2.json"
 NOW = datetime(2026, 8, 28, 1, 2, 3, tzinfo=timezone.utc)
 TOKEN = "UnitTestCredentialNeverPersist123456"
 _REQUEST_ID_UNSET = object()
@@ -170,7 +170,33 @@ class TusharePlanTests(unittest.TestCase):
         self.assertEqual([len(task.scope_instruments) for task in daily], [3, 1])
         self.assertEqual([len(task.scope_instruments) for task in factors], [1, 1, 1, 1])
         self.assertEqual([len(task.scope_instruments) for task in suspensions], [3, 1])
-        self.assertEqual(len([task for task in tasks if task.endpoint == "stock_basic"]), 3)
+        self.assertNotIn("stock_basic", {task.endpoint for task in tasks})
+        self.assertEqual(
+            {task.endpoint for task in tasks},
+            {"trade_cal", "daily", "adj_factor", "suspend_d", "index_daily"},
+        )
+        self.assertEqual(len(tasks), 10)
+
+    def test_stock_basic_request_count_is_structurally_zero(self):
+        plan = load_config_and_build_plan(CONFIG)
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            counts = taf.actual_tushare_request_count_by_endpoint(
+                temporary,
+                (*plan.pit_tasks, *build_history_plan(plan, ["600000.SH"])),
+                plan_sha256=plan.plan_sha256,
+            )
+        self.assertEqual(set(counts), set(taf.ALLOWED_ENDPOINTS))
+        self.assertNotIn("stock_basic", counts)
+        self.assertEqual(sum(counts.values()), 0)
+
+    def test_stock_basic_zero_rejects_boolean_alias(self):
+        config = json.loads(CONFIG.read_text(encoding="utf-8"))
+        config["stock_basic_request_count"] = False
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            path = Path(temporary) / "bool-count.json"
+            path.write_text(json.dumps(config), encoding="utf-8")
+            with self.assertRaises(AlphaFeasibilityDataError):
+                load_config_and_build_plan(path)
 
 
 class TushareResponseEnvelopeTests(unittest.TestCase):
@@ -1082,7 +1108,7 @@ class TushareCreateOnlyTests(unittest.TestCase):
             self.assertFalse(store.raw_path(task).exists())
             self.assertNotIn(b"2024-01-02", store.quarantine_path(task).read_bytes())
 
-    def test_post_cutoff_date_in_suspend_timing_and_stock_name_is_hash_only(self):
+    def test_post_cutoff_date_in_suspend_timing_is_hash_only(self):
         suspend = next(task for task in self.history if task.endpoint == "suspend_d")
         raw = response_bytes(
             "suspend_d",
@@ -1103,63 +1129,6 @@ class TushareCreateOnlyTests(unittest.TestCase):
             quarantine = store.quarantine_path(suspend).read_bytes()
             self.assertIn(hashlib.sha256(raw).hexdigest().encode("ascii"), quarantine)
             self.assertNotIn(b"2024-01-01", quarantine)
-
-        stock = next(
-            task
-            for task in self.history
-            if task.endpoint == "stock_basic" and task.params["list_status"] == "L"
-        )
-        stock_raw = response_bytes(
-            "stock_basic",
-            [["600000.SH", "600000", "公司2024-01-01", "SSE", "L", "19991110", None]],
-        )
-        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
-            store = CreateOnlyTaskStore(temporary)
-            self._assert_execute_data_failure(
-                store,
-                stock,
-                FakeTransport(lambda **_kwargs: stock_raw),
-                "post_cutoff_response_date",
-            )
-            self.assertFalse(store.raw_path(stock).exists())
-            self.assertFalse(store.response_path(stock).exists())
-
-    def test_non_union_future_stock_row_is_isolated_without_future_literal(self):
-        task = next(
-            task
-            for task in self.history
-            if task.endpoint == "stock_basic" and task.params["list_status"] == "L"
-        )
-        raw = response_bytes(
-            "stock_basic",
-            [
-                ["600000.SH", "600000", "浦发银行", "SSE", "L", "19991110", None],
-                ["600001.SH", "600001", "非成员新股", "SSE", "L", "20250102", None],
-            ],
-        )
-        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
-            store = CreateOnlyTaskStore(temporary)
-            result = self._execute(store, task, FakeTransport(lambda **_kwargs: raw))
-            self.assertEqual([row["ts_code"] for row in result.rows], ["600000.SH"])
-            self.assertEqual(result.isolated_non_union_row_count, 1)
-            for path in Path(temporary).rglob("*"):
-                if path.is_file():
-                    self.assertNotIn(b"20250102", path.read_bytes())
-
-        union_future = response_bytes(
-            "stock_basic",
-            [["600000.SH", "600000", "未来上市", "SSE", "L", "20250102", None]],
-        )
-        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
-            store = CreateOnlyTaskStore(temporary)
-            self._assert_execute_data_failure(
-                store,
-                task,
-                FakeTransport(lambda **_kwargs: union_future),
-                "post_cutoff_response_date",
-            )
-            self.assertFalse(store.raw_path(task).exists())
-            self.assertFalse(store.response_path(task).exists())
 
     def test_unsafe_token_and_json_escaped_echo_never_persist(self):
         task = self._trade_calendar_task()
@@ -1199,45 +1168,6 @@ class TushareCreateOnlyTests(unittest.TestCase):
             self.assertEqual(
                 json.loads(quarantine)["token_leak_check"],
                 "DECODED_LEAK_REJECTED",
-            )
-
-    def test_future_stock_delist_date_is_null_isolated_and_raw_body_not_saved(self):
-        task = next(
-            task
-            for task in self.history
-            if task.endpoint == "stock_basic" and task.params["list_status"] == "L"
-        )
-        raw = response_bytes(
-            "stock_basic",
-            [["600000.SH", "600000", "浦发银行", "SSE", "L", "19991110", "20250102"]],
-        )
-        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
-            store = CreateOnlyTaskStore(temporary)
-            result = self._execute(store, task, FakeTransport(lambda **_kwargs: raw))
-            self.assertEqual(result.rows[0]["delist_date"], None)
-            self.assertEqual(result.isolated_future_delist_date_count, 1)
-            self.assertTrue(result.raw_response_persisted)
-            self.assertTrue(store.raw_path(task).exists())
-            for path in Path(temporary).rglob("*"):
-                if path.is_file():
-                    self.assertNotIn(b"20250102", path.read_bytes())
-
-    def test_stock_basic_wrong_list_status_is_rejected(self):
-        task = next(
-            task
-            for task in self.history
-            if task.endpoint == "stock_basic" and task.params["list_status"] == "L"
-        )
-        raw = response_bytes(
-            "stock_basic",
-            [["600000.SH", "600000", "浦发银行", "SSE", "D", "19991110", "20231201"]],
-        )
-        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
-            self._assert_execute_data_failure(
-                CreateOnlyTaskStore(temporary),
-                task,
-                FakeTransport(lambda **_kwargs: raw),
-                "stock_status_not_requested",
             )
 
     def test_raw_json_decimal_numbers_are_normalized_without_float_round_trip(self):
@@ -1412,78 +1342,6 @@ class TushareCreateOnlyTests(unittest.TestCase):
             ):
                 store._load_response(daily)
 
-        stock = next(
-            task
-            for task in self.history
-            if task.endpoint == "stock_basic" and task.params["list_status"] == "L"
-        )
-        stock_raw = response_bytes(
-            "stock_basic",
-            [["600000.SH", "600000", "浦发银行", "SSE", "L", "19991110", None]],
-        )
-        coverage = taf.HistoryCoverageResult(
-            report=MappingProxyType(
-                {
-                    "daily_coverage_status": "BLOCKED_DATA",
-                    "adj_factor_coverage_status": "BLOCKED_DATA",
-                    "suspension_coverage_status": "BLOCKED_DATA",
-                    "benchmark_coverage_status": "BLOCKED_DATA",
-                    "blockers": [{"reason": "history_tasks_incomplete"}],
-                }
-            ),
-            passed=False,
-            trading_dates=(),
-        )
-        pit = taf.PitMembershipResult(
-            coverage_report=MappingProxyType({"pit_months_observed": 73}),
-            manifest=MappingProxyType(
-                {
-                    "snapshots": [
-                        {
-                            "snapshot_date": "2017-12-29",
-                            "members": [
-                                {"instrument_id": "600000.SH", "weight": "100.000"}
-                            ],
-                        }
-                    ]
-                }
-            ),
-            union_instruments=("600000.SH",),
-            passed=True,
-        )
-        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
-            store = CreateOnlyTaskStore(temporary)
-            self._execute(store, stock, FakeTransport(lambda **_kwargs: stock_raw))
-            before = taf.build_history_manifest_from_store(
-                self.plan,
-                [stock],
-                store,
-                coverage,
-                pit_result=pit,
-                request_counts={endpoint: 0 for endpoint in taf.ALLOWED_ENDPOINTS},
-                generated_at=NOW,
-            )
-            artifact = json.loads(store.response_path(stock).read_text(encoding="utf-8"))
-            artifact["wire_response_sha256"] = "f" * 64
-            artifact["transport_receipt"]["raw_transport_sha256"] = "f" * 64
-            unsigned = dict(artifact)
-            unsigned.pop("response_artifact_sha256")
-            artifact["response_artifact_sha256"] = canonical_sha256(unsigned)
-            store.response_path(stock).write_bytes(canonical_json_bytes(artifact))
-            after = taf.build_history_manifest_from_store(
-                self.plan,
-                [stock],
-                store,
-                coverage,
-                pit_result=pit,
-                request_counts={endpoint: 0 for endpoint in taf.ALLOWED_ENDPOINTS},
-                generated_at=NOW,
-            )
-            self.assertEqual(
-                before["datasets"]["security_master"]["normalized_content_sha256"],
-                after["datasets"]["security_master"]["normalized_content_sha256"],
-            )
-            self.assertEqual(before, after)
 
 
 class BackfillLineageAndManifestTests(unittest.TestCase):
@@ -1509,6 +1367,12 @@ class BackfillLineageAndManifestTests(unittest.TestCase):
                     "adj_factor_coverage_status": "COMPLETE",
                     "suspension_coverage_status": "COMPLETE",
                     "benchmark_coverage_status": "COMPLETE",
+                    "stock_basic_status": taf.STOCK_BASIC_STATUS,
+                    "stock_basic_request_count": 0,
+                    "security_master_pit_status": taf.SECURITY_MASTER_PIT_STATUS,
+                    "valid_candidate_count_by_decision": {"2018-01-02": 1},
+                    "insufficient_history_count_by_decision": {"2018-01-02": 0},
+                    "unexplained_market_data_gap_count": 0,
                 }
             ),
             passed=True,
@@ -1584,7 +1448,6 @@ class BackfillLineageAndManifestTests(unittest.TestCase):
         endpoints = {
             "trade_calendar": "trade_cal",
             "pit_membership": "index_weight",
-            "security_master": "stock_basic",
             "daily": "daily",
             "adj_factor": "adj_factor",
             "suspension": "suspend_d",
@@ -1603,7 +1466,7 @@ class BackfillLineageAndManifestTests(unittest.TestCase):
             for name, endpoint in endpoints.items()
         }
         unsigned = {
-            "schema_version": "tushare-alpha-feasibility-manifest.v1",
+            "schema_version": "tushare-alpha-feasibility-manifest.v2",
             "experiment_id": "a-share-technical-alpha-feasibility-tushare-p1-v1",
             "generated_at": NOW.isoformat(),
             "coverage_start": "2017-07-01",
@@ -1611,9 +1474,15 @@ class BackfillLineageAndManifestTests(unittest.TestCase):
             "actual_tushare_request_count_by_endpoint": {
                 endpoint: 0 for endpoint in taf.ALLOWED_ENDPOINTS
             },
+            "stock_basic_status": taf.STOCK_BASIC_STATUS,
+            "stock_basic_request_count": 0,
+            "security_master_pit_status": taf.SECURITY_MASTER_PIT_STATUS,
             "pit_months_expected": 73,
             "pit_months_observed": 73,
             "union_instrument_count": 1,
+            "valid_candidate_count_by_decision": {"2023-12-28": 1},
+            "insufficient_history_count_by_decision": {"2023-12-28": 0},
+            "unexplained_market_data_gap_count": 0,
             "datasets": datasets,
             "data_status": "READY",
             "remaining_blockers": [],
@@ -1695,7 +1564,7 @@ class BoundedHistoryCoverageTests(unittest.TestCase):
             for month in taf._month_sequence("2017-12", "2023-12")
         ]
 
-    def rows_for_task(self, task, *, omit_basic=None):
+    def rows_for_task(self, task, *, omit_daily=None):
         if task.endpoint == "trade_cal":
             return self.calendar_rows
         if task.endpoint == "index_daily":
@@ -1703,26 +1572,11 @@ class BoundedHistoryCoverageTests(unittest.TestCase):
                 {"ts_code": "000906.SH", "trade_date": item.strftime("%Y%m%d")}
                 for item in self.open_dates
             ]
-        if task.endpoint == "stock_basic":
-            if task.params["list_status"] != "L":
-                return []
-            return [
-                {
-                    "ts_code": code,
-                    "symbol": code[:6],
-                    "name": code,
-                    "exchange": "SSE",
-                    "list_status": "L",
-                    "list_date": "20170701",
-                    "delist_date": None,
-                }
-                for code in self.codes
-                if code != omit_basic
-            ]
         if task.endpoint == "daily":
             return [
                 {"ts_code": code, "trade_date": item.strftime("%Y%m%d")}
                 for code in task.scope_instruments
+                if code != omit_daily
                 for item in self.open_dates
             ]
         if task.endpoint == "adj_factor":
@@ -1738,7 +1592,7 @@ class BoundedHistoryCoverageTests(unittest.TestCase):
             return []
         self.fail(f"unexpected endpoint {task.endpoint}")
 
-    def test_three_plus_one_batches_pass_and_missing_fourth_basic_blocks(self):
+    def test_three_plus_one_batches_pass_and_daily_code_mismatch_blocks(self):
         store = InMemoryCompletedStore(self.rows_for_task)
         result = taf.validate_history_coverage_from_store(
             self.plan,
@@ -1760,17 +1614,72 @@ class BoundedHistoryCoverageTests(unittest.TestCase):
         )
 
         missing = InMemoryCompletedStore(
-            lambda task: self.rows_for_task(task, omit_basic="600003.SH")
+            lambda task: self.rows_for_task(task, omit_daily="600003.SH")
         )
-        with self.assertRaisesRegex(AlphaFeasibilityDataError, "stock_basic_union_incomplete"):
-            taf.validate_history_coverage_from_store(
-                self.plan,
-                self.codes,
-                self.tasks,
-                missing,
-                pit_snapshots=self.pit_snapshots,
-                generated_at=NOW,
-            )
+        blocked = taf.validate_history_coverage_from_store(
+            self.plan,
+            self.codes,
+            self.tasks,
+            missing,
+            pit_snapshots=self.pit_snapshots,
+            generated_at=NOW,
+        )
+        self.assertFalse(blocked.passed)
+        self.assertIn(
+            "index_weight_daily_code_mismatch",
+            {item["reason"] for item in blocked.report["blockers"]},
+        )
+
+    def test_recent_member_leading_suspension_and_short_history_are_ineligible(self):
+        recent_code = "600003.SH"
+        introduction = next(
+            date.fromisoformat(item["snapshot_date"])
+            for item in self.pit_snapshots
+            if item["snapshot_date"].startswith("2023-10")
+        )
+        snapshots = deepcopy(self.pit_snapshots)
+        for snapshot in snapshots:
+            if date.fromisoformat(snapshot["snapshot_date"]) < introduction:
+                snapshot["members"] = [
+                    member
+                    for member in snapshot["members"]
+                    if member["instrument_id"] != recent_code
+                ]
+
+        def recent_rows(task):
+            rows = self.rows_for_task(task)
+            if task.endpoint in {"daily", "adj_factor"}:
+                return [
+                    row
+                    for row in rows
+                    if row["ts_code"] != recent_code
+                    or row["trade_date"] > introduction.strftime("%Y%m%d")
+                ]
+            if task.endpoint == "suspend_d" and recent_code in task.scope_instruments:
+                return [
+                    {
+                        "ts_code": recent_code,
+                        "trade_date": introduction.strftime("%Y%m%d"),
+                        "suspend_timing": None,
+                        "suspend_type": "S",
+                    }
+                ]
+            return rows
+
+        result = taf.validate_history_coverage_from_store(
+            self.plan,
+            self.codes,
+            self.tasks,
+            InMemoryCompletedStore(recent_rows),
+            pit_snapshots=snapshots,
+            generated_at=NOW,
+        )
+        self.assertTrue(result.passed)
+        self.assertEqual(result.report["unexplained_market_data_gap_count"], 0)
+        self.assertGreater(
+            sum(result.report["insufficient_history_count_by_decision"].values()),
+            0,
+        )
 
 
 class PitMembershipTests(unittest.TestCase):
@@ -1906,17 +1815,7 @@ class PitMembershipTests(unittest.TestCase):
 class TotalReturnAndCoverageTests(unittest.TestCase):
     def setUp(self):
         self.plan = load_config_and_build_plan(CONFIG)
-        self.basic = [
-            {
-                "ts_code": "600000.SH",
-                "symbol": "600000",
-                "name": "浦发银行",
-                "exchange": "SSE",
-                "list_status": "L",
-                "list_date": "20170701",
-                "delist_date": None,
-            }
-        ]
+        self.basic = ["600000.SH"]
         self.daily = [
             {
                 "ts_code": "600000.SH",
@@ -2003,31 +1902,42 @@ class TotalReturnAndCoverageTests(unittest.TestCase):
         self.assertEqual(conflict[2]["close"], "100")
         self.assertEqual(conflict[2]["daily_total_return"], "0")
 
-        with self.assertRaisesRegex(
-            AlphaFeasibilityDataError, "suspension_without_prior_economic_value"
-        ):
-            build_total_return_panel(
-                ["20170703"],
-                self.basic,
-                [self.daily[0]],
-                [self.factors[0]],
-                [
-                    {
-                        "ts_code": "600000.SH",
-                        "trade_date": "20170703",
-                        "suspend_timing": None,
-                        "suspend_type": "S",
-                    }
-                ],
-            )
+        leading_suspension = build_total_return_panel(
+            ["20170703", "20170704"],
+            self.basic,
+            self.daily,
+            self.factors,
+            [
+                {
+                    "ts_code": "600000.SH",
+                    "trade_date": "20170703",
+                    "suspend_timing": None,
+                    "suspend_type": "S",
+                }
+            ],
+        )
+        self.assertEqual(
+            [row["trading_date"] for row in leading_suspension],
+            ["2017-07-04"],
+        )
 
     def test_non_suspension_missing_daily_fails_closed(self):
-        with self.assertRaisesRegex(AlphaFeasibilityDataError, "non_suspension_missing_daily"):
+        later_bar = {
+            **self.daily[-1],
+            "trade_date": "20170705",
+        }
+        later_factor = {
+            **self.factors[-1],
+            "trade_date": "20170705",
+        }
+        with self.assertRaisesRegex(
+            AlphaFeasibilityDataError, "unexplained_market_data_gap"
+        ):
             build_total_return_panel(
                 ["20170703", "20170704", "20170705"],
                 self.basic,
-                self.daily,
-                self.factors,
+                [self.daily[0], later_bar],
+                [self.factors[0], later_factor],
                 [],
             )
 
@@ -2069,10 +1979,20 @@ class TotalReturnAndCoverageTests(unittest.TestCase):
                 "vol": "1",
                 "amount": "1",
             }
-            for item in open_dates[:-1]
+            for item in open_dates
+            if item != open_dates[-2]
+        ]
+        first_by_month = {}
+        for item in open_dates:
+            first_by_month.setdefault(item.strftime("%Y-%m"), item)
+        pit_snapshots = [
+            {
+                "snapshot_date": first_by_month[month].isoformat(),
+                "members": [{"instrument_id": "600000.SH", "weight": "100.000"}],
+            }
+            for month in taf._month_sequence("2017-12", "2023-12")
         ]
         rows = {
-            "stock_basic": self.basic,
             "trade_cal": calendar_rows,
             "daily": daily_rows,
             "adj_factor": [
@@ -2081,12 +2001,13 @@ class TotalReturnAndCoverageTests(unittest.TestCase):
                     "trade_date": item.strftime("%Y%m%d"),
                     "adj_factor": "1",
                 }
-                for item in open_dates[:-1]
+                for item in open_dates
+                if item != open_dates[-2]
             ],
             "suspend_d": [
                 {
                     "ts_code": "600000.SH",
-                    "trade_date": open_dates[-1].strftime("%Y%m%d"),
+                    "trade_date": open_dates[-2].strftime("%Y%m%d"),
                     "suspend_timing": None,
                     "suspend_type": "S",
                 }
@@ -2097,7 +2018,11 @@ class TotalReturnAndCoverageTests(unittest.TestCase):
             ],
         }
         result = validate_history_coverage(
-            self.plan, ["600000.SH"], rows, generated_at=NOW
+            self.plan,
+            ["600000.SH"],
+            rows,
+            pit_snapshots=pit_snapshots,
+            generated_at=NOW,
         )
         self.assertTrue(result.passed)
         self.assertEqual(
@@ -2106,47 +2031,36 @@ class TotalReturnAndCoverageTests(unittest.TestCase):
         broken = deepcopy(rows)
         broken["suspend_d"] = []
         blocked = validate_history_coverage(
-            self.plan, ["600000.SH"], broken, generated_at=NOW
+            self.plan,
+            ["600000.SH"],
+            broken,
+            pit_snapshots=pit_snapshots,
+            generated_at=NOW,
         )
         self.assertFalse(blocked.passed)
         self.assertEqual(blocked.report["daily_coverage_status"], "BLOCKED_DATA")
         intraday = deepcopy(rows)
         intraday["suspend_d"][0]["suspend_timing"] = "09:30-10:30"
         intraday_blocked = validate_history_coverage(
-            self.plan, ["600000.SH"], intraday, generated_at=NOW
+            self.plan,
+            ["600000.SH"],
+            intraday,
+            pit_snapshots=pit_snapshots,
+            generated_at=NOW,
         )
         self.assertFalse(intraday_blocked.passed)
         truncated_factor = deepcopy(rows)
-        del truncated_factor["adj_factor"][len(truncated_factor["adj_factor"]) // 2]
+        del truncated_factor["adj_factor"][0]
         factor_blocked = validate_history_coverage(
-            self.plan, ["600000.SH"], truncated_factor, generated_at=NOW
+            self.plan,
+            ["600000.SH"],
+            truncated_factor,
+            pit_snapshots=pit_snapshots,
+            generated_at=NOW,
         )
         self.assertFalse(factor_blocked.passed)
         self.assertEqual(
             factor_blocked.report["adj_factor_coverage_status"], "BLOCKED_DATA"
-        )
-        pit_snapshots = [
-            {
-                "snapshot_date": item.isoformat(),
-                "members": [{"instrument_id": "600000.SH", "weight": "100.000"}],
-            }
-            for item in open_dates[:73]
-        ]
-        future_listing = deepcopy(rows)
-        future_listing["stock_basic"][0]["list_date"] = open_dates[73].strftime("%Y%m%d")
-        listing_blocked = validate_history_coverage(
-            self.plan,
-            ["600000.SH"],
-            future_listing,
-            pit_snapshots=pit_snapshots,
-            generated_at=NOW,
-        )
-        self.assertFalse(listing_blocked.passed)
-        self.assertTrue(
-            any(
-                item.get("reason") == "pit_member_not_listed_by_snapshot_date"
-                for item in listing_blocked.report["blockers"]
-            )
         )
 
 
