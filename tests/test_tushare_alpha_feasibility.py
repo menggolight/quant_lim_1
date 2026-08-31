@@ -11,6 +11,7 @@ from types import MappingProxyType
 from unittest.mock import patch
 
 import research.market_data.tushare_alpha_feasibility as taf
+import research.market_data.tushare_index_weight_value_diagnostic as p14d
 
 from research.market_data.tushare_alpha_feasibility import (
     ABSOLUTE_CUTOFF,
@@ -37,6 +38,7 @@ from research.market_data.validation import SchemaValidationError, validate_json
 
 ROOT = Path(__file__).resolve().parents[1]
 CONFIG = ROOT / "configs" / "a_share_technical_alpha_feasibility.v2.json"
+P15_CONFIG = ROOT / "configs" / "a_share_technical_alpha_feasibility.p1_5.json"
 NOW = datetime(2026, 8, 28, 1, 2, 3, tzinfo=timezone.utc)
 TOKEN = "UnitTestCredentialNeverPersist123456"
 _REQUEST_ID_UNSET = object()
@@ -2357,6 +2359,413 @@ class BoundedHistoryCoverageTests(unittest.TestCase):
         self.assertTrue(result.passed)
         self.assertEqual(result.report["unexplained_market_data_gap_count"], 0)
         self.assertGreater(result.report["ineligible_no_initial_price_count"], 0)
+
+
+class P15DataLaneTests(unittest.TestCase):
+    @classmethod
+    def setUpClass(cls):
+        cls.plan = load_config_and_build_plan(P15_CONFIG)
+        cls.task = cls.plan.pit_tasks[0]
+
+    @staticmethod
+    def _rows(*, last_weight: str = "0.25", repeated_weight: str = "0.125"):
+        rows = [
+            {
+                "index_code": "000906.SH",
+                "con_code": f"{number:06d}.{'SH' if number % 2 == 0 else 'SZ'}",
+                "trade_date": "20171229",
+                "weight": (
+                    "0"
+                    if number == 1
+                    else last_weight
+                    if number == 800
+                    else repeated_weight
+                ),
+            }
+            for number in range(1, 801)
+        ]
+        return rows
+
+    @staticmethod
+    def _raw(rows, **extensions):
+        payload = {
+            "code": 0,
+            "msg": None,
+            "data": {
+                "fields": list(EXPECTED_FIELDS["index_weight"]),
+                "items": [
+                    [row[field] for field in EXPECTED_FIELDS["index_weight"]]
+                    for row in rows
+                ],
+            },
+            **extensions,
+        }
+        return json.dumps(payload, separators=(",", ":")).encode("utf-8")
+
+    def test_fixed_weight_hard_gate_warning_and_zero_evidence(self):
+        warning_rows = self._rows(last_weight="0.19")
+        result = build_pit_membership_artifacts(
+            self.plan, {self.task.task_id: warning_rows}, generated_at=NOW
+        )
+        first = result.coverage_report["monthly_checks"][0]
+        snapshot = first["snapshots"][0]
+        self.assertEqual(first["status"], "complete")
+        self.assertEqual(snapshot["component_count"], 800)
+        self.assertEqual(snapshot["weight_sum"], "99.940")
+        self.assertEqual(snapshot["zero_weight_count"], 1)
+        self.assertEqual(snapshot["warnings"], ["weight_sum_outside_warning_range"])
+        self.assertEqual(result.coverage_report["duplicate_member_count"], 0)
+
+        hard_failure = build_pit_membership_artifacts(
+            self.plan,
+            {
+                self.task.task_id: self._rows(
+                    repeated_weight="0.124", last_weight="0.538"
+                )
+            },
+            generated_at=NOW,
+        )
+        failed = hard_failure.coverage_report["monthly_checks"][0]
+        self.assertEqual(failed["status"], "invalid")
+        self.assertIn("weight_sum_outside_hard_range", failed["issues"])
+
+    def test_p15_manifest_carries_count_semantics_and_real_money_guard(self):
+        coverage = taf.HistoryCoverageResult(
+            report=MappingProxyType(
+                {
+                    "daily_coverage_status": "BLOCKED_DATA",
+                    "adj_factor_coverage_status": "BLOCKED_DATA",
+                    "suspension_coverage_status": "BLOCKED_DATA",
+                    "benchmark_coverage_status": "BLOCKED_DATA",
+                    "unexplained_market_data_gap_count": 0,
+                    "blockers": [{"reason": "fixture_incomplete"}],
+                }
+            ),
+            passed=False,
+            trading_dates=(),
+        )
+        counts = {endpoint: 0 for endpoint in taf.ALLOWED_ENDPOINTS}
+        manifest = taf.build_history_manifest(
+            self.plan,
+            (),
+            {},
+            coverage,
+            request_counts=counts,
+            generated_at=NOW,
+        )
+        self.assertEqual(
+            manifest["schema_version"], "tushare-alpha-feasibility-manifest.v4"
+        )
+        self.assertEqual(
+            manifest["request_count_semantics"],
+            "conservative_durable_pre_transport_attempt_claim",
+        )
+        self.assertIs(manifest["safety"]["real_money_list_allowed"], False)
+        validate_json_schema(
+            manifest, ROOT / "schemas" / "tushare_alpha_feasibility_manifest.v4.json"
+        )
+
+    def test_full_raw_resume_attempt_count_and_terminal_quarantine(self):
+        raw = self._raw(
+            self._rows(), request_id="req-import-safe", detail={"status": "ok"}
+        )
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            store = CreateOnlyTaskStore(temporary)
+
+            def interrupted(**_kwargs):
+                raise AlphaFeasibilityDataError("https_transport_failed")
+
+            with self.assertRaisesRegex(AlphaFeasibilityDataError, "https_transport_failed"):
+                store.execute(
+                    self.task,
+                    token=TOKEN,
+                    transport=FakeTransport(interrupted),
+                    timeout_seconds=30,
+                    maximum_response_bytes=2097152,
+                    recover_interrupted_attempts=True,
+                    maximum_attempts_per_fingerprint=3,
+                    persist_full_raw_transport=True,
+                )
+            self.assertFalse(store.quarantine_path(self.task).exists())
+            completed = store.execute(
+                self.task,
+                token=TOKEN,
+                transport=FakeTransport(lambda **_kwargs: raw),
+                timeout_seconds=30,
+                maximum_response_bytes=2097152,
+                recover_interrupted_attempts=True,
+                maximum_attempts_per_fingerprint=3,
+                persist_full_raw_transport=True,
+            )
+            self.assertEqual(completed.network_request_count, 2)
+            self.assertEqual(store.raw_path(self.task).read_bytes(), raw)
+            never = FakeTransport(lambda **_kwargs: self.fail("completed task resent"))
+            replayed = store.execute(
+                self.task,
+                token="",
+                transport=never,
+                timeout_seconds=30,
+                maximum_response_bytes=2097152,
+                recover_interrupted_attempts=True,
+                maximum_attempts_per_fingerprint=3,
+                persist_full_raw_transport=True,
+            )
+            self.assertTrue(replayed.replayed)
+            self.assertEqual(len(never.calls), 0)
+            self.assertEqual(
+                taf.actual_tushare_request_count_by_endpoint(
+                    temporary, self.plan.pit_tasks, plan_sha256=self.plan.plan_sha256
+                )["index_weight"],
+                2,
+            )
+
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            store = CreateOnlyTaskStore(temporary)
+            bad = b'{"code":-2001,"msg":"permission denied","data":null}'
+            first = FakeTransport(lambda **_kwargs: bad)
+            with self.assertRaises(AlphaFeasibilityDataError):
+                store.execute(
+                    self.task,
+                    token=TOKEN,
+                    transport=first,
+                    timeout_seconds=30,
+                    maximum_response_bytes=2097152,
+                    recover_interrupted_attempts=True,
+                    maximum_attempts_per_fingerprint=3,
+                    persist_full_raw_transport=True,
+                )
+            second = FakeTransport(lambda **_kwargs: self.fail("quarantine retried"))
+            with self.assertRaises(AlphaFeasibilityDataError):
+                store.execute(
+                    self.task,
+                    token=TOKEN,
+                    transport=second,
+                    timeout_seconds=30,
+                    maximum_response_bytes=2097152,
+                    recover_interrupted_attempts=True,
+                    maximum_attempts_per_fingerprint=3,
+                    persist_full_raw_transport=True,
+                )
+            self.assertEqual(len(first.calls), 1)
+            self.assertEqual(len(second.calls), 0)
+
+    def test_p15_full_raw_rejects_secret_assignment_and_future_trace(self):
+        cases = (
+            ({"detail": "password=abc"}, "transport_extension_secret_detected"),
+            ({"trace_id": "trace-2025-01-02"}, "post_cutoff_response_date"),
+        )
+        for extensions, expected in cases:
+            with self.subTest(extensions=extensions), tempfile.TemporaryDirectory(
+                dir=ROOT
+            ) as temporary:
+                store = CreateOnlyTaskStore(temporary)
+                raw = self._raw(self._rows(), **extensions)
+                with self.assertRaisesRegex(AlphaFeasibilityDataError, expected):
+                    store.execute(
+                        self.task,
+                        token=TOKEN,
+                        transport=FakeTransport(lambda **_kwargs: raw),
+                        timeout_seconds=30,
+                        maximum_response_bytes=2097152,
+                        recover_interrupted_attempts=True,
+                        maximum_attempts_per_fingerprint=3,
+                        persist_full_raw_transport=True,
+                    )
+                self.assertFalse(store.raw_path(self.task).exists())
+                self.assertFalse(store.response_path(self.task).exists())
+                self.assertTrue(store.quarantine_path(self.task).exists())
+
+    def test_request_count_rejects_orphan_attempt_directory(self):
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            orphan = Path(temporary) / "attempts" / ("index_weight-" + "f" * 64)
+            orphan.mkdir(parents=True)
+            (orphan / "000001.started.json").write_bytes(
+                canonical_json_bytes({"self_signed": True})
+            )
+            with self.assertRaisesRegex(
+                AlphaFeasibilityDataError, "orphan_attempt_request_evidence"
+            ):
+                taf.actual_tushare_request_count_by_endpoint(
+                    temporary,
+                    self.plan.pit_tasks,
+                    plan_sha256=self.plan.plan_sha256,
+                )
+
+    def test_p14d_import_is_plan_bound_complete_and_zero_request(self):
+        def build_bundle(raw):
+            parsed, scan = p14d.scan_raw_response(raw, token=TOKEN)
+            profile = p14d.build_value_profile(parsed, scan_evidence=scan)
+            request = p14d._request_payload(NOW)
+            started = p14d._network_started_payload(request)
+            scanned = p14d._network_scanned_payload(request, scan=scan)
+            validated = taf.validate_response_bytes(self.task, raw, token=TOKEN)
+            normalized = p14d._normalized_pit_payload(validated)
+            profile_bytes = p14d._transport_json_bytes(profile)
+            normalized_bytes = p14d._transport_json_bytes(normalized)
+            replay = {
+                "schema_version": "tushare-index-weight-offline-replay.v1",
+                "raw_transport_sha256": scan["raw_transport_sha256"],
+                "value_profile_sha256": hashlib.sha256(profile_bytes).hexdigest(),
+                "normalization_change": "p15_plan_bound_import",
+                "offline_replay_status": "DIAGNOSTIC_REPLAY_ACCEPTED",
+                "replay_pass_count": 2,
+                "deterministic_replay": True,
+                "normalized_row_count": normalized["row_count"],
+                "normalized_trade_dates": normalized["trade_dates"],
+                "normalized_weight_sum_by_date": normalized[
+                    "weight_sum_by_trade_date"
+                ],
+                "normalized_content_sha256": normalized[
+                    "normalized_content_sha256"
+                ],
+                "normalized_pit_sha256": hashlib.sha256(
+                    normalized_bytes
+                ).hexdigest(),
+                "terminal_status": "DIAGNOSTIC_REPLAY_ACCEPTED",
+                "locked_test_status": dict(LOCKED_TEST_STATUS),
+                "locked_test_consumed": False,
+            }
+            return {
+                "request.json": p14d._transport_json_bytes(request),
+                "network_call_started.json": p14d._transport_json_bytes(started),
+                "network_response_scanned.json": p14d._transport_json_bytes(scanned),
+                "response.raw.json": raw,
+                "value_profile.json": profile_bytes,
+                "normalized_pit.json": normalized_bytes,
+                "offline_replay.json": p14d._transport_json_bytes(replay),
+            }, request, normalized
+
+        def write_bundle(directory, artifacts):
+            directory.mkdir()
+            for name, content in artifacts.items():
+                (directory / name).write_bytes(content)
+
+        accepted_artifacts, request, normalized = build_bundle(
+            self._raw(self._rows(), request_id="req-p14d-safe")
+        )
+        accepted_hashes = {
+            name: hashlib.sha256(content).hexdigest()
+            for name, content in accepted_artifacts.items()
+        }
+        accepted_binding = {
+            "bundle_sha256": taf.canonical_sha256(accepted_hashes),
+            "request_fingerprint": request["request_fingerprint"],
+            "raw_transport_sha256": accepted_hashes["response.raw.json"],
+            "normalized_content_sha256": normalized["normalized_content_sha256"],
+            "source_artifact_sha256_by_name": accepted_hashes,
+        }
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            source = Path(temporary) / "accepted-p14d"
+            output = Path(temporary) / "output"
+            write_bundle(source, accepted_artifacts)
+
+            import_schema = json.loads(
+                (
+                    ROOT
+                    / "schemas"
+                    / "tushare_alpha_feasibility_task_import.v1.json"
+                ).read_text(encoding="utf-8")
+            )
+            import_schema["properties"]["accepted_bundle_sha256"]["const"] = (
+                accepted_binding["bundle_sha256"]
+            )
+            import_schema["properties"]["request_fingerprint"]["const"] = (
+                accepted_binding["request_fingerprint"]
+            )
+            import_schema["properties"]["raw_transport_sha256"]["const"] = (
+                accepted_binding["raw_transport_sha256"]
+            )
+            import_schema["properties"]["normalized_content_sha256"]["const"] = (
+                accepted_binding["normalized_content_sha256"]
+            )
+            for name, digest in accepted_hashes.items():
+                import_schema["properties"]["source_artifact_sha256_by_name"][
+                    "properties"
+                ][name]["const"] = digest
+            import_schema_path = Path(temporary) / "synthetic-import-schema.json"
+            import_schema_path.write_text(
+                json.dumps(import_schema), encoding="utf-8"
+            )
+            (Path(temporary) / "pit_membership_coverage_report.v1.json").write_bytes(
+                (
+                    ROOT / "schemas" / "pit_membership_coverage_report.v1.json"
+                ).read_bytes()
+            )
+
+            never = FakeTransport(lambda **_kwargs: self.fail("import resent"))
+            with (
+                patch.object(
+                    taf, "_p14d_bundle_binding", return_value=accepted_binding
+                ),
+                patch.object(taf, "IMPORT_SCHEMA_PATH", import_schema_path),
+            ):
+                imported = taf.import_p14d_diagnostic_into_plan(
+                    diagnostic_root=source,
+                    output_root=output,
+                    plan=self.plan,
+                )
+                store = CreateOnlyTaskStore(output)
+                self.assertTrue(store.is_complete(self.task))
+                self.assertEqual(imported.request_origin, "offline_p14d_import")
+                self.assertEqual(imported.network_request_count, 0)
+                raw_before = store.raw_path(self.task).read_bytes()
+                response_before = store.response_path(self.task).read_bytes()
+                self.assertEqual(
+                    raw_before, accepted_artifacts["response.raw.json"]
+                )
+                imported_evidence = json.loads(
+                    store.import_path(self.task).read_text(encoding="utf-8")
+                )
+                self.assertEqual(
+                    imported_evidence["accepted_bundle_sha256"],
+                    accepted_binding["bundle_sha256"],
+                )
+                self.assertEqual(
+                    imported_evidence["source_artifact_sha256_by_name"],
+                    accepted_hashes,
+                )
+                self.assertEqual(
+                    taf.actual_tushare_request_count_by_endpoint(
+                        output,
+                        self.plan.pit_tasks,
+                        plan_sha256=self.plan.plan_sha256,
+                    )["index_weight"],
+                    0,
+                )
+                replayed = store.execute(
+                    self.task,
+                    token="",
+                    transport=never,
+                    timeout_seconds=30,
+                    maximum_response_bytes=2097152,
+                )
+                self.assertTrue(replayed.replayed)
+                self.assertEqual(replayed.request_origin, "offline_p14d_import")
+                self.assertEqual(len(never.calls), 0)
+                self.assertEqual(store.raw_path(self.task).read_bytes(), raw_before)
+                self.assertEqual(
+                    store.response_path(self.task).read_bytes(), response_before
+                )
+
+            # This alternate bundle is internally re-signed and passes the old
+            # self-consistency chain, but it differs from the frozen binding.
+            forged_source = Path(temporary) / "forged-p14d"
+            forged_artifacts, _, _ = build_bundle(
+                self._raw(self._rows(), request_id="req-p14d-forged")
+            )
+            write_bundle(forged_source, forged_artifacts)
+            with patch.object(
+                taf, "_p14d_bundle_binding", return_value=accepted_binding
+            ):
+                with self.assertRaisesRegex(
+                    AlphaFeasibilityDataError,
+                    "p14d_import_bundle_binding_mismatch",
+                ):
+                    taf.import_p14d_diagnostic_into_plan(
+                        diagnostic_root=forged_source,
+                        output_root=Path(temporary) / "forged-output",
+                        plan=self.plan,
+                    )
 
 
 class PitMembershipTests(unittest.TestCase):

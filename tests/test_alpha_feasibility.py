@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from dataclasses import replace
 from datetime import date, timedelta
 from decimal import Decimal
 from hashlib import sha256
@@ -196,6 +197,134 @@ def _pit_fixture(
     return tuple(memberships), PITAdmissionArtifacts(report, manifest)
 
 
+def _p15_pit_fixture() -> tuple[
+    tuple[PITMembershipSnapshot, ...], PITAdmissionArtifacts
+]:
+    instrument_ids = tuple(f"{index:06d}.SZ" for index in range(1, 801))
+    weights = ["0", *(["0.125"] * 798), "0.19"]
+    weight_sum = str(af._exact_decimal_sum([D(value) for value in weights]))
+    if weight_sum != "99.940":
+        raise AssertionError("P1.5 fixture warning sum drift")
+    weight_policy = {
+        "zero_weight_count": 1,
+        "weight_sum_hard_min": "99.5",
+        "weight_sum_hard_max": "100.5",
+        "weight_sum_warning_min": "99.95",
+        "weight_sum_warning_max": "100.05",
+        "warnings": ["weight_sum_outside_warning_range"],
+    }
+    members = [
+        {"instrument_id": instrument_id, "weight": weight}
+        for instrument_id, weight in zip(instrument_ids, weights, strict=True)
+    ]
+    memberships: list[PITMembershipSnapshot] = []
+    checks: list[dict] = []
+    snapshots: list[dict] = []
+    snapshot_dates: list[str] = []
+    for month in _months():
+        dates = [f"{month}-20"]
+        if month == "2017-12":
+            dates.insert(0, f"{month}-05")
+        coverage_snapshots: list[dict] = []
+        for snapshot_date in dates:
+            memberships.append(
+                PITMembershipSnapshot(date.fromisoformat(snapshot_date), instrument_ids)
+            )
+            snapshot_dates.append(snapshot_date)
+            coverage_snapshots.append(
+                {
+                    "snapshot_date": snapshot_date,
+                    "component_count": 800,
+                    "weight_sum": weight_sum,
+                    "weight_tolerance": "0.5",
+                    "component_count_adjustment_evidence": None,
+                    "valid": True,
+                    "issues": [],
+                    **weight_policy,
+                }
+            )
+            snapshots.append(
+                {
+                    "month": month,
+                    "snapshot_date": snapshot_date,
+                    "members": members,
+                    "weight_sum": weight_sum,
+                    "weight_tolerance": "0.5",
+                    "component_count_adjustment_evidence": None,
+                    "source_response_sha256": "b" * 64,
+                    **weight_policy,
+                }
+            )
+        checks.append(
+            {
+                "month": month,
+                "request_artifact_sha256": "a" * 64,
+                "response_sha256": "b" * 64,
+                "snapshots": coverage_snapshots,
+                "selected_snapshot_date": dates[-1],
+                "status": "complete",
+                "issues": [],
+            }
+        )
+    summary = {
+        "pit_snapshot_count": len(snapshots),
+        "snapshot_dates": snapshot_dates,
+        "missing_months": [],
+        "duplicate_member_count": 0,
+        "zero_weight_count_by_snapshot": {
+            snapshot_date: 1 for snapshot_date in snapshot_dates
+        },
+        "weight_sum_by_snapshot": {
+            snapshot_date: weight_sum for snapshot_date in snapshot_dates
+        },
+    }
+    locked = {
+        "access": "NOT_ACCESSED",
+        "download": "NOT_DOWNLOADED",
+        "run": "NOT_RUN",
+    }
+    report = _self_hash(
+        {
+            "schema_version": "pit-membership-coverage-report.v3",
+            "experiment_id": "a-share-technical-alpha-feasibility-tushare-p1-v1",
+            "generated_at": "2026-08-31T00:00:00+00:00",
+            "index_code": BENCHMARK,
+            "pit_months_expected": 73,
+            "pit_months_observed": 73,
+            "monthly_checks": checks,
+            "stage_status": "PIT_MEMBERSHIP_READY",
+            "terminal_status": None,
+            "remaining_blockers": [],
+            "locked_test_status": locked,
+            "locked_test_consumed": False,
+            **summary,
+        },
+        "report_sha256",
+    )
+    manifest = _self_hash(
+        {
+            "schema_version": "pit-membership-manifest.v3",
+            "experiment_id": "a-share-technical-alpha-feasibility-tushare-p1-v1",
+            "generated_at": "2026-08-31T00:00:00+00:00",
+            "index_code": BENCHMARK,
+            "coverage_start_month": "2017-12",
+            "coverage_end_month": "2023-12",
+            "pit_months_expected": 73,
+            "pit_months_observed": 73,
+            "snapshots": snapshots,
+            "union_instrument_count": len(instrument_ids),
+            "union_instrument_ids": list(instrument_ids),
+            "stage_status": "PIT_MEMBERSHIP_READY",
+            "remaining_blockers": [],
+            "locked_test_status": locked,
+            "locked_test_consumed": False,
+            **summary,
+        },
+        "manifest_sha256",
+    )
+    return tuple(memberships), PITAdmissionArtifacts(report, manifest)
+
+
 def _weekdays(start: date, end: date) -> tuple[date, ...]:
     result: list[date] = []
     current = start
@@ -279,6 +408,61 @@ class AlphaFeasibilityPITTests(unittest.TestCase):
             SimpleNamespace(pit_admission=admission),
             memberships,
         )
+
+    def test_p15_v3_data_ready_all_snapshots_are_admitted_by_engine(self) -> None:
+        memberships, admission = _p15_pit_fixture()
+        self.assertEqual(len(memberships), 74)
+        self.assertEqual(admission.manifest["pit_snapshot_count"], 74)
+        self.assertEqual(
+            admission.manifest["snapshots"][0]["warnings"],
+            ["weight_sum_outside_warning_range"],
+        )
+        af._verify_pit_admission(
+            SimpleNamespace(pit_admission=admission),
+            memberships,
+        )
+
+    def test_p15_v3_hard_range_and_warning_metadata_fail_closed(self) -> None:
+        memberships, admission = _p15_pit_fixture()
+        for name, field, replacement in (
+            ("hard_range", "weight_sum", "99.4"),
+            ("warning", "warnings", []),
+            ("component_count", "component_count", 799),
+        ):
+            with self.subTest(name=name):
+                report = json.loads(json.dumps(admission.coverage_report))
+                report["monthly_checks"][0]["snapshots"][0][field] = replacement
+                report.pop("report_sha256")
+                forged = PITAdmissionArtifacts(
+                    coverage_report=_self_hash(report, "report_sha256"),
+                    manifest=admission.manifest,
+                )
+                with self.assertRaisesRegex(
+                    AlphaFeasibilityDataError,
+                    "P1.5 PIT snapshot policy mismatch",
+                ):
+                    af._verify_pit_admission(
+                        SimpleNamespace(pit_admission=forged),
+                        memberships,
+                    )
+
+    def test_p15_v3_negative_weight_is_rejected(self) -> None:
+        memberships, admission = _p15_pit_fixture()
+        manifest = json.loads(json.dumps(admission.manifest))
+        manifest["snapshots"][0]["members"][0]["weight"] = "-0.1"
+        manifest.pop("manifest_sha256")
+        forged = PITAdmissionArtifacts(
+            coverage_report=admission.coverage_report,
+            manifest=_self_hash(manifest, "manifest_sha256"),
+        )
+        with self.assertRaisesRegex(
+            AlphaFeasibilityDataError,
+            "PIT member weight format is invalid",
+        ):
+            af._verify_pit_admission(
+                SimpleNamespace(pit_admission=forged),
+                memberships,
+            )
 
     def test_manifest_cannot_inflate_zero_weight_rounding_tolerance(self) -> None:
         instrument_ids = tuple(f"{index + 1:06d}.SZ" for index in range(30))
@@ -618,6 +802,7 @@ class AlphaFeasibilityEngineTests(unittest.TestCase):
     def test_metrics_and_per_stock_contribution_reconcile_to_normalized_nav(self) -> None:
         for result in (self.comparison.base, self.comparison.stress):
             metrics = result.metrics
+            payload = metrics.to_dict()
             self.assertAlmostEqual(
                 float(sum(metrics.per_stock_pnl_contribution.values(), D("0"))),
                 float(metrics.net_return),
@@ -633,9 +818,35 @@ class AlphaFeasibilityEngineTests(unittest.TestCase):
                 1.0,
                 places=12,
             )
+            self.assertNotIn("trade_or_rebalance_count", payload)
+            self.assertEqual(
+                payload["rebalance_count"], metrics.trade_or_rebalance_count
+            )
+            gross_profit = metrics.net_return + metrics.total_cost
+            if gross_profit > D("0"):
+                self.assertEqual(
+                    D(payload["cost_to_gross_profit"]),
+                    metrics.cost_to_gross_profit,
+                )
+            else:
+                self.assertIsNone(payload["cost_to_gross_profit"])
+
+    def test_cost_to_gross_profit_is_null_for_zero_or_negative_gross_profit(self) -> None:
+        metrics = self.comparison.base.metrics
+        zero_denominator = replace(metrics, net_return=-metrics.total_cost)
+        negative_denominator = replace(
+            metrics,
+            net_return=-metrics.total_cost - D("0.01"),
+        )
+
+        self.assertIsNone(zero_denominator.cost_to_gross_profit)
+        self.assertIsNone(zero_denominator.to_dict()["cost_to_gross_profit"])
+        self.assertIsNone(negative_denominator.cost_to_gross_profit)
+        self.assertIsNone(negative_denominator.to_dict()["cost_to_gross_profit"])
 
     def test_locked_and_execution_semantics_are_fixed_and_serializable(self) -> None:
         payload = self.comparison.to_dict()
+        serialized_metrics = payload["base"]["metrics"]
         self.assertEqual(
             payload["locked_test_status"],
             {"access": "NOT_ACCESSED", "download": "NOT_DOWNLOADED", "run": "NOT_RUN"},
@@ -644,6 +855,9 @@ class AlphaFeasibilityEngineTests(unittest.TestCase):
         self.assertFalse(payload["locked_test_consumed"])
         self.assertEqual(payload["execution_realism"], "INCOMPLETE")
         self.assertFalse(payload["trade_eligibility"])
+        self.assertIn("rebalance_count", serialized_metrics)
+        self.assertIn("cost_to_gross_profit", serialized_metrics)
+        self.assertNotIn("trade_or_rebalance_count", serialized_metrics)
 
     def test_held_non_suspended_missing_return_fails_closed(self) -> None:
         first_report_date = next(day for day in self.sessions if day.year == 2023)

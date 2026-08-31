@@ -1,0 +1,118 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tushare_alpha_feasibility_manifest.v4.json",
+  "title": "Tushare Alpha Feasibility Dataset Manifest V4",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "experiment_id", "generated_at", "coverage_start", "coverage_end",
+    "actual_tushare_request_count_by_endpoint", "request_count_semantics",
+    "stock_basic_status", "stock_basic_request_count", "security_master_pit_status",
+    "pit_months_expected", "pit_months_observed", "union_instrument_count",
+    "valid_candidate_count_by_decision", "insufficient_history_count_by_decision",
+    "ineligible_no_initial_price_count", "unexplained_market_data_gap_count", "datasets",
+    "data_status", "remaining_blockers", "locked_test_status", "locked_test_consumed",
+    "safety", "manifest_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "tushare-alpha-feasibility-manifest.v4"},
+    "experiment_id": {"const": "a-share-technical-alpha-feasibility-tushare-p1-v1"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "coverage_start": {"const": "2017-07-01"},
+    "coverage_end": {"const": "2023-12-31"},
+    "actual_tushare_request_count_by_endpoint": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["trade_cal", "index_weight", "daily", "adj_factor", "index_daily", "suspend_d"],
+      "properties": {
+        "trade_cal": {"type": "integer", "minimum": 0},
+        "index_weight": {"type": "integer", "minimum": 0},
+        "daily": {"type": "integer", "minimum": 0},
+        "adj_factor": {"type": "integer", "minimum": 0},
+        "index_daily": {"type": "integer", "minimum": 0},
+        "suspend_d": {"type": "integer", "minimum": 0}
+      }
+    },
+    "request_count_semantics": {"const": "conservative_durable_pre_transport_attempt_claim"},
+    "stock_basic_status": {"const": "DEFERRED_NOT_REQUIRED_FOR_ALPHA_FEASIBILITY"},
+    "stock_basic_request_count": {"const": 0},
+    "security_master_pit_status": {"const": "NOT_IMPLEMENTED_NOT_REQUIRED_IN_P1"},
+    "pit_months_expected": {"const": 73},
+    "pit_months_observed": {"type": "integer", "minimum": 0, "maximum": 73},
+    "union_instrument_count": {"type": "integer", "minimum": 0},
+    "valid_candidate_count_by_decision": {"$ref": "#/$defs/count_by_decision"},
+    "insufficient_history_count_by_decision": {"$ref": "#/$defs/count_by_decision"},
+    "ineligible_no_initial_price_count": {"type": "integer", "minimum": 0},
+    "unexplained_market_data_gap_count": {"type": "integer", "minimum": 0},
+    "datasets": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["trade_calendar", "pit_membership", "daily", "adj_factor", "suspension", "benchmark"],
+      "properties": {
+        "trade_calendar": {"$ref": "#/$defs/dataset"},
+        "pit_membership": {"$ref": "#/$defs/dataset"},
+        "daily": {"$ref": "#/$defs/dataset"},
+        "adj_factor": {"$ref": "#/$defs/dataset"},
+        "suspension": {"$ref": "#/$defs/dataset"},
+        "benchmark": {"$ref": "#/$defs/dataset"}
+      }
+    },
+    "data_status": {"enum": ["READY", "BLOCKED_PIT_MEMBERSHIP", "BLOCKED_DATA"]},
+    "remaining_blockers": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "locked_test_status": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/locked"},
+    "locked_test_consumed": {"const": false},
+    "safety": {"$ref": "#/$defs/safety"},
+    "manifest_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"data_status": {"const": "READY"}}},
+      "then": {
+        "properties": {
+          "valid_candidate_count_by_decision": {"minProperties": 1},
+          "insufficient_history_count_by_decision": {"minProperties": 1},
+          "unexplained_market_data_gap_count": {"const": 0}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "count_by_decision": {
+      "type": "object",
+      "propertyNames": {
+        "type": "string",
+        "format": "date",
+        "pattern": "^20(?:1[7-9]|2[0-3])-[0-1][0-9]-[0-3][0-9]$"
+      },
+      "additionalProperties": {"type": "integer", "minimum": 0}
+    },
+    "dataset": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["status", "endpoint", "record_count", "coverage_start", "coverage_end", "normalized_content_sha256", "issues"],
+      "properties": {
+        "status": {"enum": ["complete", "missing", "partial", "invalid"]},
+        "endpoint": {"type": "string", "minLength": 1},
+        "record_count": {"type": "integer", "minimum": 0},
+        "coverage_start": {"type": ["string", "null"], "format": "date"},
+        "coverage_end": {"type": ["string", "null"], "format": "date"},
+        "normalized_content_sha256": {"oneOf": [{"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"}, {"type": "null"}]},
+        "issues": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true}
+      }
+    },
+    "safety": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["research_status", "execution_realism", "paper_eligibility", "trade_eligibility", "real_money_list_allowed", "automatic_order_submission", "live_supported"],
+      "properties": {
+        "research_status": {"const": "research_alpha_feasibility_only"},
+        "execution_realism": {"const": "INCOMPLETE"},
+        "paper_eligibility": {"const": false},
+        "trade_eligibility": {"const": false},
+        "real_money_list_allowed": {"const": false},
+        "automatic_order_submission": {"const": false},
+        "live_supported": {"const": false}
+      }
+    }
+  }
+}

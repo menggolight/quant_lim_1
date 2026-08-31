@@ -1,0 +1,206 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tushare_alpha_feasibility_run_receipt.v1.json",
+  "title": "Tushare Alpha Feasibility P1.5 Run Receipt V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "generated_at", "code_commit_sha", "baseline_commit_sha",
+    "baseline_commit_semantics", "remote_branch_sha", "working_tree_clean",
+    "runtime_implementation_bundle", "collection_plan_sha256", "run_claim_sha256",
+    "network_run_id", "network_process_count", "terminal_process_id",
+    "actual_request_count_by_endpoint", "request_count_semantics", "completed_request_fingerprint_count",
+    "resumed_request_fingerprint_count", "pit", "market_data",
+    "development_metrics", "validation_metrics", "concentration_metrics",
+    "terminal_status", "locked_test_status", "locked_test_consumed",
+    "stock_basic_status", "stock_basic_request_count",
+    "security_master_pit_status", "remaining_blockers", "safety",
+    "report_sha256", "receipt_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "tushare-alpha-feasibility-run-receipt.v1"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "code_commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "baseline_commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "baseline_commit_semantics": {"const": "git_head_baseline_only_runtime_bundle_binds_working_tree_overlay"},
+    "remote_branch_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "working_tree_clean": {"type": "boolean"},
+    "runtime_implementation_bundle": {"$ref": "#/$defs/runtime_bundle"},
+    "collection_plan_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+    "run_claim_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+    "network_run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{2,95}$"},
+    "network_process_count": {"type": "integer", "minimum": 1},
+    "terminal_process_id": {"type": "string", "pattern": "^[0-9a-f]{32}$"},
+    "actual_request_count_by_endpoint": {
+      "$ref": "tushare_alpha_feasibility_manifest.v3.json#/properties/actual_tushare_request_count_by_endpoint"
+    },
+    "request_count_semantics": {"const": "durable_pre_transport_attempt_claim_conservative"},
+    "completed_request_fingerprint_count": {"type": "integer", "minimum": 1},
+    "resumed_request_fingerprint_count": {"type": "integer", "minimum": 1},
+    "pit": {"$ref": "#/$defs/pit"},
+    "market_data": {"$ref": "#/$defs/market_data"},
+    "development_metrics": {"$ref": "technical_alpha_feasibility_report.v4.json#/properties/development_metrics"},
+    "validation_metrics": {"$ref": "technical_alpha_feasibility_report.v4.json#/properties/validation_metrics"},
+    "concentration_metrics": {"$ref": "technical_alpha_feasibility_report.v4.json#/properties/concentration_metrics"},
+    "terminal_status": {
+      "enum": [
+        "ALPHA_FEASIBILITY_GO_CANDIDATE", "ALPHA_FEASIBILITY_NO_GO",
+        "BLOCKED_DATA", "BLOCKED_ADAPTER_PROTOCOL"
+      ]
+    },
+    "locked_test_status": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/locked"},
+    "locked_test_consumed": {"const": false},
+    "stock_basic_status": {"const": "DEFERRED_NOT_REQUIRED_FOR_ALPHA_FEASIBILITY"},
+    "stock_basic_request_count": {"const": 0},
+    "security_master_pit_status": {"const": "NOT_IMPLEMENTED_NOT_REQUIRED_IN_P1"},
+    "remaining_blockers": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^[a-z0-9_]{3,96}$"},
+      "uniqueItems": true
+    },
+    "safety": {"$ref": "technical_alpha_feasibility_report.v4.json#/$defs/safety"},
+    "report_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+    "receipt_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"}
+  },
+  "allOf": [
+    {
+      "if": {
+        "properties": {
+          "terminal_status": {
+            "enum": ["ALPHA_FEASIBILITY_GO_CANDIDATE", "ALPHA_FEASIBILITY_NO_GO"]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "development_metrics": {"$ref": "technical_alpha_feasibility_report.v4.json#/$defs/scenarios"},
+          "validation_metrics": {"$ref": "technical_alpha_feasibility_report.v4.json#/$defs/scenarios"},
+          "concentration_metrics": {"$ref": "technical_alpha_feasibility_report.v3.json#/$defs/concentration"},
+          "completed_request_fingerprint_count": {"minimum": 78},
+          "actual_request_count_by_endpoint": {
+            "properties": {
+              "trade_cal": {"minimum": 1},
+              "index_weight": {"minimum": 72},
+              "daily": {"minimum": 1},
+              "adj_factor": {"minimum": 1},
+              "index_daily": {"minimum": 1},
+              "suspend_d": {"minimum": 1}
+            }
+          },
+          "remaining_blockers": {"maxItems": 0},
+          "pit": {
+            "properties": {
+              "months_observed": {"const": 73},
+              "snapshot_count": {"minimum": 73},
+              "snapshot_dates": {"minItems": 73},
+              "missing_months": {"maxItems": 0},
+              "union_instrument_count": {"minimum": 1},
+              "coverage_status": {"const": "complete"}
+            }
+          },
+          "market_data": {
+            "properties": {
+              "status": {"const": "complete"},
+              "trade_calendar_status": {"const": "complete"},
+              "daily_status": {"const": "complete"},
+              "adj_factor_status": {"const": "complete"},
+              "index_daily_status": {"const": "complete"},
+              "suspend_d_status": {"const": "complete"},
+              "unexplained_gap_count": {"const": 0}
+            }
+          }
+        }
+      },
+      "else": {
+        "properties": {
+          "development_metrics": {"type": "null"},
+          "validation_metrics": {"type": "null"},
+          "concentration_metrics": {"type": "null"},
+          "remaining_blockers": {"minItems": 1}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "prelocked_date": {
+      "type": "string",
+      "pattern": "^(201[7-9]|202[0-3])-(0[1-9]|1[0-2])-([0-2][0-9]|3[01])$"
+    },
+    "prelocked_month": {
+      "type": "string",
+      "pattern": "^(201[7-9]|202[0-3])-(0[1-9]|1[0-2])$"
+    },
+    "decimal": {"type": "string", "pattern": "^-?(0|[1-9][0-9]*)(\\.[0-9]+)?$"},
+    "pit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "months_expected", "months_observed", "snapshot_count", "snapshot_dates",
+        "missing_months", "union_instrument_count", "zero_weight_count",
+        "weight_sum_min", "weight_sum_max", "coverage_status"
+      ],
+      "properties": {
+        "months_expected": {"const": 73},
+        "months_observed": {"type": "integer", "minimum": 0, "maximum": 73},
+        "snapshot_count": {"type": "integer", "minimum": 0},
+        "snapshot_dates": {"type": "array", "items": {"$ref": "#/$defs/prelocked_date"}, "uniqueItems": true},
+        "missing_months": {"type": "array", "items": {"$ref": "#/$defs/prelocked_month"}, "uniqueItems": true},
+        "union_instrument_count": {"type": "integer", "minimum": 0},
+        "zero_weight_count": {"type": "integer", "minimum": 0},
+        "weight_sum_min": {"oneOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
+        "weight_sum_max": {"oneOf": [{"$ref": "#/$defs/decimal"}, {"type": "null"}]},
+        "coverage_status": {"enum": ["complete", "blocked"]}
+      }
+    },
+    "runtime_bundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "config_path", "files", "bundle_sha256"],
+      "properties": {
+        "schema_version": {"const": "alpha-feasibility-runtime-implementation-bundle.v1"},
+        "config_path": {"type": "string", "pattern": "^[A-Za-z0-9_./-]+\\.json$"},
+        "files": {
+          "type": "object",
+          "minProperties": 7,
+          "propertyNames": {"pattern": "^[A-Za-z0-9_./-]+\\.(?:py|json)$"},
+          "additionalProperties": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+          "required": [
+            "operations/run_alpha_feasibility.py",
+            "operations/p15_alpha_feasibility_run.py",
+            "research/market_data/tushare_alpha_feasibility.py",
+            "research/strategy_workspace/alpha_feasibility.py",
+            "research/strategy_workspace/alpha_feasibility_reporting.py"
+          ],
+          "properties": {
+            "operations/run_alpha_feasibility.py": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+            "operations/p15_alpha_feasibility_run.py": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+            "research/market_data/tushare_alpha_feasibility.py": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+            "research/strategy_workspace/alpha_feasibility.py": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+            "research/strategy_workspace/alpha_feasibility_reporting.py": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"}
+          }
+        },
+        "bundle_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"}
+      }
+    },
+    "market_data": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "status", "trade_calendar_status", "daily_status", "adj_factor_status",
+        "index_daily_status", "suspend_d_status", "coverage_start", "coverage_end",
+        "unexplained_gap_count"
+      ],
+      "properties": {
+        "status": {"enum": ["complete", "blocked"]},
+        "trade_calendar_status": {"enum": ["complete", "blocked"]},
+        "daily_status": {"enum": ["complete", "blocked", "not_run"]},
+        "adj_factor_status": {"enum": ["complete", "blocked", "not_run"]},
+        "index_daily_status": {"enum": ["complete", "blocked", "not_run"]},
+        "suspend_d_status": {"enum": ["complete", "blocked", "not_run"]},
+        "coverage_start": {"const": "2017-07-01"},
+        "coverage_end": {"const": "2023-12-31"},
+        "unexplained_gap_count": {"type": "integer", "minimum": 0}
+      }
+    }
+  }
+}

@@ -1,0 +1,317 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "technical_alpha_feasibility_experiment.v3.json",
+  "title": "A-share Technical Alpha Feasibility Experiment V3",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "experiment_id",
+    "strategy_id",
+    "research_status",
+    "stock_basic_status",
+    "stock_basic_request_count",
+    "security_master_pit_status",
+    "frozen_implementation",
+    "dates",
+    "source",
+    "index",
+    "requests",
+    "signal_total_return",
+    "portfolio",
+    "feasibility_timing",
+    "costs",
+    "gate",
+    "not_simulated",
+    "locked_test_status",
+    "locked_test_consumed",
+    "safety"
+  ],
+  "properties": {
+    "schema_version": {
+      "const": "technical-alpha-feasibility-experiment.v3"
+    },
+    "experiment_id": {
+      "const": "a-share-technical-alpha-feasibility-tushare-p1-v1"
+    },
+    "strategy_id": {
+      "const": "a-share-technical-momentum-adaptive-v1"
+    },
+    "research_status": {
+      "const": "research_alpha_feasibility_only"
+    },
+    "stock_basic_status": {
+      "const": "DEFERRED_NOT_REQUIRED_FOR_ALPHA_FEASIBILITY"
+    },
+    "stock_basic_request_count": {
+      "const": 0
+    },
+    "security_master_pit_status": {
+      "const": "NOT_IMPLEMENTED_NOT_REQUIRED_IN_P1"
+    },
+    "frozen_implementation": {
+      "const": {
+        "alpha_policy_path": "configs/a_share_technical_shadow_mvp.v1.json",
+        "alpha_policy_sha256": "53b7f2b3da72a2d393c18b4fc61afac9e1a3f63c2cd86756cbd1bd0d47eb77ea",
+        "alpha_source_path": "research/strategy_workspace/technical_alpha_shadow_v1.py",
+        "alpha_source_sha256": "3cd734c8770e5647754fa21d65e8d6a789da3c17958fb2b2b15352268af3d922",
+        "ranker_source_path": "research/strategy_workspace/technical_formal_backtest.py",
+        "ranker_source_sha256": "33cd919f8928a532caa798341c2656d423e68655befff6792aa4223a281a31d3",
+        "exposure_source_path": "research/strategy_workspace/technical_exposure_shadow_v1.py",
+        "exposure_source_sha256": "4a204237752dec4797c2f80cf5950d638aa4d638f2ece615a29ace62f14d0ca7"
+      }
+    },
+    "dates": {
+      "const": {
+        "signal_warmup_start": "2017-07-01",
+        "development_start": "2018-01-01",
+        "development_end": "2022-12-31",
+        "validation_start": "2023-01-01",
+        "validation_end": "2023-12-31",
+        "absolute_request_and_consumer_cutoff": "2023-12-31",
+        "terminal_session_has_no_cross_cutoff_next_session": true
+      }
+    },
+    "source": {
+      "type": "object",
+      "required": [
+        "provider",
+        "transport_target",
+        "token_environment_variable",
+        "allowed_endpoints",
+        "forbidden_endpoint_suffix",
+        "redirects_allowed",
+        "automatic_retries",
+        "request_timeout_seconds",
+        "maximum_response_bytes",
+        "minimum_request_interval_seconds",
+        "token_persistence_forbidden",
+        "field_level_fallback_forbidden",
+        "baostock_field_level_fallback_forbidden",
+        "interrupted_fingerprint_recovery",
+        "terminal_quarantine_retry_forbidden",
+        "complete_raw_transport_persistence",
+        "maximum_attempts_per_fingerprint",
+        "request_count_semantics",
+        "accepted_p14d_bundle"
+      ],
+      "properties": {
+        "provider": {
+          "const": "tushare_standard_non_vip"
+        },
+        "transport_target": {
+          "const": "https://api.tushare.pro"
+        },
+        "token_environment_variable": {
+          "const": "TUSHARE_TOKEN"
+        },
+        "allowed_endpoints": {
+          "const": [
+            "trade_cal",
+            "index_weight",
+            "daily",
+            "adj_factor",
+            "index_daily",
+            "suspend_d"
+          ]
+        },
+        "forbidden_endpoint_suffix": {
+          "const": "_vip"
+        },
+        "redirects_allowed": {
+          "const": false
+        },
+        "automatic_retries": {
+          "const": 0
+        },
+        "request_timeout_seconds": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 60
+        },
+        "maximum_response_bytes": {
+          "type": "integer",
+          "minimum": 1024,
+          "maximum": 2097152
+        },
+        "minimum_request_interval_seconds": {
+          "type": "string",
+          "pattern": "^[0-9]+(?:\\.[0-9]+)?$"
+        },
+        "token_persistence_forbidden": {
+          "const": true
+        },
+        "field_level_fallback_forbidden": {
+          "const": true
+        },
+        "baostock_field_level_fallback_forbidden": {
+          "const": true
+        },
+        "interrupted_fingerprint_recovery": {
+          "const": "create_only_attempt_journal"
+        },
+        "terminal_quarantine_retry_forbidden": {
+          "const": true
+        },
+        "complete_raw_transport_persistence": {
+          "const": true
+        },
+        "maximum_attempts_per_fingerprint": {
+          "type": "integer",
+          "minimum": 1,
+          "maximum": 10
+        },
+        "request_count_semantics": {
+          "const": "conservative_durable_pre_transport_attempt_claim"
+        },
+        "accepted_p14d_bundle": {
+          "const": {
+            "bundle_sha256": "a91f612583d2946ccfcec155d9d4bce1205b8ab997e85f10d3a3a63839871226",
+            "request_fingerprint": "4bd39eed560ed8b2492145881be89e6f7482427d5a2516ca0dd2e6dd6ca127c2",
+            "raw_transport_sha256": "fdcaeab52a45766a07380be86c9cc8f848e3d0324f6f0c801237947a6552e6ad",
+            "normalized_content_sha256": "94a7bd91057dc9d84dede6fe6bec7f2c08e0555b9e19d47bc97a3d36eee089f3",
+            "source_artifact_sha256_by_name": {
+              "request.json": "67fb43e0741a0a76912038ab130e2ec63797297f7ccf173db16ff33e4a78ff56",
+              "network_call_started.json": "728d1153919bb31c1009fce28e141e2185a445afbdafd11f54ab4fb95dd959da",
+              "network_response_scanned.json": "4083a2bd5333954e47b1929d606e02d8925b2ebd3ac0c013aedf62843f59ae17",
+              "response.raw.json": "fdcaeab52a45766a07380be86c9cc8f848e3d0324f6f0c801237947a6552e6ad",
+              "value_profile.json": "3f3ab55ee8261c02213099fc86ece59f24f22297c233de1594ee0e2931442a00",
+              "normalized_pit.json": "59b89347748ecdf315d6159c4f5dbe6a31901dd1100e47e507a4ab3859e98243",
+              "offline_replay.json": "4ff9e4e976fa136b95229e3b269482b15ac5f96da3982b3e845b46d737c7e76a"
+            }
+          }
+        }
+      },
+      "additionalProperties": false
+    },
+    "index": {
+      "type": "object"
+    },
+    "requests": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "trade_cal",
+        "index_weight",
+        "daily",
+        "adj_factor",
+        "suspend_d",
+        "index_daily"
+      ],
+      "properties": {
+        "trade_cal": {
+          "type": "object"
+        },
+        "index_weight": {
+          "type": "object"
+        },
+        "daily": {
+          "type": "object"
+        },
+        "adj_factor": {
+          "type": "object"
+        },
+        "suspend_d": {
+          "type": "object"
+        },
+        "index_daily": {
+          "type": "object"
+        }
+      }
+    },
+    "signal_total_return": {
+      "type": "object"
+    },
+    "portfolio": {
+      "type": "object"
+    },
+    "feasibility_timing": {
+      "const": {
+        "decision_time": "D_close",
+        "rebalance_time": "D_plus_1_open",
+        "held_interval_return": "adjusted_close_to_adjusted_open_then_adjusted_open_to_adjusted_close",
+        "new_target_return": "D_plus_1_adjusted_open_to_adjusted_close",
+        "broker_fill_simulation": false
+      }
+    },
+    "costs": {
+      "type": "object"
+    },
+    "gate": {
+      "type": "object",
+      "required": [
+        "validation_base_net_active_return_min_exclusive",
+        "validation_stress_net_active_return_min_inclusive",
+        "validation_max_drawdown_max_inclusive",
+        "largest_stock_pnl_share_max_inclusive",
+        "largest_10_days_pnl_share_max_inclusive",
+        "concentration_warning_blocks_go_candidate",
+        "parameter_search_forbidden",
+        "validation_driven_retraining_forbidden"
+      ],
+      "properties": {
+        "validation_base_net_active_return_min_exclusive": {
+          "const": "0"
+        },
+        "validation_stress_net_active_return_min_inclusive": {
+          "const": "0"
+        },
+        "validation_max_drawdown_max_inclusive": {
+          "const": "0.12"
+        },
+        "largest_stock_pnl_share_max_inclusive": {
+          "const": "0.50"
+        },
+        "largest_10_days_pnl_share_max_inclusive": {
+          "const": "0.50"
+        },
+        "concentration_warning_blocks_go_candidate": {
+          "const": true
+        },
+        "parameter_search_forbidden": {
+          "const": true
+        },
+        "validation_driven_retraining_forbidden": {
+          "const": true
+        }
+      },
+      "additionalProperties": false
+    },
+    "not_simulated": {
+      "type": "array",
+      "items": {
+        "type": "string",
+        "minLength": 1
+      },
+      "uniqueItems": true
+    },
+    "locked_test_status": {
+      "$ref": "pit_membership_coverage_report.v1.json#/$defs/locked"
+    },
+    "locked_test_consumed": {
+      "const": false
+    },
+    "safety": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "research_status",
+        "execution_realism",
+        "paper_eligibility",
+        "trade_eligibility",
+        "real_money_list_allowed",
+        "automatic_order_submission",
+        "live_supported"
+      ],
+      "properties": {
+        "research_status": {"const": "research_alpha_feasibility_only"},
+        "execution_realism": {"const": "INCOMPLETE"},
+        "paper_eligibility": {"const": false},
+        "trade_eligibility": {"const": false},
+        "real_money_list_allowed": {"const": false},
+        "automatic_order_submission": {"const": false},
+        "live_supported": {"const": false}
+      }
+    }
+  }
+}

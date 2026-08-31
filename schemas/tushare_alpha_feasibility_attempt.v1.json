@@ -1,0 +1,20 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tushare_alpha_feasibility_attempt.v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "state", "attempt_number", "request_count", "request_count_semantics", "task_id", "endpoint", "plan_sha256", "task_sha256", "locked_test_status", "locked_test_consumed"],
+  "properties": {
+    "schema_version": {"const": "tushare-alpha-feasibility-attempt.v1"},
+    "state": {"const": "NETWORK_CALL_ATTEMPT_STARTED"},
+    "attempt_number": {"type": "integer", "minimum": 1, "maximum": 10},
+    "request_count": {"const": 1},
+    "request_count_semantics": {"const": "conservative_durable_pre_transport_attempt_claim"},
+    "task_id": {"type": "string", "pattern": "^[a-z_]+-[0-9a-f]{64}$"},
+    "endpoint": {"enum": ["trade_cal", "index_weight", "daily", "adj_factor", "index_daily", "suspend_d", "stock_basic"]},
+    "plan_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+    "task_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+    "locked_test_status": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/locked"},
+    "locked_test_consumed": {"const": false}
+  }
+}

@@ -1,0 +1,265 @@
+{
+  "schema_version": "technical-alpha-feasibility-experiment.v3",
+  "experiment_id": "a-share-technical-alpha-feasibility-tushare-p1-v1",
+  "strategy_id": "a-share-technical-momentum-adaptive-v1",
+  "research_status": "research_alpha_feasibility_only",
+  "stock_basic_status": "DEFERRED_NOT_REQUIRED_FOR_ALPHA_FEASIBILITY",
+  "stock_basic_request_count": 0,
+  "security_master_pit_status": "NOT_IMPLEMENTED_NOT_REQUIRED_IN_P1",
+  "frozen_implementation": {
+    "alpha_policy_path": "configs/a_share_technical_shadow_mvp.v1.json",
+    "alpha_policy_sha256": "53b7f2b3da72a2d393c18b4fc61afac9e1a3f63c2cd86756cbd1bd0d47eb77ea",
+    "alpha_source_path": "research/strategy_workspace/technical_alpha_shadow_v1.py",
+    "alpha_source_sha256": "3cd734c8770e5647754fa21d65e8d6a789da3c17958fb2b2b15352268af3d922",
+    "ranker_source_path": "research/strategy_workspace/technical_formal_backtest.py",
+    "ranker_source_sha256": "33cd919f8928a532caa798341c2656d423e68655befff6792aa4223a281a31d3",
+    "exposure_source_path": "research/strategy_workspace/technical_exposure_shadow_v1.py",
+    "exposure_source_sha256": "4a204237752dec4797c2f80cf5950d638aa4d638f2ece615a29ace62f14d0ca7"
+  },
+  "dates": {
+    "signal_warmup_start": "2017-07-01",
+    "development_start": "2018-01-01",
+    "development_end": "2022-12-31",
+    "validation_start": "2023-01-01",
+    "validation_end": "2023-12-31",
+    "absolute_request_and_consumer_cutoff": "2023-12-31",
+    "terminal_session_has_no_cross_cutoff_next_session": true
+  },
+  "source": {
+    "provider": "tushare_standard_non_vip",
+    "transport_target": "https://api.tushare.pro",
+    "token_environment_variable": "TUSHARE_TOKEN",
+    "allowed_endpoints": [
+      "trade_cal",
+      "index_weight",
+      "daily",
+      "adj_factor",
+      "index_daily",
+      "suspend_d"
+    ],
+    "forbidden_endpoint_suffix": "_vip",
+    "redirects_allowed": false,
+    "automatic_retries": 0,
+    "request_timeout_seconds": 30,
+    "maximum_response_bytes": 2097152,
+    "minimum_request_interval_seconds": "0.13",
+    "token_persistence_forbidden": true,
+    "field_level_fallback_forbidden": true,
+    "baostock_field_level_fallback_forbidden": true,
+    "interrupted_fingerprint_recovery": "create_only_attempt_journal",
+    "terminal_quarantine_retry_forbidden": true,
+    "complete_raw_transport_persistence": true,
+    "maximum_attempts_per_fingerprint": 3,
+    "request_count_semantics": "conservative_durable_pre_transport_attempt_claim",
+    "accepted_p14d_bundle": {
+      "bundle_sha256": "a91f612583d2946ccfcec155d9d4bce1205b8ab997e85f10d3a3a63839871226",
+      "request_fingerprint": "4bd39eed560ed8b2492145881be89e6f7482427d5a2516ca0dd2e6dd6ca127c2",
+      "raw_transport_sha256": "fdcaeab52a45766a07380be86c9cc8f848e3d0324f6f0c801237947a6552e6ad",
+      "normalized_content_sha256": "94a7bd91057dc9d84dede6fe6bec7f2c08e0555b9e19d47bc97a3d36eee089f3",
+      "source_artifact_sha256_by_name": {
+        "request.json": "67fb43e0741a0a76912038ab130e2ec63797297f7ccf173db16ff33e4a78ff56",
+        "network_call_started.json": "728d1153919bb31c1009fce28e141e2185a445afbdafd11f54ab4fb95dd959da",
+        "network_response_scanned.json": "4083a2bd5333954e47b1929d606e02d8925b2ebd3ac0c013aedf62843f59ae17",
+        "response.raw.json": "fdcaeab52a45766a07380be86c9cc8f848e3d0324f6f0c801237947a6552e6ad",
+        "value_profile.json": "3f3ab55ee8261c02213099fc86ece59f24f22297c233de1594ee0e2931442a00",
+        "normalized_pit.json": "59b89347748ecdf315d6159c4f5dbe6a31901dd1100e47e507a4ab3859e98243",
+        "offline_replay.json": "4ff9e4e976fa136b95229e3b269482b15ac5f96da3982b3e845b46d737c7e76a"
+      }
+    }
+  },
+  "index": {
+    "index_code": "000906.SH",
+    "pit_first_month": "2017-12",
+    "pit_last_month": "2023-12",
+    "one_request_per_calendar_month": true,
+    "snapshot_selection": "latest_valid_snapshot_on_or_before_decision_date",
+    "expected_component_count": 800,
+    "non_800_policy": "block_unless_controlled_index_company_adjustment_evidence",
+    "weight_minimum": "0",
+    "minimum_weight_decimal_places": 0,
+    "weight_sum_target": "100",
+    "future_snapshot_backfill_forbidden": true,
+    "weight_sum_hard_min": "99.5",
+    "weight_sum_hard_max": "100.5",
+    "weight_sum_warning_min": "99.95",
+    "weight_sum_warning_max": "100.05"
+  },
+  "requests": {
+    "trade_cal": {
+      "params": {
+        "exchange": "SSE",
+        "start_date": "20170701",
+        "end_date": "20231231"
+      },
+      "fields": [
+        "exchange",
+        "cal_date",
+        "is_open",
+        "pretrade_date"
+      ]
+    },
+    "index_weight": {
+      "params": {
+        "index_code": "000906.SH"
+      },
+      "fields": [
+        "index_code",
+        "con_code",
+        "trade_date",
+        "weight"
+      ]
+    },
+    "daily": {
+      "params": {
+        "start_date": "20170701",
+        "end_date": "20231231"
+      },
+      "fields": [
+        "ts_code",
+        "trade_date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "pre_close",
+        "vol",
+        "amount"
+      ],
+      "instrument_batch_size": 3,
+      "units": {
+        "price": "CNY_per_share",
+        "vol": "board_lot_100_shares",
+        "amount": "thousand_CNY"
+      }
+    },
+    "adj_factor": {
+      "params": {
+        "start_date": "20170701",
+        "end_date": "20231231"
+      },
+      "fields": [
+        "ts_code",
+        "trade_date",
+        "adj_factor"
+      ],
+      "instrument_batch_size": 1,
+      "asof_join": "latest_factor_on_or_before_trade_date",
+      "future_backfill_forbidden": true
+    },
+    "suspend_d": {
+      "params": {
+        "start_date": "20170701",
+        "end_date": "20231231"
+      },
+      "fields": [
+        "ts_code",
+        "trade_date",
+        "suspend_timing",
+        "suspend_type"
+      ],
+      "instrument_batch_size": 3
+    },
+    "index_daily": {
+      "params": {
+        "ts_code": "000906.SH",
+        "start_date": "20170701",
+        "end_date": "20231231"
+      },
+      "fields": [
+        "ts_code",
+        "trade_date",
+        "open",
+        "high",
+        "low",
+        "close",
+        "pre_close",
+        "change",
+        "pct_chg",
+        "vol",
+        "amount"
+      ],
+      "benchmark_basis": "unadjusted_price_index"
+    }
+  },
+  "signal_total_return": {
+    "adjusted_value_formula": "raw_close_t*latest_adj_factor_available_on_or_before_t",
+    "daily_return_formula": "adjusted_value_t/adjusted_value_t_minus_1-1",
+    "raw_open_close_retained_separately": true,
+    "latest_factor_history_normalization_forbidden": true,
+    "minimum_valid_controlled_sessions": 121,
+    "insufficient_history_policy": "ineligible_insufficient_history",
+    "suspended_session_policy": "carry_previous_economic_value_only_with_same_day_suspend_d_evidence",
+    "non_suspension_missing_daily_policy": "unexplained_market_data_gap_fail_closed"
+  },
+  "portfolio": {
+    "fractional_weights": true,
+    "initial_nav": "1",
+    "max_positions": 3,
+    "max_position_weight": "0.40",
+    "candidate_shortage_policy": "preserve_cash",
+    "gross_exposure": {
+      "RISK_OFF": "0.00",
+      "DEFENSIVE": "0.30",
+      "NEUTRAL": "0.60",
+      "RISK_ON": "1.00"
+    }
+  },
+  "feasibility_timing": {
+    "decision_time": "D_close",
+    "rebalance_time": "D_plus_1_open",
+    "held_interval_return": "adjusted_close_to_adjusted_open_then_adjusted_open_to_adjusted_close",
+    "new_target_return": "D_plus_1_adjusted_open_to_adjusted_close",
+    "broker_fill_simulation": false
+  },
+  "costs": {
+    "minimum_commission_mode": "not_modeled_for_fractional_normalized_nav",
+    "base": {
+      "commission_rate": "0.00018",
+      "sell_tax_rate": "0.0005",
+      "transfer_fee_rate_both_sides": "0.00001",
+      "slippage_bps_one_way": "10",
+      "commission_multiplier": "1"
+    },
+    "stress": {
+      "commission_rate": "0.00018",
+      "sell_tax_rate": "0.0005",
+      "transfer_fee_rate_both_sides": "0.00001",
+      "slippage_bps_one_way": "20",
+      "commission_multiplier": "2"
+    }
+  },
+  "gate": {
+    "validation_base_net_active_return_min_exclusive": "0",
+    "validation_stress_net_active_return_min_inclusive": "0",
+    "validation_max_drawdown_max_inclusive": "0.12",
+    "largest_stock_pnl_share_max_inclusive": "0.50",
+    "largest_10_days_pnl_share_max_inclusive": "0.50",
+    "concentration_warning_blocks_go_candidate": true,
+    "parameter_search_forbidden": true,
+    "validation_driven_retraining_forbidden": true
+  },
+  "not_simulated": [
+    "board_lot_100_shares",
+    "exact_cash_dividend_booking",
+    "post_bonus_share_quantity",
+    "price_limits",
+    "st_status",
+    "delisting_terminal_value",
+    "broker_fills"
+  ],
+  "locked_test_status": {
+    "access": "NOT_ACCESSED",
+    "download": "NOT_DOWNLOADED",
+    "run": "NOT_RUN"
+  },
+  "locked_test_consumed": false,
+  "safety": {
+    "research_status": "research_alpha_feasibility_only",
+    "execution_realism": "INCOMPLETE",
+    "paper_eligibility": false,
+    "trade_eligibility": false,
+    "real_money_list_allowed": false,
+    "automatic_order_submission": false,
+    "live_supported": false
+  }
+}

@@ -19,6 +19,7 @@ from decimal import Decimal
 from pathlib import Path
 from typing import Any, Mapping, Sequence
 
+from operations import p15_alpha_feasibility_run as p15_run
 from research.market_data import tushare_alpha_feasibility as data_lane
 from research.strategy_workspace import alpha_feasibility as engine
 from research.strategy_workspace import alpha_feasibility_reporting as reporting
@@ -34,6 +35,7 @@ READY_STAGE = "DATA_READY_FOR_ALPHA_FEASIBILITY"
 BLOCKED_STAGES = frozenset(
     {"BLOCKED_PIT_MEMBERSHIP", "BLOCKED_DATA", "BLOCKED_ADAPTER_PROTOCOL"}
 )
+RECOVERABLE_EXIT_CODE = 3
 LOCKED_TEST_STATUS = {
     "access": "NOT_ACCESSED",
     "download": "NOT_DOWNLOADED",
@@ -616,21 +618,71 @@ def _safe_report_summary(report: Mapping[str, Any], report_path: Path) -> dict[s
     }
 
 
+def _finish_p15(
+    context: p15_run.RunContext | None,
+    output_root: Path,
+    exit_code: int,
+    report: Mapping[str, Any],
+    report_path: Path,
+    experiment: Mapping[str, Any],
+) -> tuple[int, dict[str, Any]]:
+    if context is None:
+        return exit_code, _safe_report_summary(report, report_path)
+    receipt, path = p15_run.publish_receipt(
+        context=context,
+        output_root=output_root,
+        source=report,
+        experiment=experiment,
+    )
+    return exit_code, p15_run.summary(receipt, path)
+
+
 def run_workflow(
     *,
     command: str,
     config_path: Path,
     output_root: Path,
     generated_at: str | None = None,
+    network_run_id: str | None = None,
+    p14d_import_root: Path | None = None,
 ) -> tuple[int, dict[str, Any]]:
     if command not in {"data", "all"}:
         raise AlphaFeasibilityWorkflowError("command_invalid")
-
     # This is intentionally the first filesystem/config action.  It proves
     # frozen dates, endpoint allowlist, schemas, and implementation hashes
     # before the collector may inspect TUSHARE_TOKEN or touch output_root.
     experiment = reporting.load_and_validate_experiment_config(config_path)
+    p15_config = (
+        experiment.get("schema_version") == data_lane.P15_EXPERIMENT_SCHEMA_VERSION
+    )
+    any_p15_argument = network_run_id is not None or p14d_import_root is not None
+    if command == "data" and any_p15_argument:
+        raise AlphaFeasibilityWorkflowError("p15_data_command_not_supported")
+    if p15_config:
+        if command != "all":
+            raise AlphaFeasibilityWorkflowError("p15_requires_all_command")
+        if network_run_id is None or p14d_import_root is None:
+            raise AlphaFeasibilityWorkflowError("p15_run_arguments_required")
+    elif any_p15_argument:
+        if (network_run_id is None) != (p14d_import_root is None):
+            raise AlphaFeasibilityWorkflowError("p15_run_arguments_incomplete")
+        raise AlphaFeasibilityWorkflowError("p15_arguments_require_v3_config")
     timestamp = _parse_generated_at(generated_at)
+    p15_context: p15_run.RunContext | None = None
+    if network_run_id is not None and p14d_import_root is not None:
+        p15_context, existing_receipt = p15_run.prepare(
+            network_run_id=network_run_id,
+            p14d_import_root=p14d_import_root,
+            output_root=output_root,
+            config_path=config_path,
+            experiment=experiment,
+        )
+        if existing_receipt is not None:
+            existing_summary = p15_run.summary(
+                existing_receipt,
+                output_root / p15_run.RUN_RECEIPT_FILENAME,
+            )
+            return (1 if existing_summary["status"] == "blocked" else 0), existing_summary
     try:
         result = data_lane.run_backfill_from_environment(
             config_path=config_path,
@@ -638,6 +690,17 @@ def run_workflow(
             generated_at=timestamp,
         )
     except data_lane.AlphaFeasibilityDataError as exc:
+        recoverable_codes = getattr(
+            data_lane,
+            "RECOVERABLE_INTERRUPTION_CODES",
+            getattr(data_lane, "RETRYABLE_ATTEMPT_FAILURES", frozenset()),
+        )
+        if p15_context is not None and exc.code in recoverable_codes:
+            return RECOVERABLE_EXIT_CODE, p15_run.recoverable_summary(
+                p15_context,
+                output_root,
+                exc.code,
+            )
         # Config preflight already passed.  Protocol-envelope failures retain
         # their explicit adapter terminal; all other lane failures remain
         # BLOCKED_DATA. Counts remain conservative durable claims.
@@ -703,7 +766,9 @@ def run_workflow(
             report,
             experiment=experiment,
         )
-        return 1, _safe_report_summary(report, report_path)
+        return _finish_p15(
+            p15_context, output_root, 1, report, report_path, experiment
+        )
     data_summary = _reporting_data_summary(result)
     commit_sha = _current_commit_sha(data_lane.REPOSITORY_ROOT)
     evidence_timestamp = _parse_generated_at(result.get("generated_at"))
@@ -722,7 +787,9 @@ def run_workflow(
             report,
             experiment=experiment,
         )
-        return 1, _safe_report_summary(report, report_path)
+        return _finish_p15(
+            p15_context, output_root, 1, report, report_path, experiment
+        )
 
     if command == "data":
         return 0, {
@@ -779,7 +846,9 @@ def run_workflow(
             report,
             experiment=experiment,
         )
-        return 1, _safe_report_summary(report, report_path)
+        return _finish_p15(
+            p15_context, output_root, 1, report, report_path, experiment
+        )
 
     development_metrics = _study_metrics(study.development)
     validation_metrics = _study_metrics(study.validation)
@@ -796,7 +865,7 @@ def run_workflow(
         report,
         experiment=experiment,
     )
-    return 0, _safe_report_summary(report, report_path)
+    return _finish_p15(p15_context, output_root, 0, report, report_path, experiment)
 
 
 def build_parser() -> argparse.ArgumentParser:
@@ -805,6 +874,8 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--config", type=Path, default=reporting.DEFAULT_CONFIG_PATH)
     parser.add_argument("--output-root", type=Path, default=DEFAULT_OUTPUT_ROOT)
     parser.add_argument("--generated-at")
+    parser.add_argument("--network-run-id")
+    parser.add_argument("--p14d-import-root", type=Path)
     return parser
 
 
@@ -816,9 +887,12 @@ def main(argv: Sequence[str] | None = None) -> int:
             config_path=args.config,
             output_root=args.output_root,
             generated_at=args.generated_at,
+            network_run_id=args.network_run_id,
+            p14d_import_root=args.p14d_import_root,
         )
     except (
         AlphaFeasibilityWorkflowError,
+        p15_run.P15RunError,
         data_lane.AlphaFeasibilityDataError,
         engine.AlphaFeasibilityError,
         reporting.AlphaFeasibilityReportingError,

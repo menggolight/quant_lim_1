@@ -1,0 +1,218 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "technical_alpha_feasibility_report.v4.json",
+  "title": "Technical Alpha Feasibility Report V4",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "experiment_id", "generated_at", "commit_sha", "benchmark",
+    "actual_tushare_request_count_by_endpoint", "first_index_weight", "stock_basic_status",
+    "stock_basic_request_count", "security_master_pit_status", "coverage_start",
+    "coverage_end", "pit_months_expected", "pit_months_observed",
+    "union_instrument_count", "valid_candidate_count_by_decision",
+    "insufficient_history_count_by_decision", "ineligible_no_initial_price_count",
+    "unexplained_market_data_gap_count", "collection_plan_sha256",
+    "pit_membership_manifest_sha256", "history_manifest_sha256",
+    "experiment_config_canonical_sha256", "alpha_feasibility_engine_version",
+    "alpha_feasibility_engine_sha256", "reporting_gate_source_sha256",
+    "daily_coverage_status", "adj_factor_coverage_status", "suspension_coverage_status",
+    "benchmark_coverage_status", "development_metrics", "validation_metrics",
+    "concentration_metrics", "terminal_status", "locked_test_status",
+    "locked_test_consumed", "remaining_blockers", "safety", "report_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "technical-alpha-feasibility-report.v4"},
+    "experiment_id": {"const": "a-share-technical-alpha-feasibility-tushare-p1-v1"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "commit_sha": {"type": "string", "pattern": "^[0-9a-f]{40}$"},
+    "benchmark": {"$ref": "#/$defs/benchmark"},
+    "actual_tushare_request_count_by_endpoint": {"$ref": "tushare_alpha_feasibility_manifest.v3.json#/properties/actual_tushare_request_count_by_endpoint"},
+    "first_index_weight": {
+      "oneOf": [
+        {"$ref": "technical_alpha_feasibility_report.v3.json#/$defs/first_index_weight"},
+        {"type": "null"}
+      ]
+    },
+    "stock_basic_status": {"const": "DEFERRED_NOT_REQUIRED_FOR_ALPHA_FEASIBILITY"},
+    "stock_basic_request_count": {"const": 0},
+    "security_master_pit_status": {"const": "NOT_IMPLEMENTED_NOT_REQUIRED_IN_P1"},
+    "coverage_start": {"const": "2017-07-01"},
+    "coverage_end": {"const": "2023-12-31"},
+    "pit_months_expected": {"const": 73},
+    "pit_months_observed": {"type": "integer", "minimum": 0, "maximum": 73},
+    "union_instrument_count": {"type": "integer", "minimum": 0},
+    "valid_candidate_count_by_decision": {"$ref": "tushare_alpha_feasibility_manifest.v3.json#/$defs/count_by_decision"},
+    "insufficient_history_count_by_decision": {"$ref": "tushare_alpha_feasibility_manifest.v3.json#/$defs/count_by_decision"},
+    "ineligible_no_initial_price_count": {"type": "integer", "minimum": 0},
+    "unexplained_market_data_gap_count": {"type": "integer", "minimum": 0},
+    "collection_plan_sha256": {"oneOf": [{"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"}, {"type": "null"}]},
+    "pit_membership_manifest_sha256": {"oneOf": [{"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"}, {"type": "null"}]},
+    "history_manifest_sha256": {"oneOf": [{"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"}, {"type": "null"}]},
+    "experiment_config_canonical_sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "alpha_feasibility_engine_version": {"const": "alpha-feasibility.v1"},
+    "alpha_feasibility_engine_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+    "reporting_gate_source_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+    "daily_coverage_status": {"enum": ["complete", "blocked", "not_run"]},
+    "adj_factor_coverage_status": {"enum": ["complete", "blocked", "not_run"]},
+    "suspension_coverage_status": {"enum": ["complete", "blocked", "not_run"]},
+    "benchmark_coverage_status": {"enum": ["complete", "blocked", "not_run"]},
+    "development_metrics": {"oneOf": [{"$ref": "#/$defs/scenarios"}, {"type": "null"}]},
+    "validation_metrics": {"oneOf": [{"$ref": "#/$defs/scenarios"}, {"type": "null"}]},
+    "concentration_metrics": {"oneOf": [{"$ref": "technical_alpha_feasibility_report.v3.json#/$defs/concentration"}, {"type": "null"}]},
+    "terminal_status": {"enum": ["ALPHA_FEASIBILITY_GO_CANDIDATE", "ALPHA_FEASIBILITY_NO_GO", "BLOCKED_DATA", "BLOCKED_ADAPTER_PROTOCOL"]},
+    "locked_test_status": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/locked"},
+    "locked_test_consumed": {"const": false},
+    "remaining_blockers": {"type": "array", "items": {"type": "string", "minLength": 1}, "uniqueItems": true},
+    "safety": {"$ref": "#/$defs/safety"},
+    "report_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"}
+  },
+  "allOf": [
+    {
+      "if": {
+        "required": ["terminal_status"],
+        "properties": {
+          "terminal_status": {
+            "enum": ["ALPHA_FEASIBILITY_GO_CANDIDATE", "ALPHA_FEASIBILITY_NO_GO"]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "first_index_weight": {"$ref": "technical_alpha_feasibility_report.v3.json#/$defs/first_index_weight_complete"},
+          "pit_months_observed": {"const": 73},
+          "union_instrument_count": {"type": "integer", "minimum": 1},
+          "valid_candidate_count_by_decision": {"minProperties": 1},
+          "insufficient_history_count_by_decision": {"minProperties": 1},
+          "unexplained_market_data_gap_count": {"const": 0},
+          "collection_plan_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+          "pit_membership_manifest_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+          "history_manifest_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+          "daily_coverage_status": {"const": "complete"},
+          "adj_factor_coverage_status": {"const": "complete"},
+          "suspension_coverage_status": {"const": "complete"},
+          "benchmark_coverage_status": {"const": "complete"},
+          "development_metrics": {"$ref": "#/$defs/scenarios"},
+          "validation_metrics": {"$ref": "#/$defs/scenarios"},
+          "concentration_metrics": {"$ref": "technical_alpha_feasibility_report.v3.json#/$defs/concentration"},
+          "remaining_blockers": {"maxItems": 0}
+        }
+      },
+      "else": {
+        "properties": {
+          "development_metrics": {"type": "null"},
+          "validation_metrics": {"type": "null"},
+          "concentration_metrics": {"type": "null"},
+          "remaining_blockers": {"minItems": 1}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "benchmark": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index_code", "basis"],
+      "properties": {
+        "index_code": {"const": "000906.SH"},
+        "basis": {"const": "unadjusted_price_index"}
+      }
+    },
+    "scenarios": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["base", "stress"],
+      "properties": {
+        "base": {"$ref": "#/$defs/metrics"},
+        "stress": {"$ref": "#/$defs/metrics"}
+      }
+    },
+    "metrics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "net_return", "benchmark_return", "net_active_return", "max_drawdown",
+        "annualized_turnover", "total_cost", "cost_to_gross_profit",
+        "average_gross_exposure", "cash_day_fraction", "exposure_state_distribution",
+        "rebalance_count", "positive_month_rate", "positive_half_year_count",
+        "worst_month", "per_stock_pnl_contribution", "largest_stock_pnl_share",
+        "largest_10_days_pnl_share"
+      ],
+      "properties": {
+        "net_return": {"$ref": "technical_alpha_feasibility_report.v3.json#/$defs/decimal"},
+        "benchmark_return": {"$ref": "technical_alpha_feasibility_report.v3.json#/$defs/decimal"},
+        "net_active_return": {"$ref": "technical_alpha_feasibility_report.v3.json#/$defs/decimal"},
+        "max_drawdown": {"$ref": "technical_alpha_feasibility_report.v3.json#/$defs/nonnegative_decimal"},
+        "annualized_turnover": {"$ref": "technical_alpha_feasibility_report.v3.json#/$defs/nonnegative_decimal"},
+        "total_cost": {"$ref": "technical_alpha_feasibility_report.v3.json#/$defs/nonnegative_decimal"},
+        "cost_to_gross_profit": {
+          "description": "total_cost divided by net_return plus total_cost; null exactly when gross profit is non-positive",
+          "oneOf": [
+            {"$ref": "technical_alpha_feasibility_report.v3.json#/$defs/nonnegative_decimal"},
+            {"type": "null"}
+          ]
+        },
+        "average_gross_exposure": {"$ref": "technical_alpha_feasibility_report.v3.json#/$defs/unit_decimal"},
+        "cash_day_fraction": {"$ref": "technical_alpha_feasibility_report.v3.json#/$defs/unit_decimal"},
+        "exposure_state_distribution": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["RISK_OFF", "DEFENSIVE", "NEUTRAL", "RISK_ON"],
+          "properties": {
+            "RISK_OFF": {"$ref": "technical_alpha_feasibility_report.v3.json#/$defs/unit_decimal"},
+            "DEFENSIVE": {"$ref": "technical_alpha_feasibility_report.v3.json#/$defs/unit_decimal"},
+            "NEUTRAL": {"$ref": "technical_alpha_feasibility_report.v3.json#/$defs/unit_decimal"},
+            "RISK_ON": {"$ref": "technical_alpha_feasibility_report.v3.json#/$defs/unit_decimal"}
+          }
+        },
+        "rebalance_count": {"type": "integer", "minimum": 0},
+        "positive_month_rate": {"$ref": "technical_alpha_feasibility_report.v3.json#/$defs/unit_decimal"},
+        "positive_half_year_count": {"type": "integer", "minimum": 0},
+        "worst_month": {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["month", "net_return", "benchmark_return", "net_active_return"],
+          "properties": {
+            "month": {"type": "string", "pattern": "^[0-9]{4}-[0-9]{2}$"},
+            "net_return": {"$ref": "technical_alpha_feasibility_report.v3.json#/$defs/decimal"},
+            "benchmark_return": {"$ref": "technical_alpha_feasibility_report.v3.json#/$defs/decimal"},
+            "net_active_return": {"$ref": "technical_alpha_feasibility_report.v3.json#/$defs/decimal"}
+          }
+        },
+        "per_stock_pnl_contribution": {
+          "type": "object",
+          "additionalProperties": {"$ref": "technical_alpha_feasibility_report.v3.json#/$defs/decimal"}
+        },
+        "largest_stock_pnl_share": {
+          "oneOf": [
+            {"$ref": "technical_alpha_feasibility_report.v3.json#/$defs/unit_decimal"},
+            {"type": "null"}
+          ]
+        },
+        "largest_10_days_pnl_share": {
+          "oneOf": [
+            {"$ref": "technical_alpha_feasibility_report.v3.json#/$defs/unit_decimal"},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "safety": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "research_status", "execution_realism", "paper_eligibility",
+        "trade_eligibility", "real_money_list_allowed",
+        "automatic_order_submission", "live_supported"
+      ],
+      "properties": {
+        "research_status": {"const": "research_alpha_feasibility_only"},
+        "execution_realism": {"const": "INCOMPLETE"},
+        "paper_eligibility": {"const": false},
+        "trade_eligibility": {"const": false},
+        "real_money_list_allowed": {"const": false},
+        "automatic_order_submission": {"const": false},
+        "live_supported": {"const": false}
+      }
+    }
+  }
+}

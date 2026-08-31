@@ -1,0 +1,37 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tushare_alpha_feasibility_task_import.v1.json",
+  "type": "object",
+  "additionalProperties": false,
+  "required": ["schema_version", "state", "task_id", "endpoint", "plan_sha256", "task", "accepted_bundle_sha256", "request_fingerprint", "source_artifact_sha256_by_name", "raw_transport_sha256", "normalized_content_sha256", "network_request_count", "locked_test_status", "locked_test_consumed", "import_artifact_sha256"],
+  "properties": {
+    "schema_version": {"const": "tushare-alpha-feasibility-task-import.v1"},
+    "state": {"const": "P14D_DIAGNOSTIC_IMPORTED"},
+    "task_id": {"type": "string", "pattern": "^index_weight-[0-9a-f]{64}$"},
+    "endpoint": {"const": "index_weight"},
+    "plan_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+    "task": {"type": "object"},
+    "accepted_bundle_sha256": {"const": "a91f612583d2946ccfcec155d9d4bce1205b8ab997e85f10d3a3a63839871226"},
+    "request_fingerprint": {"const": "4bd39eed560ed8b2492145881be89e6f7482427d5a2516ca0dd2e6dd6ca127c2"},
+    "source_artifact_sha256_by_name": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["request.json", "network_call_started.json", "network_response_scanned.json", "response.raw.json", "value_profile.json", "normalized_pit.json", "offline_replay.json"],
+      "properties": {
+        "request.json": {"const": "67fb43e0741a0a76912038ab130e2ec63797297f7ccf173db16ff33e4a78ff56"},
+        "network_call_started.json": {"const": "728d1153919bb31c1009fce28e141e2185a445afbdafd11f54ab4fb95dd959da"},
+        "network_response_scanned.json": {"const": "4083a2bd5333954e47b1929d606e02d8925b2ebd3ac0c013aedf62843f59ae17"},
+        "response.raw.json": {"const": "fdcaeab52a45766a07380be86c9cc8f848e3d0324f6f0c801237947a6552e6ad"},
+        "value_profile.json": {"const": "3f3ab55ee8261c02213099fc86ece59f24f22297c233de1594ee0e2931442a00"},
+        "normalized_pit.json": {"const": "59b89347748ecdf315d6159c4f5dbe6a31901dd1100e47e507a4ab3859e98243"},
+        "offline_replay.json": {"const": "4ff9e4e976fa136b95229e3b269482b15ac5f96da3982b3e845b46d737c7e76a"}
+      }
+    },
+    "raw_transport_sha256": {"const": "fdcaeab52a45766a07380be86c9cc8f848e3d0324f6f0c801237947a6552e6ad"},
+    "normalized_content_sha256": {"const": "94a7bd91057dc9d84dede6fe6bec7f2c08e0555b9e19d47bc97a3d36eee089f3"},
+    "network_request_count": {"const": 0},
+    "locked_test_status": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/locked"},
+    "locked_test_consumed": {"const": false},
+    "import_artifact_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"}
+  }
+}

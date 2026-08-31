@@ -91,6 +91,16 @@ _PIT_WEIGHT_PATTERN = re.compile(
 _PIT_EVIDENCE_DECIMAL_PATTERN = re.compile(
     r"^(?:0(?:\.[0-9]{1,1000})?|[1-9][0-9]{0,1003}(?:\.[0-9]{1,1000})?)$"
 )
+_P15_PIT_HARD_MIN = Decimal("99.5")
+_P15_PIT_HARD_MAX = Decimal("100.5")
+_P15_PIT_WARNING_MIN = Decimal("99.95")
+_P15_PIT_WARNING_MAX = Decimal("100.05")
+_P15_PIT_POLICY_FIELDS: Mapping[str, str] = {
+    "weight_sum_hard_min": "99.5",
+    "weight_sum_hard_max": "100.5",
+    "weight_sum_warning_min": "99.95",
+    "weight_sum_warning_max": "100.05",
+}
 MINIMUM_VALID_CONTROLLED_SESSIONS = ALPHA_LOOKBACK_SESSIONS + 1
 INELIGIBLE_INSUFFICIENT_HISTORY = "ineligible_insufficient_history"
 INELIGIBLE_NO_INITIAL_PRICE = "ineligible_no_initial_price"
@@ -133,6 +143,41 @@ def _exact_decimal_sum(values: Sequence[Decimal]) -> Decimal:
     with localcontext() as context:
         context.prec = max(28, aligned_digits + carry_digits)
         return sum(numbers, ZERO)
+
+
+def _verify_p15_snapshot_policy(
+    value: Mapping[str, Any],
+    *,
+    total_weight: Decimal,
+    component_count: Any,
+    actual_zero_weight_count: int | None = None,
+) -> None:
+    """Verify the fixed P1.5 hard/warning policy without scale inference."""
+
+    declared_zero_count = value.get("zero_weight_count")
+    expected_warnings = (
+        []
+        if _P15_PIT_WARNING_MIN <= total_weight <= _P15_PIT_WARNING_MAX
+        else ["weight_sum_outside_warning_range"]
+    )
+    if (
+        component_count != 800
+        or value.get("weight_tolerance") != "0.5"
+        or value.get("component_count_adjustment_evidence") is not None
+        or any(
+            value.get(field) != expected
+            for field, expected in _P15_PIT_POLICY_FIELDS.items()
+        )
+        or type(declared_zero_count) is not int
+        or not 0 <= declared_zero_count <= 800
+        or (
+            actual_zero_weight_count is not None
+            and declared_zero_count != actual_zero_weight_count
+        )
+        or value.get("warnings") != expected_warnings
+        or not _P15_PIT_HARD_MIN <= total_weight <= _P15_PIT_HARD_MAX
+    ):
+        raise AlphaFeasibilityDataError("P1.5 PIT snapshot policy mismatch")
 
 
 def _jsonable(value: Any) -> Any:
@@ -381,10 +426,25 @@ def _verify_pit_admission(
     _unsigned_self_hash(report, field="report_sha256", label="PIT coverage report")
     _unsigned_self_hash(manifest, field="manifest_sha256", label="PIT manifest")
 
+    schema_pair = (
+        report.get("schema_version"),
+        manifest.get("schema_version"),
+    )
+    if schema_pair == (
+        "pit-membership-coverage-report.v2",
+        "pit-membership-manifest.v2",
+    ):
+        p15 = False
+    elif schema_pair == (
+        "pit-membership-coverage-report.v3",
+        "pit-membership-manifest.v3",
+    ):
+        p15 = True
+    else:
+        raise AlphaFeasibilityDataError("PIT admission status is not complete")
+
     fixed = (
-        report.get("schema_version") == "pit-membership-coverage-report.v2"
-        and manifest.get("schema_version") == "pit-membership-manifest.v2"
-        and report.get("experiment_id") == EXPERIMENT_ID
+        report.get("experiment_id") == EXPERIMENT_ID
         and manifest.get("experiment_id") == EXPERIMENT_ID
         and report.get("index_code") == "000906.SH"
         and manifest.get("index_code") == "000906.SH"
@@ -467,6 +527,23 @@ def _verify_pit_admission(
             issues = coverage_snapshot.get("issues")
             if type(valid) is not bool or not isinstance(issues, list):
                 raise AlphaFeasibilityDataError("PIT coverage snapshot status is invalid")
+            if p15:
+                declared_sum_text = coverage_snapshot.get("weight_sum")
+                if (
+                    type(declared_sum_text) is not str
+                    or len(declared_sum_text) > 2004
+                    or _PIT_EVIDENCE_DECIMAL_PATTERN.fullmatch(declared_sum_text) is None
+                    or valid is not True
+                    or issues != []
+                ):
+                    raise AlphaFeasibilityDataError(
+                        "P1.5 PIT coverage snapshot is not fully admitted"
+                    )
+                _verify_p15_snapshot_policy(
+                    coverage_snapshot,
+                    total_weight=_decimal(declared_sum_text, "PIT weight sum"),
+                    component_count=coverage_snapshot.get("component_count"),
+                )
             if valid:
                 if issues != []:
                     raise AlphaFeasibilityDataError(
@@ -565,23 +642,33 @@ def _verify_pit_admission(
             raise AlphaFeasibilityDataError("PIT manifest weight check failed")
         tolerance = _decimal(tolerance_text, "PIT weight tolerance")
         declared_sum = _decimal(declared_sum_text, "PIT weight sum")
-        expected_tolerance = (
-            ZERO
-            if coarsest_nonzero_places is None
-            else Decimal("0.5") * (Decimal(10) ** (-coarsest_nonzero_places))
-        )
-        weight_sum_difference = abs(
-            _exact_decimal_sum((total_weight, Decimal("-100")))
-        )
-        if (
-            tolerance < ZERO
-            or tolerance != expected_tolerance
-            or declared_sum != total_weight
-            or weight_sum_difference > tolerance
-        ):
-            raise AlphaFeasibilityDataError("PIT manifest weight check failed")
+        if p15:
+            _verify_p15_snapshot_policy(
+                snapshot,
+                total_weight=total_weight,
+                component_count=len(identifiers),
+                actual_zero_weight_count=sum(weight == ZERO for weight in weights),
+            )
+            if tolerance != Decimal("0.5") or declared_sum != total_weight:
+                raise AlphaFeasibilityDataError("PIT manifest weight check failed")
+        else:
+            expected_tolerance = (
+                ZERO
+                if coarsest_nonzero_places is None
+                else Decimal("0.5") * (Decimal(10) ** (-coarsest_nonzero_places))
+            )
+            weight_sum_difference = abs(
+                _exact_decimal_sum((total_weight, Decimal("-100")))
+            )
+            if (
+                tolerance < ZERO
+                or tolerance != expected_tolerance
+                or declared_sum != total_weight
+                or weight_sum_difference > tolerance
+            ):
+                raise AlphaFeasibilityDataError("PIT manifest weight check failed")
         adjustment_reason = snapshot.get("component_count_adjustment_evidence")
-        if len(identifiers) != 800 and (
+        if not p15 and len(identifiers) != 800 and (
             type(adjustment_reason) is not str or not adjustment_reason.strip()
         ):
             raise AlphaFeasibilityDataError(
@@ -606,6 +693,18 @@ def _verify_pit_admission(
             or selected_check.get("weight_sum") != snapshot.get("weight_sum")
             or selected_check.get("weight_tolerance") != snapshot.get("weight_tolerance")
             or selected_check.get("component_count_adjustment_evidence") != adjustment_reason
+            or p15
+            and any(
+                selected_check.get(field) != snapshot.get(field)
+                for field in (
+                    "zero_weight_count",
+                    "weight_sum_hard_min",
+                    "weight_sum_hard_max",
+                    "weight_sum_warning_min",
+                    "weight_sum_warning_max",
+                    "warnings",
+                )
+            )
         ):
             raise AlphaFeasibilityDataError("PIT coverage and manifest snapshot differ")
         observed_union.update(identifiers)
@@ -623,6 +722,29 @@ def _verify_pit_admission(
         or manifest.get("union_instrument_count") != len(expected_union)
     ):
         raise AlphaFeasibilityDataError("PIT manifest union does not reconcile")
+    if p15:
+        snapshot_dates = [str(snapshot["snapshot_date"]) for snapshot in snapshots]
+        zero_weight_counts = {
+            str(snapshot["snapshot_date"]): snapshot["zero_weight_count"]
+            for snapshot in snapshots
+        }
+        weight_sums = {
+            str(snapshot["snapshot_date"]): snapshot["weight_sum"]
+            for snapshot in snapshots
+        }
+        p15_summary = {
+            "pit_snapshot_count": len(snapshots),
+            "snapshot_dates": snapshot_dates,
+            "missing_months": [],
+            "duplicate_member_count": 0,
+            "zero_weight_count_by_snapshot": zero_weight_counts,
+            "weight_sum_by_snapshot": weight_sums,
+        }
+        if any(
+            report.get(field) != expected or manifest.get(field) != expected
+            for field, expected in p15_summary.items()
+        ):
+            raise AlphaFeasibilityDataError("P1.5 PIT summary does not reconcile")
 
 
 @dataclass(frozen=True, slots=True)
@@ -761,8 +883,28 @@ class AlphaFeasibilityMetrics:
     largest_stock_pnl_share: Decimal | None
     largest_10_days_pnl_share: Decimal | None
 
+    @property
+    def cost_to_gross_profit(self) -> Decimal | None:
+        """Return proportional costs divided by pre-cost cumulative PnL.
+
+        The normalized-NAV accounting is additive: ``net_return`` already
+        includes every rebalance cost, so pre-cost cumulative PnL is exactly
+        ``net_return + total_cost``.  A zero or negative denominator is not an
+        economically meaningful cost/profit ratio and is represented as
+        ``None`` rather than zero, infinity, or a signed value.
+        """
+
+        gross_profit = self.net_return + self.total_cost
+        if gross_profit <= ZERO:
+            return None
+        with localcontext() as context:
+            context.prec = 50
+            return self.total_cost / gross_profit
+
     def to_dict(self) -> dict[str, Any]:
         payload = _jsonable(self)
+        payload["rebalance_count"] = payload.pop("trade_or_rebalance_count")
+        payload["cost_to_gross_profit"] = _jsonable(self.cost_to_gross_profit)
         worst = dict(payload["worst_month"])
         worst["month"] = worst.pop("period")
         payload["worst_month"] = worst
@@ -791,7 +933,9 @@ class AlphaFeasibilityScenarioResult:
     locked_test_consumed: bool = LOCKED_TEST_CONSUMED
 
     def to_dict(self) -> dict[str, Any]:
-        return _jsonable(self)
+        payload = _jsonable(self)
+        payload["metrics"] = self.metrics.to_dict()
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -805,7 +949,10 @@ class AlphaFeasibilityComparison:
     locked_test_consumed: bool = LOCKED_TEST_CONSUMED
 
     def to_dict(self) -> dict[str, Any]:
-        return _jsonable(self)
+        payload = _jsonable(self)
+        payload["base"] = self.base.to_dict()
+        payload["stress"] = self.stress.to_dict()
+        return payload
 
 
 @dataclass(frozen=True, slots=True)
@@ -818,7 +965,10 @@ class AlphaFeasibilityStudy:
     locked_test_consumed: bool = LOCKED_TEST_CONSUMED
 
     def to_dict(self) -> dict[str, Any]:
-        return _jsonable(self)
+        payload = _jsonable(self)
+        payload["development"] = self.development.to_dict()
+        payload["validation"] = self.validation.to_dict()
+        return payload
 
 
 @dataclass(frozen=True, slots=True)

@@ -121,7 +121,8 @@ def _metrics(
         "net_active_return": active,
         "max_drawdown": drawdown,
         "annualized_turnover": 1.2,
-        "total_cost": 0.006,
+        "total_cost": 0.02,
+        "cost_to_gross_profit": 0.2,
         "average_gross_exposure": 0.60,
         "cash_day_fraction": 0.25,
         "exposure_state_distribution": {
@@ -130,7 +131,7 @@ def _metrics(
             "NEUTRAL": 0.30,
             "RISK_ON": 0.40,
         },
-        "trade_or_rebalance_count": 24,
+        "rebalance_count": 24,
         "positive_month_rate": 0.58,
         "positive_half_year_count": 2,
         "worst_month": {
@@ -183,6 +184,9 @@ class AlphaFeasibilityReportingTests(unittest.TestCase):
     @classmethod
     def setUpClass(cls) -> None:
         cls.experiment = reporting.load_and_validate_experiment_config()
+        cls.p15_experiment = reporting.load_and_validate_experiment_config(
+            reporting.P15_CONFIG_PATH
+        )
 
     def _completed(
         self,
@@ -229,7 +233,91 @@ class AlphaFeasibilityReportingTests(unittest.TestCase):
         self.assertEqual(self.experiment["costs"], reporting.COSTS)
         self.assertEqual(self.experiment["gate"], reporting.GATE)
         self.assertEqual(self.experiment["locked_test_status"], reporting.LOCKED_TEST_STATUS)
-        self.assertEqual(self.experiment["safety"], reporting.SAFETY)
+        self.assertEqual(self.experiment["safety"], reporting.EXPERIMENT_SAFETY)
+
+    def test_p15_v3_config_is_exact_and_builds_a_v4_report(self) -> None:
+        self.assertEqual(
+            self.p15_experiment["schema_version"],
+            "technical-alpha-feasibility-experiment.v3",
+        )
+        self.assertEqual(self.p15_experiment["source"], reporting.SOURCE_V3)
+        self.assertEqual(self.p15_experiment["index"], reporting.INDEX_V3)
+        self.assertEqual(self.p15_experiment["safety"], reporting.SAFETY)
+        self.assertNotIn("real_money_list_allowed", self.experiment["safety"])
+        self.assertIs(
+            self.p15_experiment["safety"]["real_money_list_allowed"], False
+        )
+        report = reporting.build_completed_alpha_feasibility_report(
+            commit_sha=COMMIT_SHA,
+            data_summary=_complete_data(),
+            development_metrics=_development(),
+            validation_metrics=_validation(),
+            experiment=self.p15_experiment,
+            generated_at=GENERATED_AT,
+        )
+        self.assertEqual(
+            report["schema_version"], "technical-alpha-feasibility-report.v4"
+        )
+        self.assertEqual(
+            report["experiment_config_canonical_sha256"],
+            reporting.EXPECTED_P15_EXPERIMENT_CANONICAL_SHA256,
+        )
+        self.assertEqual(
+            report["benchmark"],
+            {"index_code": "000906.SH", "basis": "unadjusted_price_index"},
+        )
+        self.assertIs(report["safety"]["real_money_list_allowed"], False)
+        reporting.verify_alpha_feasibility_report(
+            report,
+            experiment=self.p15_experiment,
+        )
+
+    def test_p15_v3_source_and_index_extensions_are_exact(self) -> None:
+        mutations = (
+            ("source_retry_drift", "source", "maximum_attempts_per_fingerprint", 4),
+            (
+                "source_recovery_drift",
+                "source",
+                "interrupted_fingerprint_recovery",
+                "retry_started_request",
+            ),
+            ("index_hard_bound_drift", "index", "weight_sum_hard_min", "99.4"),
+            (
+                "index_warning_bound_drift",
+                "index",
+                "weight_sum_warning_max",
+                "100.06",
+            ),
+        )
+        for name, section, field, replacement in mutations:
+            with self.subTest(name=name):
+                drifted = copy.deepcopy(self.p15_experiment)
+                drifted[section][field] = replacement
+                with self.assertRaisesRegex(
+                    reporting.AlphaFeasibilityReportingError,
+                    rf"(?:{section} drift|schema violation)",
+                ):
+                    reporting.validate_experiment_config(drifted)
+
+    def test_experiment_safety_contract_is_version_specific(self) -> None:
+        v2_with_v3_field = copy.deepcopy(self.experiment)
+        v2_with_v3_field["safety"]["real_money_list_allowed"] = False
+        v3_without_field = copy.deepcopy(self.p15_experiment)
+        v3_without_field["safety"].pop("real_money_list_allowed")
+        v3_enabled = copy.deepcopy(self.p15_experiment)
+        v3_enabled["safety"]["real_money_list_allowed"] = True
+
+        for name, candidate in (
+            ("v2_rewritten", v2_with_v3_field),
+            ("v3_missing", v3_without_field),
+            ("v3_enabled", v3_enabled),
+        ):
+            with self.subTest(name=name):
+                with self.assertRaisesRegex(
+                    reporting.AlphaFeasibilityReportingError,
+                    r"(?:schema violation|safety drift|canonical content drift)",
+                ):
+                    reporting.validate_experiment_config(candidate)
 
     def test_blocked_report_has_no_metrics_and_fixed_safety(self) -> None:
         report = reporting.build_blocked_alpha_feasibility_report(
@@ -245,6 +333,8 @@ class AlphaFeasibilityReportingTests(unittest.TestCase):
         self.assertEqual(report["locked_test_status"], reporting.LOCKED_TEST_STATUS)
         self.assertIs(report["locked_test_consumed"], False)
         self.assertEqual(report["safety"], reporting.SAFETY)
+        self.assertIs(report["safety"]["real_money_list_allowed"], False)
+        self.assertEqual(report["benchmark"], reporting.BENCHMARK)
         self.assertEqual(
             report["stock_basic_status"],
             "DEFERRED_NOT_REQUIRED_FOR_ALPHA_FEASIBILITY",
@@ -337,9 +427,9 @@ class AlphaFeasibilityReportingTests(unittest.TestCase):
                 generated_at=GENERATED_AT,
             )
 
-    def test_complete_report_go_candidate_and_all_sixteen_metrics(self) -> None:
+    def test_complete_report_go_candidate_and_complete_metric_contract(self) -> None:
         report = self._completed()
-        self.assertEqual(report["schema_version"], "technical-alpha-feasibility-report.v3")
+        self.assertEqual(report["schema_version"], "technical-alpha-feasibility-report.v4")
         self.assertEqual(report["terminal_status"], "ALPHA_FEASIBILITY_GO_CANDIDATE")
         self.assertEqual(
             report["valid_candidate_count_by_decision"], {"2023-01-03": 1199}
@@ -355,9 +445,89 @@ class AlphaFeasibilityReportingTests(unittest.TestCase):
             self.assertEqual(set(report[split]), {"base", "stress"})
             for scenario in ("base", "stress"):
                 self.assertEqual(set(report[split][scenario]), set(reporting.METRIC_FIELDS))
+                self.assertEqual(report[split][scenario]["rebalance_count"], 24)
+                self.assertEqual(
+                    report[split][scenario]["cost_to_gross_profit"], "0.2"
+                )
+                self.assertNotIn(
+                    "trade_or_rebalance_count", report[split][scenario]
+                )
         self.assertIs(report["safety"]["trade_eligibility"], False)
+        self.assertIs(report["safety"]["real_money_list_allowed"], False)
         self.assertEqual(report["safety"]["execution_realism"], "INCOMPLETE")
+        self.assertEqual(
+            report["benchmark"],
+            {"index_code": "000906.SH", "basis": "unadjusted_price_index"},
+        )
         reporting.verify_alpha_feasibility_report(report, experiment=self.experiment)
+
+    def test_report_v4_schema_terminal_branches_are_fail_closed(self) -> None:
+        completed = self._completed()
+        completed_mutations = (
+            ("development_metrics", None),
+            ("validation_metrics", None),
+            ("concentration_metrics", None),
+            ("pit_months_observed", 72),
+            ("union_instrument_count", 0),
+            ("collection_plan_sha256", None),
+            ("pit_membership_manifest_sha256", None),
+            ("history_manifest_sha256", None),
+            ("daily_coverage_status", "blocked"),
+            ("adj_factor_coverage_status", "blocked"),
+            ("suspension_coverage_status", "blocked"),
+            ("benchmark_coverage_status", "blocked"),
+            ("remaining_blockers", ["unexpected_completed_blocker"]),
+            (
+                "benchmark",
+                {"index_code": "000906.SH", "basis": "total_return_index"},
+            ),
+            (
+                "safety",
+                {**completed["safety"], "real_money_list_allowed": True},
+            ),
+            (
+                "locked_test_status",
+                {"access": "ACCESSED", "download": "NOT_DOWNLOADED", "run": "NOT_RUN"},
+            ),
+            ("locked_test_consumed", True),
+        )
+        for field, replacement in completed_mutations:
+            with self.subTest(branch="completed", field=field):
+                forged = copy.deepcopy(completed)
+                forged[field] = replacement
+                _resign(forged)
+                with self.assertRaisesRegex(
+                    reporting.AlphaFeasibilityReportingError,
+                    "report schema violation",
+                ):
+                    reporting.verify_alpha_feasibility_report(
+                        forged, experiment=self.experiment
+                    )
+
+        blocked = reporting.build_blocked_alpha_feasibility_report(
+            commit_sha=COMMIT_SHA,
+            data_summary=_blocked_data(),
+            experiment=self.experiment,
+            generated_at=GENERATED_AT,
+        )
+        blocked_mutations = (
+            ("development_metrics", completed["development_metrics"]),
+            ("validation_metrics", completed["validation_metrics"]),
+            ("concentration_metrics", completed["concentration_metrics"]),
+            ("remaining_blockers", []),
+        )
+        for field, replacement in blocked_mutations:
+            with self.subTest(branch="blocked", field=field):
+                forged = copy.deepcopy(blocked)
+                forged[field] = replacement
+                _resign(forged)
+                with self.assertRaisesRegex(
+                    reporting.AlphaFeasibilityReportingError,
+                    "report schema violation",
+                ):
+                    reporting.verify_alpha_feasibility_report(
+                        forged, experiment=self.experiment
+                    )
 
     def test_completed_report_accepts_extra_or_reordered_provider_fields(self) -> None:
         cases = (
@@ -575,15 +745,47 @@ class AlphaFeasibilityReportingTests(unittest.TestCase):
         )
 
     def test_missing_or_extra_metric_is_rejected(self) -> None:
-        for mutation in ("missing", "extra"):
+        for mutation in ("missing", "extra", "legacy_rebalance_name"):
             with self.subTest(mutation=mutation):
                 validation = _validation()
                 if mutation == "missing":
                     validation["base"].pop("annualized_turnover")
+                elif mutation == "legacy_rebalance_name":
+                    validation["base"]["trade_or_rebalance_count"] = (
+                        validation["base"].pop("rebalance_count")
+                    )
                 else:
                     validation["base"]["parameter_search_result"] = 1
                 with self.assertRaisesRegex(reporting.AlphaFeasibilityReportingError, "metrics mismatch"):
                     self._completed(validation=validation)
+
+    def test_cost_to_gross_profit_is_derived_and_nonpositive_is_null(self) -> None:
+        validation = _validation()
+        validation["base"].update(
+            net_return=-0.02,
+            total_cost=0.02,
+            cost_to_gross_profit=None,
+        )
+        report = self._completed(validation=validation)
+        self.assertIsNone(
+            report["validation_metrics"]["base"]["cost_to_gross_profit"]
+        )
+
+        for name, net_return, total_cost, supplied in (
+            ("positive_denominator_missing", 0.08, 0.02, None),
+            ("positive_denominator_mismatch", 0.08, 0.02, 0.21),
+            ("zero_denominator_numeric", -0.02, 0.02, 0),
+            ("negative_denominator_numeric", -0.03, 0.02, 0),
+        ):
+            with self.subTest(name=name):
+                invalid = _validation()
+                invalid["base"].update(
+                    net_return=net_return,
+                    total_cost=total_cost,
+                    cost_to_gross_profit=supplied,
+                )
+                with self.assertRaises(reporting.AlphaFeasibilityReportingError):
+                    self._completed(validation=invalid)
 
     def test_completed_report_rejects_incomplete_data(self) -> None:
         data = _complete_data()
@@ -633,7 +835,7 @@ class AlphaFeasibilityReportingTests(unittest.TestCase):
                 with self.assertRaises(reporting.AlphaFeasibilityReportingError):
                     build(data)
 
-    def test_v3_fixed_fields_and_decision_maps_have_strict_contracts(self) -> None:
+    def test_v4_fixed_fields_and_decision_maps_have_strict_contracts(self) -> None:
         def build(data: dict[str, object]) -> None:
             reporting.build_completed_alpha_feasibility_report(
                 commit_sha=COMMIT_SHA,
@@ -849,7 +1051,10 @@ class AlphaFeasibilityReportingTests(unittest.TestCase):
         with tempfile.TemporaryDirectory() as temp_dir:
             path = Path(temp_dir) / "drifted.json"
             path.write_text(json.dumps(drifted), encoding="utf-8")
-            with self.assertRaisesRegex(reporting.AlphaFeasibilityReportingError, "canonical content drift"):
+            with self.assertRaisesRegex(
+                reporting.AlphaFeasibilityReportingError,
+                r"(?:index drift|canonical content drift)",
+            ):
                 reporting.load_and_validate_experiment_config(path)
 
         with mock.patch.object(reporting, "_file_sha256", return_value="0" * 64):

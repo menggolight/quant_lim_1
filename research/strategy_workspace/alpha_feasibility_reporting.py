@@ -14,7 +14,7 @@ import os
 import re
 from collections.abc import Mapping, Sequence
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from hashlib import sha256
 from pathlib import Path
 from typing import Any
@@ -27,18 +27,24 @@ REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
 DEFAULT_CONFIG_PATH = (
     REPOSITORY_ROOT / "configs" / "a_share_technical_alpha_feasibility.v2.json"
 )
+P15_CONFIG_PATH = (
+    REPOSITORY_ROOT / "configs" / "a_share_technical_alpha_feasibility.p1_5.json"
+)
 EXPERIMENT_SCHEMA_PATH = (
     REPOSITORY_ROOT / "schemas" / "technical_alpha_feasibility_experiment.v2.json"
 )
+P15_EXPERIMENT_SCHEMA_PATH = (
+    REPOSITORY_ROOT / "schemas" / "technical_alpha_feasibility_experiment.v3.json"
+)
 REPORT_SCHEMA_PATH = (
-    REPOSITORY_ROOT / "schemas" / "technical_alpha_feasibility_report.v3.json"
+    REPOSITORY_ROOT / "schemas" / "technical_alpha_feasibility_report.v4.json"
 )
 ALPHA_FEASIBILITY_ENGINE_PATH = (
     REPOSITORY_ROOT / "research" / "strategy_workspace" / "alpha_feasibility.py"
 )
 
 REPORT_FILENAME = "alpha_feasibility_report.json"
-REPORT_SCHEMA_VERSION = "technical-alpha-feasibility-report.v3"
+REPORT_SCHEMA_VERSION = "technical-alpha-feasibility-report.v4"
 EXPERIMENT_ID = "a-share-technical-alpha-feasibility-tushare-p1-v1"
 COVERAGE_START = "2017-07-01"
 COVERAGE_END = "2023-12-31"
@@ -94,13 +100,21 @@ LOCKED_TEST_STATUS = {
     "run": "NOT_RUN",
 }
 LOCKED_TEST_CONSUMED = False
-SAFETY = {
+EXPERIMENT_SAFETY = {
     "research_status": "research_alpha_feasibility_only",
     "execution_realism": "INCOMPLETE",
     "paper_eligibility": False,
     "trade_eligibility": False,
     "automatic_order_submission": False,
     "live_supported": False,
+}
+SAFETY = {
+    **EXPERIMENT_SAFETY,
+    "real_money_list_allowed": False,
+}
+BENCHMARK = {
+    "index_code": "000906.SH",
+    "basis": "unadjusted_price_index",
 }
 
 FROZEN_IMPLEMENTATION = {
@@ -172,12 +186,96 @@ GATE = {
     "validation_driven_retraining_forbidden": True,
 }
 
+SOURCE_V2 = {
+    "provider": "tushare_standard_non_vip",
+    "transport_target": "https://api.tushare.pro",
+    "token_environment_variable": "TUSHARE_TOKEN",
+    "allowed_endpoints": list(ALLOWED_ENDPOINTS),
+    "forbidden_endpoint_suffix": "_vip",
+    "redirects_allowed": False,
+    "automatic_retries": 0,
+    "request_timeout_seconds": 30,
+    "maximum_response_bytes": 2097152,
+    "minimum_request_interval_seconds": "0.13",
+    "token_persistence_forbidden": True,
+    "field_level_fallback_forbidden": True,
+    "baostock_field_level_fallback_forbidden": True,
+}
+P15_ACCEPTED_P14D_BUNDLE = {
+    "bundle_sha256": "a91f612583d2946ccfcec155d9d4bce1205b8ab997e85f10d3a3a63839871226",
+    "request_fingerprint": "4bd39eed560ed8b2492145881be89e6f7482427d5a2516ca0dd2e6dd6ca127c2",
+    "raw_transport_sha256": "fdcaeab52a45766a07380be86c9cc8f848e3d0324f6f0c801237947a6552e6ad",
+    "normalized_content_sha256": "94a7bd91057dc9d84dede6fe6bec7f2c08e0555b9e19d47bc97a3d36eee089f3",
+    "source_artifact_sha256_by_name": {
+        "request.json": "67fb43e0741a0a76912038ab130e2ec63797297f7ccf173db16ff33e4a78ff56",
+        "network_call_started.json": "728d1153919bb31c1009fce28e141e2185a445afbdafd11f54ab4fb95dd959da",
+        "network_response_scanned.json": "4083a2bd5333954e47b1929d606e02d8925b2ebd3ac0c013aedf62843f59ae17",
+        "response.raw.json": "fdcaeab52a45766a07380be86c9cc8f848e3d0324f6f0c801237947a6552e6ad",
+        "value_profile.json": "3f3ab55ee8261c02213099fc86ece59f24f22297c233de1594ee0e2931442a00",
+        "normalized_pit.json": "59b89347748ecdf315d6159c4f5dbe6a31901dd1100e47e507a4ab3859e98243",
+        "offline_replay.json": "4ff9e4e976fa136b95229e3b269482b15ac5f96da3982b3e845b46d737c7e76a",
+    },
+}
+SOURCE_V3 = {
+    **SOURCE_V2,
+    "interrupted_fingerprint_recovery": "create_only_attempt_journal",
+    "terminal_quarantine_retry_forbidden": True,
+    "complete_raw_transport_persistence": True,
+    "maximum_attempts_per_fingerprint": 3,
+    "request_count_semantics": "conservative_durable_pre_transport_attempt_claim",
+    "accepted_p14d_bundle": P15_ACCEPTED_P14D_BUNDLE,
+}
+INDEX_V2 = {
+    "index_code": "000906.SH",
+    "pit_first_month": "2017-12",
+    "pit_last_month": "2023-12",
+    "one_request_per_calendar_month": True,
+    "snapshot_selection": "latest_valid_snapshot_on_or_before_decision_date",
+    "expected_component_count": 800,
+    "non_800_policy": "block_unless_controlled_index_company_adjustment_evidence",
+    "weight_minimum": "0",
+    "minimum_weight_decimal_places": 0,
+    "weight_sum_target": "100",
+    "weight_sum_tolerance": "half_unit_in_coarsest_nonzero_reported_decimal_place",
+    "future_snapshot_backfill_forbidden": True,
+}
+INDEX_V3 = {
+    key: value for key, value in INDEX_V2.items() if key != "weight_sum_tolerance"
+}
+INDEX_V3.update(
+    {
+        "weight_sum_hard_min": "99.5",
+        "weight_sum_hard_max": "100.5",
+        "weight_sum_warning_min": "99.95",
+        "weight_sum_warning_max": "100.05",
+    }
+)
+
 # This is the canonical-JSON hash of the complete checked-in V2 experiment.
 # It makes otherwise loose object sections in the JSON Schema fail closed too,
 # while remaining insensitive to whitespace and object key ordering.
 EXPECTED_EXPERIMENT_CANONICAL_SHA256 = (
     "358e2848d35084c4ec7dbf53abe0086e103992fe9b43c5e9f0464cf1e79f48de"
 )
+EXPECTED_P15_EXPERIMENT_CANONICAL_SHA256 = (
+    "3cbc15a05db92b15ff0e35827d854a656c27011212ed9009766bb4ac80ad38fc"
+)
+EXPERIMENT_VERSIONS = {
+    "technical-alpha-feasibility-experiment.v2": {
+        "schema_path": EXPERIMENT_SCHEMA_PATH,
+        "source": SOURCE_V2,
+        "index": INDEX_V2,
+        "safety": EXPERIMENT_SAFETY,
+        "canonical_sha256": EXPECTED_EXPERIMENT_CANONICAL_SHA256,
+    },
+    "technical-alpha-feasibility-experiment.v3": {
+        "schema_path": P15_EXPERIMENT_SCHEMA_PATH,
+        "source": SOURCE_V3,
+        "index": INDEX_V3,
+        "safety": SAFETY,
+        "canonical_sha256": EXPECTED_P15_EXPERIMENT_CANONICAL_SHA256,
+    },
+}
 
 METRIC_FIELDS = (
     "net_return",
@@ -186,10 +284,11 @@ METRIC_FIELDS = (
     "max_drawdown",
     "annualized_turnover",
     "total_cost",
+    "cost_to_gross_profit",
     "average_gross_exposure",
     "cash_day_fraction",
     "exposure_state_distribution",
-    "trade_or_rebalance_count",
+    "rebalance_count",
     "positive_month_rate",
     "positive_half_year_count",
     "worst_month",
@@ -289,19 +388,29 @@ def _require_exact_typed(
 
 
 def validate_experiment_config(experiment: Mapping[str, Any]) -> dict[str, Any]:
-    """Validate the whole V2 config and the bytes of all frozen files."""
+    """Validate a frozen V2 or P1.5 V3 config and all bound source bytes."""
 
     if not isinstance(experiment, Mapping):
         raise AlphaFeasibilityReportingError("experiment config must be a mapping")
     candidate = dict(experiment)
+    schema_version = candidate.get("schema_version")
+    version_contract = (
+        EXPERIMENT_VERSIONS.get(schema_version)
+        if type(schema_version) is str
+        else None
+    )
+    if version_contract is None:
+        raise AlphaFeasibilityReportingError(
+            "experiment config schema_version is unsupported"
+        )
     try:
-        validate_json_schema(candidate, EXPERIMENT_SCHEMA_PATH)
+        validate_json_schema(candidate, version_contract["schema_path"])
     except SchemaValidationError as exc:
         raise AlphaFeasibilityReportingError(
             f"experiment config schema violation: {exc}"
         ) from exc
 
-    _require_exact(candidate, "schema_version", "technical-alpha-feasibility-experiment.v2")
+    _require_exact(candidate, "schema_version", schema_version)
     _require_exact(candidate, "experiment_id", EXPERIMENT_ID)
     _require_exact(candidate, "strategy_id", "a-share-technical-momentum-adaptive-v1")
     _require_exact(candidate, "research_status", "research_alpha_feasibility_only")
@@ -331,15 +440,17 @@ def validate_experiment_config(experiment: Mapping[str, Any]) -> dict[str, Any]:
     _require_exact(candidate, "gate", GATE)
     _require_exact(candidate, "locked_test_status", LOCKED_TEST_STATUS)
     _require_exact(candidate, "locked_test_consumed", LOCKED_TEST_CONSUMED)
-    _require_exact(candidate, "safety", SAFETY)
+    _require_exact(candidate, "safety", version_contract["safety"])
 
+    _require_exact(candidate, "source", version_contract["source"])
+    _require_exact(candidate, "index", version_contract["index"])
     source = candidate.get("source")
     requests = candidate.get("requests")
     if not isinstance(source, Mapping) or tuple(source.get("allowed_endpoints", ())) != ALLOWED_ENDPOINTS:
         raise AlphaFeasibilityReportingError("experiment config allowed endpoints drift")
     if not isinstance(requests, Mapping) or set(requests) != set(ALLOWED_ENDPOINTS):
         raise AlphaFeasibilityReportingError("experiment config request endpoints drift")
-    if canonical_sha256(candidate) != EXPECTED_EXPERIMENT_CANONICAL_SHA256:
+    if canonical_sha256(candidate) != version_contract["canonical_sha256"]:
         raise AlphaFeasibilityReportingError("experiment config canonical content drift")
 
     for prefix in ("alpha_policy", "alpha_source", "ranker_source", "exposure_source"):
@@ -413,13 +524,18 @@ def _sha256_or_none(value: Any, field: str, *, allow_none: bool) -> str | None:
     return value
 
 
-def _runtime_provenance() -> dict[str, str]:
+def _runtime_provenance(experiment: Mapping[str, Any]) -> dict[str, str]:
     from research.strategy_workspace import alpha_feasibility as engine
 
     if engine.ENGINE_VERSION != "alpha-feasibility.v1":
         raise AlphaFeasibilityReportingError("alpha feasibility engine version drift")
+    version_contract = EXPERIMENT_VERSIONS.get(experiment.get("schema_version"))
+    if version_contract is None:
+        raise AlphaFeasibilityReportingError(
+            "experiment config schema_version is unsupported"
+        )
     return {
-        "experiment_config_canonical_sha256": EXPECTED_EXPERIMENT_CANONICAL_SHA256,
+        "experiment_config_canonical_sha256": version_contract["canonical_sha256"],
         "alpha_feasibility_engine_version": engine.ENGINE_VERSION,
         "alpha_feasibility_engine_sha256": _file_sha256(
             ALPHA_FEASIBILITY_ENGINE_PATH
@@ -476,6 +592,40 @@ def _bounded_number(
             f"{field} must be >= {minimum}{suffix}"
         )
     return _canonical_decimal(numeric)
+
+
+def _normalize_cost_to_gross_profit(
+    value: Any,
+    *,
+    net_return: Decimal,
+    total_cost: Decimal,
+    field: str,
+) -> str | None:
+    """Validate the derived cost/pre-cost-profit ratio without floats.
+
+    Pre-cost cumulative PnL is ``net_return + total_cost`` under the engine's
+    additive normalized-NAV accounting.  When that denominator is zero or
+    negative, the ratio is economically undefined and must be JSON ``null``.
+    """
+
+    gross_profit = net_return + total_cost
+    if gross_profit <= Decimal("0"):
+        if value is not None:
+            raise AlphaFeasibilityReportingError(
+                f"{field} must be null when gross profit is non-positive"
+            )
+        return None
+    if value is None:
+        raise AlphaFeasibilityReportingError(
+            f"{field} is required when gross profit is positive"
+        )
+    normalized = _bounded_number(value, field, Decimal("0"))
+    with localcontext() as context:
+        context.prec = 50
+        expected = total_cost / gross_profit
+    if Decimal(normalized) != expected:
+        raise AlphaFeasibilityReportingError(f"{field} derived value mismatch")
+    return normalized
 
 
 def _nonnegative_integer(value: Any, field: str) -> int:
@@ -819,7 +969,10 @@ def _normalize_data_summary(
         raise AlphaFeasibilityReportingError("data summary locked_test_status drift")
     if "locked_test_consumed" in summary and summary["locked_test_consumed"] is not False:
         raise AlphaFeasibilityReportingError("data summary consumed Locked Test data")
-    if "safety" in summary and summary["safety"] != SAFETY:
+    if "safety" in summary and summary["safety"] not in (
+        EXPERIMENT_SAFETY,
+        SAFETY,
+    ):
         raise AlphaFeasibilityReportingError("data summary safety drift")
     data_status = summary.get("data_status")
     if data_status is not None and data_status not in {
@@ -889,6 +1042,19 @@ def _normalize_metrics(value: Any, split: str, scenario: str) -> dict[str, Any]:
             f"{field} metrics mismatch; missing={missing}, unknown={unknown}"
         )
 
+    normalized_net_return = _finite_number(
+        value["net_return"], f"{field}.net_return"
+    )
+    normalized_total_cost = _bounded_number(
+        value["total_cost"], f"{field}.total_cost", Decimal("0")
+    )
+    normalized_cost_to_gross_profit = _normalize_cost_to_gross_profit(
+        value["cost_to_gross_profit"],
+        net_return=Decimal(normalized_net_return),
+        total_cost=Decimal(normalized_total_cost),
+        field=f"{field}.cost_to_gross_profit",
+    )
+
     distribution = value["exposure_state_distribution"]
     if not isinstance(distribution, Mapping) or set(distribution) != set(EXPOSURE_STATES):
         raise AlphaFeasibilityReportingError(
@@ -942,7 +1108,7 @@ def _normalize_metrics(value: Any, split: str, scenario: str) -> dict[str, Any]:
         )
 
     return {
-        "net_return": _finite_number(value["net_return"], f"{field}.net_return"),
+        "net_return": normalized_net_return,
         "benchmark_return": _finite_number(
             value["benchmark_return"], f"{field}.benchmark_return"
         ),
@@ -957,9 +1123,8 @@ def _normalize_metrics(value: Any, split: str, scenario: str) -> dict[str, Any]:
             f"{field}.annualized_turnover",
             Decimal("0"),
         ),
-        "total_cost": _bounded_number(
-            value["total_cost"], f"{field}.total_cost", Decimal("0")
-        ),
+        "total_cost": normalized_total_cost,
+        "cost_to_gross_profit": normalized_cost_to_gross_profit,
         "average_gross_exposure": _bounded_number(
             value["average_gross_exposure"],
             f"{field}.average_gross_exposure",
@@ -973,8 +1138,8 @@ def _normalize_metrics(value: Any, split: str, scenario: str) -> dict[str, Any]:
             Decimal("1"),
         ),
         "exposure_state_distribution": normalized_distribution,
-        "trade_or_rebalance_count": _nonnegative_integer(
-            value["trade_or_rebalance_count"], f"{field}.trade_or_rebalance_count"
+        "rebalance_count": _nonnegative_integer(
+            value["rebalance_count"], f"{field}.rebalance_count"
         ),
         "positive_month_rate": _bounded_number(
             value["positive_month_rate"],
@@ -1108,6 +1273,7 @@ def _report_base(
         "experiment_id": experiment["experiment_id"],
         "generated_at": _timestamp(generated_at),
         "commit_sha": _commit_sha(commit_sha),
+        "benchmark": dict(BENCHMARK),
         "actual_tushare_request_count_by_endpoint": data_summary[
             "actual_tushare_request_count_by_endpoint"
         ],
@@ -1137,7 +1303,7 @@ def _report_base(
             "pit_membership_manifest_sha256"
         ],
         "history_manifest_sha256": data_summary["history_manifest_sha256"],
-        **_runtime_provenance(),
+        **_runtime_provenance(experiment),
         **{field: data_summary[field] for field in COVERAGE_STATUS_FIELDS},
     }
 
@@ -1345,7 +1511,7 @@ def verify_alpha_feasibility_report(
     frozen = _resolve_experiment(experiment, config_path)
     _reject_secret_or_forbidden_data_date(candidate)
     _commit_sha(candidate["commit_sha"])
-    runtime_provenance = _runtime_provenance()
+    runtime_provenance = _runtime_provenance(frozen)
     if any(candidate.get(field) != value for field, value in runtime_provenance.items()):
         raise AlphaFeasibilityReportingError("report runtime provenance drift")
     data = _normalize_data_summary(candidate, blocked_defaults=False)
@@ -1354,6 +1520,8 @@ def verify_alpha_feasibility_report(
         raise AlphaFeasibilityReportingError("report locked_test_status drift")
     if candidate["locked_test_consumed"] is not False:
         raise AlphaFeasibilityReportingError("report consumed Locked Test data")
+    if candidate["benchmark"] != BENCHMARK:
+        raise AlphaFeasibilityReportingError("report benchmark identity or basis drift")
     if candidate["safety"] != SAFETY:
         raise AlphaFeasibilityReportingError("report safety drift")
     blockers = _unique_strings(candidate["remaining_blockers"], "remaining_blockers")
@@ -1452,15 +1620,23 @@ publish_report = publish_alpha_feasibility_report
 __all__ = [
     "ALLOWED_ENDPOINTS",
     "AlphaFeasibilityReportingError",
+    "BENCHMARK",
     "COVERAGE_END",
     "COVERAGE_START",
     "EXPERIMENT_ID",
+    "EXPERIMENT_SAFETY",
+    "EXPECTED_P15_EXPERIMENT_CANONICAL_SHA256",
+    "INDEX_V2",
+    "INDEX_V3",
     "LOCKED_TEST_CONSUMED",
     "LOCKED_TEST_STATUS",
     "METRIC_FIELDS",
     "PIT_MONTHS_EXPECTED",
+    "P15_CONFIG_PATH",
     "REPORT_FILENAME",
     "SAFETY",
+    "SOURCE_V2",
+    "SOURCE_V3",
     "SECURITY_MASTER_PIT_STATUS",
     "STOCK_BASIC_REQUEST_COUNT",
     "STOCK_BASIC_STATUS",
