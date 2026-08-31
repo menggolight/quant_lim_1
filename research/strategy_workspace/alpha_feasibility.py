@@ -18,7 +18,7 @@ from __future__ import annotations
 from collections import Counter, defaultdict
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import date
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from hashlib import sha256
 import json
 from pathlib import Path
@@ -85,6 +85,12 @@ ONE = Decimal("1")
 ANNUALIZATION_SESSIONS = Decimal("252")
 _EPSILON = Decimal("1e-24")
 _SHA256_PATTERN = re.compile(r"^[0-9a-f]{64}$")
+_PIT_WEIGHT_PATTERN = re.compile(
+    r"^(?:0(?:\.[0-9]{1,999})?|[1-9][0-9]{0,999}(?:\.[0-9]{1,999})?)$"
+)
+_PIT_EVIDENCE_DECIMAL_PATTERN = re.compile(
+    r"^(?:0(?:\.[0-9]{1,1000})?|[1-9][0-9]{0,1003}(?:\.[0-9]{1,1000})?)$"
+)
 MINIMUM_VALID_CONTROLLED_SESSIONS = ALPHA_LOOKBACK_SESSIONS + 1
 INELIGIBLE_INSUFFICIENT_HISTORY = "ineligible_insufficient_history"
 INELIGIBLE_NO_INITIAL_PRICE = "ineligible_no_initial_price"
@@ -112,6 +118,21 @@ def _decimal(value: Any, field: str) -> Decimal:
     if not result.is_finite():
         raise AlphaFeasibilityDataError(f"{field} must be finite")
     return result
+
+
+def _exact_decimal_sum(values: Sequence[Decimal]) -> Decimal:
+    """Sum PIT weights exactly within their bounded decimal representation."""
+
+    numbers = tuple(values)
+    if not numbers:
+        return ZERO
+    minimum_exponent = min(number.as_tuple().exponent for number in numbers)
+    maximum_adjusted = max(number.adjusted() for number in numbers)
+    aligned_digits = maximum_adjusted - minimum_exponent + 1
+    carry_digits = len(str(len(numbers)))
+    with localcontext() as context:
+        context.prec = max(28, aligned_digits + carry_digits)
+        return sum(numbers, ZERO)
 
 
 def _jsonable(value: Any) -> Any:
@@ -361,8 +382,8 @@ def _verify_pit_admission(
     _unsigned_self_hash(manifest, field="manifest_sha256", label="PIT manifest")
 
     fixed = (
-        report.get("schema_version") == "pit-membership-coverage-report.v1"
-        and manifest.get("schema_version") == "pit-membership-manifest.v1"
+        report.get("schema_version") == "pit-membership-coverage-report.v2"
+        and manifest.get("schema_version") == "pit-membership-manifest.v2"
         and report.get("experiment_id") == EXPERIMENT_ID
         and manifest.get("experiment_id") == EXPERIMENT_ID
         and report.get("index_code") == "000906.SH"
@@ -495,7 +516,8 @@ def _verify_pit_admission(
         if not isinstance(members, list) or not members:
             raise AlphaFeasibilityDataError("PIT snapshot members are missing")
         identifiers: list[str] = []
-        total_weight = ZERO
+        weights: list[Decimal] = []
+        coarsest_nonzero_places: int | None = None
         for member in members:
             if not isinstance(member, Mapping):
                 raise AlphaFeasibilityDataError("PIT member evidence must be a mapping")
@@ -503,25 +525,59 @@ def _verify_pit_admission(
             weight_text = member.get("weight")
             if not re.fullmatch(r"[0-9]{6}\.(?:SH|SZ)", identifier):
                 raise AlphaFeasibilityDataError("PIT member code is invalid")
-            if type(weight_text) is not str or not re.fullmatch(
-                r"[0-9]+(?:\.[0-9]{3,})", weight_text
+            if (
+                type(weight_text) is not str
+                or _PIT_WEIGHT_PATTERN.fullmatch(weight_text) is None
             ):
-                raise AlphaFeasibilityDataError("PIT member weight precision is invalid")
+                raise AlphaFeasibilityDataError("PIT member weight format is invalid")
             weight = _decimal(weight_text, "PIT member weight")
-            if weight < ZERO:
+            if (
+                weight < ZERO
+                or weight.as_tuple().exponent < -999
+                or weight.adjusted() > 999
+                or weight_text != format(weight, "f")
+            ):
                 raise AlphaFeasibilityDataError("PIT member weight is negative")
             identifiers.append(identifier)
-            total_weight += weight
+            weights.append(weight)
+            if weight != ZERO:
+                places = max(0, -weight.as_tuple().exponent)
+                coarsest_nonzero_places = (
+                    places
+                    if coarsest_nonzero_places is None
+                    else min(coarsest_nonzero_places, places)
+                )
+        total_weight = _exact_decimal_sum(weights)
         if len(identifiers) != len(set(identifiers)) or tuple(identifiers) != tuple(
             supplied.members
         ):
             raise AlphaFeasibilityDataError("PIT manifest and engine membership differ")
-        tolerance = _decimal(snapshot.get("weight_tolerance"), "PIT weight tolerance")
-        declared_sum = _decimal(snapshot.get("weight_sum"), "PIT weight sum")
+        tolerance_text = snapshot.get("weight_tolerance")
+        declared_sum_text = snapshot.get("weight_sum")
+        if (
+            type(tolerance_text) is not str
+            or len(tolerance_text) > 2004
+            or _PIT_EVIDENCE_DECIMAL_PATTERN.fullmatch(tolerance_text) is None
+            or type(declared_sum_text) is not str
+            or len(declared_sum_text) > 2004
+            or _PIT_EVIDENCE_DECIMAL_PATTERN.fullmatch(declared_sum_text) is None
+        ):
+            raise AlphaFeasibilityDataError("PIT manifest weight check failed")
+        tolerance = _decimal(tolerance_text, "PIT weight tolerance")
+        declared_sum = _decimal(declared_sum_text, "PIT weight sum")
+        expected_tolerance = (
+            ZERO
+            if coarsest_nonzero_places is None
+            else Decimal("0.5") * (Decimal(10) ** (-coarsest_nonzero_places))
+        )
+        weight_sum_difference = abs(
+            _exact_decimal_sum((total_weight, Decimal("-100")))
+        )
         if (
             tolerance < ZERO
+            or tolerance != expected_tolerance
             or declared_sum != total_weight
-            or abs(total_weight - Decimal("100")) > tolerance
+            or weight_sum_difference > tolerance
         ):
             raise AlphaFeasibilityDataError("PIT manifest weight check failed")
         adjustment_reason = snapshot.get("component_count_adjustment_evidence")

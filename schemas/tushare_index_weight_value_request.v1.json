@@ -1,0 +1,41 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/tushare_index_weight_value_request.v1.json",
+  "title": "P1.4D fixed index_weight diagnostic request reservation",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "api_name",
+    "params",
+    "requested_fields",
+    "request_fingerprint",
+    "requested_at",
+    "endpoint",
+    "date_bounds"
+  ],
+  "properties": {
+    "api_name": {"const": "index_weight"},
+    "params": {
+      "const": {
+        "index_code": "000906.SH",
+        "start_date": "20171201",
+        "end_date": "20171231"
+      }
+    },
+    "requested_fields": {
+      "const": ["index_code", "con_code", "trade_date", "weight"]
+    },
+    "request_fingerprint": {
+      "const": "4bd39eed560ed8b2492145881be89e6f7482427d5a2516ca0dd2e6dd6ca127c2"
+    },
+    "requested_at": {"type": "string", "format": "date-time"},
+    "endpoint": {"const": "index_weight"},
+    "date_bounds": {
+      "const": {
+        "start_date": "20171201",
+        "end_date": "20171231",
+        "absolute_cutoff": "20231231"
+      }
+    }
+  }
+}

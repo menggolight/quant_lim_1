@@ -32,7 +32,7 @@ from research.market_data.tushare_alpha_feasibility import (
     select_pit_snapshot_on_or_before,
     validate_history_coverage,
 )
-from research.market_data.validation import validate_json_schema
+from research.market_data.validation import SchemaValidationError, validate_json_schema
 
 
 ROOT = Path(__file__).resolve().parents[1]
@@ -137,6 +137,7 @@ class TusharePlanTests(unittest.TestCase):
         self.assertEqual(plan.pit_tasks[-1].params["start_date"], "20231201")
         self.assertEqual(plan.pit_tasks[-1].params["end_date"], "20231231")
         self.assertTrue(all(task.endpoint == "index_weight" for task in plan.pit_tasks))
+        self.assertEqual(plan.config["index"]["minimum_weight_decimal_places"], 0)
         self.assertTrue(
             all(
                 max(task.params.get("start_date", "00000000"), task.params.get("end_date", "00000000"))
@@ -818,7 +819,7 @@ class TushareResponseEnvelopeTests(unittest.TestCase):
         self.assertEqual(pit_evidence["terminal_status"], "BLOCKED_ADAPTER_PROTOCOL")
         validate_json_schema(
             pit_evidence,
-            ROOT / "schemas" / "pit_membership_coverage_report.v1.json",
+            ROOT / "schemas" / "pit_membership_coverage_report.v2.json",
         )
         self.assertEqual(result["actual_tushare_request_count_by_endpoint"]["index_weight"], 1)
 
@@ -1145,10 +1146,13 @@ class TushareIndexWeightSemanticProjectionTests(unittest.TestCase):
         )
         self.assertEqual(raised.diagnostic["data_row_count"], 2)
 
-    def test_has_more_is_the_only_safe_data_extension(self):
+    def test_only_observed_safe_pagination_metadata_is_accepted(self):
         canonical = list(self.task.fields)
         accepted = self._validate(
-            self._payload(canonical, data_extensions={"has_more": False})
+            self._payload(
+                canonical,
+                data_extensions={"has_more": False, "count": 0},
+            )
         )
         self.assertEqual(dict(accepted.rows[0])["con_code"], "600000.SH")
         for value, category in (
@@ -1161,6 +1165,18 @@ class TushareIndexWeightSemanticProjectionTests(unittest.TestCase):
                     self._payload(canonical, data_extensions={"has_more": value}),
                     category,
                 )
+        for value in (True, -1, 1, "0", None):
+            with self.subTest(count=value):
+                self._assert_category(
+                    self._payload(canonical, data_extensions={"count": value}),
+                    "data_required_value_invalid",
+                )
+
+        without_metadata = self._validate(self._payload(canonical))
+        self.assertEqual(
+            accepted.normalized_content_sha256,
+            without_metadata.normalized_content_sha256,
+        )
 
     def test_reordered_extra_payload_replays_without_network_or_strategy_leak(self):
         fields = ["index_name", "weight", "con_code", "index_code", "trade_date"]
@@ -1226,6 +1242,175 @@ class TushareIndexWeightSemanticProjectionTests(unittest.TestCase):
             [row["con_code"] for row in result.rows],
             ["600000.SH", "600001.SH"],
         )
+
+    def test_observed_numeric_weight_scales_normalize_without_row_loss(self):
+        fields = list(self.task.fields)
+        items = [
+            ["000906.SH", "600000.SH", "20171229", 1.2],
+            ["000906.SH", "600001.SH", "20171229", 1.23],
+            ["000906.SH", "600002.SH", "20171229", 1.234],
+        ]
+        result = self._validate(self._payload(fields, items=items))
+        self.assertEqual(
+            [row["weight"] for row in result.rows],
+            ["1.2", "1.23", "1.234"],
+        )
+
+    def test_index_weight_representation_rules_are_field_specific_and_fail_closed(self):
+        fields = list(self.task.fields)
+        accepted = (0, 1, "0", "1.2", "1.23", "1.234")
+        for offset, weight in enumerate(accepted):
+            with self.subTest(accepted=weight):
+                values = dict(
+                    self.values,
+                    con_code=f"{600100 + offset:06d}.SH",
+                    weight=weight,
+                )
+                result = self._validate(self._payload(fields, values=values))
+                self.assertEqual(len(result.rows), 1)
+                self.assertEqual(result.rows[0]["weight"], str(weight))
+
+        rejected = (
+            True,
+            None,
+            -1,
+            -0.0,
+            "-0",
+            "-0.0",
+            "-0.1",
+            "+0.125",
+            "1e-3",
+            "NaN",
+            "Infinity",
+            "１.２",
+            "١.٢",
+        )
+        for offset, weight in enumerate(rejected):
+            with self.subTest(rejected=weight):
+                values = dict(
+                    self.values,
+                    con_code=f"{600200 + offset:06d}.SH",
+                    weight=weight,
+                )
+                self._assert_category(
+                    self._payload(fields, values=values),
+                    "data_required_value_invalid",
+                )
+
+        raw_numeric_forms = (
+            (b"-0", None),
+            (b"1E+1", "10"),
+            (b"0.0000001", "0.0000001"),
+        )
+        for raw_weight, expected in raw_numeric_forms:
+            with self.subTest(raw_weight=raw_weight):
+                raw = (
+                    b'{"code":0,"msg":null,"data":{"fields":['
+                    b'"index_code","con_code","trade_date","weight"],"items":[['
+                    b'"000906.SH","600000.SH","20171229",'
+                    + raw_weight
+                    + b']]}}'
+                )
+                if expected is None:
+                    self._assert_category(raw, "data_required_value_invalid")
+                else:
+                    result = self._validate(raw)
+                    self.assertEqual(result.rows[0]["weight"], expected)
+
+        pathological = (
+            b'{"code":0,"msg":null,"data":{"fields":['
+            b'"index_code","con_code","trade_date","weight"],"items":[['
+            b'"000906.SH","600000.SH","20171229",1e1000000000]]}}'
+        )
+        self._assert_category(pathological, "data_required_value_invalid")
+
+        for values in (
+            dict(self.values, con_code="６０００００.SH"),
+            dict(self.values, trade_date="２０１７１２２９"),
+        ):
+            self._assert_category(
+                self._payload(fields, values=values),
+                "data_required_value_invalid",
+            )
+
+        for trade_date in (20171229, 20171229.0):
+            with self.subTest(trade_date=trade_date):
+                self._assert_category(
+                    self._payload(
+                        fields,
+                        values=dict(self.values, trade_date=trade_date),
+                    ),
+                    "data_required_value_invalid",
+                )
+
+    def test_observed_mixed_scale_snapshot_uses_each_source_decimal_tolerance(self):
+        weights = ["98.1", *(["0.1"] * 5), *(["0.01"] * 67), *(["0.001"] * 727)]
+        rows = [
+            {
+                "index_code": "000906.SH",
+                "con_code": f"{600000 + index:06d}.SH",
+                "trade_date": "20171229",
+                "weight": weight,
+            }
+            for index, weight in enumerate(weights)
+        ]
+        total, tolerance = taf._validate_weight_snapshot(rows, expected_count=800)
+        self.assertEqual(total, taf.Decimal("99.997"))
+        self.assertEqual(tolerance, taf.Decimal("0.05"))
+
+    def test_coarse_zero_weights_cannot_inflate_snapshot_tolerance(self):
+        weights = ["0"] * 700 + ["0.1"] * 100
+        rows = [
+            {
+                "index_code": "000906.SH",
+                "con_code": f"{600000 + index:06d}.SH",
+                "trade_date": "20171229",
+                "weight": weight,
+            }
+            for index, weight in enumerate(weights)
+        ]
+        with self.assertRaisesRegex(
+            taf.AlphaFeasibilityDataError,
+            "weight_sum_outside_row_precision_tolerance",
+        ):
+            taf._validate_weight_snapshot(rows, expected_count=800)
+
+    def test_coarse_positive_weights_cannot_inflate_snapshot_tolerance(self):
+        weights = ["0"] * 600 + ["1"] * 200
+        rows = [
+            {
+                "index_code": "000906.SH",
+                "con_code": f"{600000 + index:06d}.SH",
+                "trade_date": "20171229",
+                "weight": weight,
+            }
+            for index, weight in enumerate(weights)
+        ]
+        with self.assertRaisesRegex(
+            taf.AlphaFeasibilityDataError,
+            "weight_sum_outside_row_precision_tolerance",
+        ):
+            taf._validate_weight_snapshot(rows, expected_count=800)
+
+    def test_high_precision_weight_sum_is_not_rounded_into_tolerance(self):
+        weights = [
+            "99.999999999999999999999999999301",
+            *(["0.000000000000000000000000000001"] * 799),
+        ]
+        rows = [
+            {
+                "index_code": "000906.SH",
+                "con_code": f"{600000 + index:06d}.SH",
+                "trade_date": "20171229",
+                "weight": weight,
+            }
+            for index, weight in enumerate(weights)
+        ]
+        with self.assertRaisesRegex(
+            taf.AlphaFeasibilityDataError,
+            "weight_sum_outside_row_precision_tolerance",
+        ):
+            taf._validate_weight_snapshot(rows, expected_count=800)
 
     def test_first_failure_summary_uses_precise_safe_field_diagnostic(self):
         fields = ["index_code", "con_code", "trade_date"]
@@ -2203,7 +2388,7 @@ class PitMembershipTests(unittest.TestCase):
         self.assertEqual(len(result.manifest["snapshots"]), 73)
         self.assertEqual(len(result.union_instruments), 800)
         validate_json_schema(
-            result.coverage_report, ROOT / "schemas" / "pit_membership_coverage_report.v1.json"
+            result.coverage_report, ROOT / "schemas" / "pit_membership_coverage_report.v2.json"
         )
         # The local Schema validator's generic uniqueItems check is quadratic;
         # validate one full 800-member snapshot rather than repeating the same
@@ -2211,7 +2396,7 @@ class PitMembershipTests(unittest.TestCase):
         schema_manifest = dict(result.manifest)
         schema_manifest["snapshots"] = [result.manifest["snapshots"][0]]
         validate_json_schema(
-            schema_manifest, ROOT / "schemas" / "pit_membership_manifest.v1.json"
+            schema_manifest, ROOT / "schemas" / "pit_membership_manifest.v2.json"
         )
         self.assertIsNone(
             result.manifest["snapshots"][0]["component_count_adjustment_evidence"]
@@ -2220,6 +2405,135 @@ class PitMembershipTests(unittest.TestCase):
             result.manifest["snapshots"], "2018-01-15"
         )
         self.assertEqual(decision["snapshot_date"], "2017-12-29")
+
+    def test_mixed_decimal_scales_produce_schema_valid_manifest(self):
+        weights = ["98.1", *(["0.1"] * 5), *(["0.01"] * 67), *(["0.001"] * 727)]
+        rows = {}
+        for task in self.plan.pit_tasks:
+            rows[task.task_id] = [
+                {**row, "weight": weight}
+                for row, weight in zip(self.valid_rows(task), weights, strict=True)
+            ]
+        result = build_pit_membership_artifacts(self.plan, rows, generated_at=NOW)
+
+        self.assertTrue(result.passed)
+        self.assertEqual(result.manifest["snapshots"][0]["weight_sum"], "99.997")
+        self.assertEqual(result.manifest["snapshots"][0]["weight_tolerance"], "0.05")
+        schema_manifest = dict(result.manifest)
+        schema_manifest["snapshots"] = [result.manifest["snapshots"][0]]
+        validate_json_schema(
+            schema_manifest,
+            ROOT / "schemas" / "pit_membership_manifest.v2.json",
+        )
+
+    def test_scale_seven_tolerance_is_plain_and_schema_valid(self):
+        rows = {
+            task.task_id: [
+                {**row, "weight": "0.1250000"}
+                for row in self.valid_rows(task)
+            ]
+            for task in self.plan.pit_tasks
+        }
+        result = build_pit_membership_artifacts(self.plan, rows, generated_at=NOW)
+
+        self.assertTrue(result.passed)
+        first = result.coverage_report["monthly_checks"][0]["snapshots"][0]
+        self.assertEqual(first["weight_sum"], "100.0000000")
+        self.assertEqual(first["weight_tolerance"], "0.00000005")
+        validate_json_schema(
+            result.coverage_report,
+            ROOT / "schemas" / "pit_membership_coverage_report.v2.json",
+        )
+        schema_manifest = dict(result.manifest)
+        schema_manifest["snapshots"] = [result.manifest["snapshots"][0]]
+        validate_json_schema(
+            schema_manifest,
+            ROOT / "schemas" / "pit_membership_manifest.v2.json",
+        )
+        oversized = deepcopy(schema_manifest)
+        oversized["snapshots"][0]["members"][0]["weight"] = (
+            "3.343" + "0" * 997
+        )
+        with self.assertRaises(SchemaValidationError):
+            validate_json_schema(
+                oversized,
+                ROOT / "schemas" / "pit_membership_manifest.v2.json",
+            )
+
+    def test_invalid_snapshot_evidence_uses_exact_sum_and_fixed_tolerance(self):
+        cases = (
+            (["0"] * 600 + ["1"] * 200, "200", taf.Decimal("0.5")),
+            (
+                [
+                    "99.999999999999999999999999999301",
+                    *(["0.000000000000000000000000000001"] * 799),
+                ],
+                "100.000000000000000000000000000100",
+                taf.Decimal("5e-31"),
+            ),
+        )
+        for weights, expected_total, expected_tolerance in cases:
+            with self.subTest(expected_total=expected_total):
+                rows = {
+                    task.task_id: self.valid_rows(task)
+                    for task in self.plan.pit_tasks
+                }
+                first_task = self.plan.pit_tasks[0]
+                rows[first_task.task_id] = [
+                    {**row, "weight": weight}
+                    for row, weight in zip(
+                        self.valid_rows(first_task), weights, strict=True
+                    )
+                ]
+                result = build_pit_membership_artifacts(
+                    self.plan,
+                    rows,
+                    generated_at=NOW,
+                )
+
+                self.assertFalse(result.passed)
+                snapshot = result.coverage_report["monthly_checks"][0]["snapshots"][0]
+                self.assertEqual(snapshot["weight_sum"], expected_total)
+                self.assertEqual(
+                    taf.Decimal(snapshot["weight_tolerance"]),
+                    expected_tolerance,
+                )
+                self.assertNotIn("E", snapshot["weight_tolerance"])
+                validate_json_schema(
+                    result.coverage_report,
+                    ROOT / "schemas" / "pit_membership_coverage_report.v2.json",
+                )
+
+    def test_large_invalid_snapshot_sum_stays_inside_evidence_schema_bound(self):
+        rows = {
+            task.task_id: self.valid_rows(task)
+            for task in self.plan.pit_tasks
+        }
+        first_task = self.plan.pit_tasks[0]
+        snapshot_date = self.valid_rows(first_task)[0]["trade_date"]
+        rows[first_task.task_id] = [
+            {
+                "index_code": "000906.SH",
+                "con_code": f"{600000 + index:06d}.SH",
+                "trade_date": snapshot_date,
+                "weight": "9" * 1000,
+            }
+            for index in range(1001)
+        ]
+        result = build_pit_membership_artifacts(
+            self.plan,
+            rows,
+            generated_at=NOW,
+        )
+
+        self.assertFalse(result.passed)
+        snapshot = result.coverage_report["monthly_checks"][0]["snapshots"][0]
+        self.assertEqual(len(snapshot["weight_sum"]), 1004)
+        self.assertEqual(snapshot["weight_tolerance"], "0.5")
+        validate_json_schema(
+            result.coverage_report,
+            ROOT / "schemas" / "pit_membership_coverage_report.v2.json",
+        )
 
     def test_missing_month_blocks_and_does_not_form_union(self):
         rows = {task.task_id: self.valid_rows(task) for task in self.plan.pit_tasks[1:]}

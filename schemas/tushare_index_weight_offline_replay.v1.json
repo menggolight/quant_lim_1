@@ -1,0 +1,70 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/tushare_index_weight_offline_replay.v1.json",
+  "title": "P1.4D deterministic offline replay receipt",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "raw_transport_sha256",
+    "value_profile_sha256",
+    "normalization_change",
+    "offline_replay_status",
+    "replay_pass_count",
+    "deterministic_replay",
+    "normalized_row_count",
+    "normalized_trade_dates",
+    "normalized_weight_sum_by_date",
+    "normalized_content_sha256",
+    "normalized_pit_sha256",
+    "terminal_status",
+    "locked_test_status",
+    "locked_test_consumed"
+  ],
+  "properties": {
+    "schema_version": {"const": "tushare-index-weight-offline-replay.v1"},
+    "raw_transport_sha256": {"$ref": "#/$defs/sha256"},
+    "value_profile_sha256": {"$ref": "#/$defs/sha256"},
+    "normalization_change": {
+      "type": "string",
+      "pattern": "^[a-z][a-z0-9_]{2,95}$"
+    },
+    "offline_replay_status": {"const": "DIAGNOSTIC_REPLAY_ACCEPTED"},
+    "replay_pass_count": {"const": 2},
+    "deterministic_replay": {"const": true},
+    "normalized_row_count": {"const": 800},
+    "normalized_trade_dates": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 31,
+      "uniqueItems": true,
+      "items": {"type": "string", "pattern": "^201712(?:0[1-9]|[12][0-9]|3[01])$"}
+    },
+    "normalized_weight_sum_by_date": {
+      "type": "object",
+      "minProperties": 1,
+      "maxProperties": 31,
+      "propertyNames": {"pattern": "^201712(?:0[1-9]|[12][0-9]|3[01])$"},
+      "additionalProperties": {"$ref": "#/$defs/decimal"}
+    },
+    "normalized_content_sha256": {"$ref": "#/$defs/sha256"},
+    "normalized_pit_sha256": {"$ref": "#/$defs/sha256"},
+    "terminal_status": {"const": "DIAGNOSTIC_REPLAY_ACCEPTED"},
+    "locked_test_status": {"$ref": "#/$defs/locked"},
+    "locked_test_consumed": {"const": false}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "decimal": {"type": "string", "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
+    "locked": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["access", "download", "run"],
+      "properties": {
+        "access": {"const": "NOT_ACCESSED"},
+        "download": {"const": "NOT_DOWNLOADED"},
+        "run": {"const": "NOT_RUN"}
+      }
+    }
+  }
+}

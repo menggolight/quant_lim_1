@@ -11,13 +11,23 @@
 
 ## 数据门
 
-标准入口先逐月请求 `000906.SH` 的 `2017-12..2023-12` 共73个 `index_weight` 窗口。唯一网络进程必须先单独完成2017-12首月的字段语义与PIT截面校验，只有首月通过才继续其余72个月，且不得重复首月请求。每月必须存在合法截面、代码唯一、权重非负且权重和落在逐行末位精度推导的容差内。成分数不是800时，只有绑定中证指数公司正式证据、月份、截面日、实际数量、原因和源文件哈希的受控说明才可放行；否则阶段状态为 `BLOCKED_PIT_MEMBERSHIP`，最终状态为 `BLOCKED_DATA`，不会规划股票历史任务。
+标准入口先逐月请求 `000906.SH` 的 `2017-12..2023-12` 共73个 `index_weight` 窗口。唯一网络进程必须先单独完成2017-12首月的字段语义与PIT截面校验，只有首月通过才继续其余72个月，且不得重复首月请求。每月必须存在合法截面、代码唯一、权重非负且权重和落在非零权重最粗服务端末位精度的半单位容差内；行数和零权重不得放大总和容差。成分数不是800时，只有绑定中证指数公司正式证据、月份、截面日、实际数量、原因和源文件哈希的受控说明才可放行；否则阶段状态为 `BLOCKED_PIT_MEMBERSHIP`，最终状态为 `BLOCKED_DATA`，不会规划股票历史任务。
+
+上述混合精度与新容差语义由 `pit-membership-coverage-report.v2` / `pit-membership-manifest.v2` 承载；历史V1文件保留用于识别旧产物，但当前生产端、loader和策略消费者均显式拒绝V1，禁止把旧容差证据静默解释为V2。
 
 PIT 通过后，只对73个月合法截面的成员并集回填。每个决策日只能选择当日或之前最新合法 `index_weight` 截面；`con_code` 必须是沪深A股格式，并与 `daily.ts_code` 并集精确一致。不得用当前成分、`stock_basic` 或其他当前快照回填历史。所有请求在本地形成不含 Token 的参数指纹、started claim、规范化响应哈希和 create-only 产物；完整任务离线重放，已开始但没有持久化响应的远端调用按歧义失败关闭，不自动重发。上游响应或错误字段一旦出现 `2024-01-01` 及以后日期，在进入消费者前隔离且不保存原始正文。
 
 Tushare HTTP 根包络分为严格 `semantic_core` 与受控 `transport_extensions`。`semantic_core` 必须且只能按语义解释 `code/msg/data`：根必须是无重复key的JSON object，`code`必须是int且不接受bool，`msg`只能是string或null；`code=0`时`data`必须是object，`code!=0`时`data`只能是null或受控错误object。缺少核心字段或类型漂移一律失败关闭。非零`code`仍须按结构化code、msg和HTTP状态进入权限、限频、账户认证、参数、服务端或未知上游错误分类；扩展字段存在不能绕过非零`code`。
 
-成功响应的 `data` 必须包含 `fields/items`；仅额外允许类型严格为bool的 `has_more`，且只有 `false` 可放行，`true` 仍按潜在截断失败关闭。`data.fields` 是非空、唯一、安全字段名数组，字段顺序不承载业务语义。每行宽度必须与服务端实际 `fields` 一致，适配器先按服务端字段名和位置建行对象，再投影到请求契约的固定规范字段顺序；缺必需字段、重复字段、非法字段名、行宽错误或必需值非法均失败关闭，不按固定列位置解析。`index_weight` 的必需/规范字段固定为 `index_code/con_code/trade_date/weight`，规范化行按 `index_code/trade_date/con_code` 排序。服务端额外列允许存在，但只记录列名和逐列内容SHA-256，不进入规范化行、PIT成员、策略输入或内容哈希。
+成功响应的 `data` 必须包含 `fields/items`；仅额外允许本地证据已经观察并收紧类型的分页元数据：`has_more` 必须严格为 `false`，`count` 必须严格为整数 `0`。它们均不进入规范化行或策略内容；`has_more=true` 仍按潜在截断失败关闭，其他值或其他 `data` 扩展继续失败关闭。`data.fields` 是非空、唯一、安全字段名数组，字段顺序不承载业务语义。每行宽度必须与服务端实际 `fields` 一致，适配器先按服务端字段名和位置建行对象，再投影到请求契约的固定规范字段顺序；缺必需字段、重复字段、非法字段名、行宽错误或必需值非法均失败关闭，不按固定列位置解析。`index_weight` 的必需/规范字段固定为 `index_code/con_code/trade_date/weight`，规范化行按 `index_code/trade_date/con_code` 排序。服务端额外列允许存在，但只记录列名和逐列内容SHA-256，不进入规范化行、PIT成员、策略输入或内容哈希。
+
+### P1.4D 单次值诊断证据
+
+P1.4D 只执行了一次固定的 `index_weight(index_code=000906.SH,start_date=20171201,end_date=20171231)` 请求；其他Tushare接口均为0次。通过Token、敏感字段、非有限JSON、日期、极端Decimal指数和2 MiB上限扫描后，完整正文以create-only方式保存在忽略Git的诊断目录。响应为34510字节、800行，服务端字段精确为 `index_code/con_code/trade_date/weight`，主键无重复；`index_code/con_code/trade_date` 均为合法字符串，`weight` 800行均为JSON number，无null、bool、负数或零值。
+
+冻结基线 `a0fadfc890d26be16e1d4c06e556674a59aa4be6` 的首个具体失败位于0-based第7行：`weight=1.23`，谓词为 `weight_decimal_scale_below_three`。完整画像显示源精度分布为1位6行、2位67行、3位727行，截面权重和为 `99.997`。因此P1适配器不再要求人为的至少3位小数：JSON integer/number及普通十进制数字字符串先按非负Decimal校验并保留服务端末位精度；bool、null、非有限数、负数、signed zero、指数或带正号的字符串继续拒绝。权重和容差取非零权重最粗服务端末位精度的半单位，且由策略消费者独立重算；零权重沿用既有“合法非负值且不得静默删除”的规则，但不扩大总和容差。本次真实 `zero_count=0`，未引入零值过滤或补值。
+
+同一份原始响应在修复后离线重放两次，均得到800行、唯一日期 `20171229`、权重和 `99.997` 及相同规范字节和内容哈希，终态为 `DIAGNOSTIC_REPLAY_ACCEPTED`。本轮没有恢复其余72个月、历史行情、Development、Validation或Locked Test，也不构成Alpha统计有效、Paper或交易准入。
 
 除三项核心字段外的所有顶层字段统一进入 `transport_extensions`，不维护 `request_id/detail/...` 固定可选白名单。安全非空字段名及其合法JSON标量、数组或object可被接受，因此 `request_id`、string/object/array形态的`detail`和未来`trace_id`本身不会触发 `BLOCKED_ADAPTER_PROTOCOL`；但扩展及其嵌套key仍须通过控制字符、secret-like key、当前`TUSHARE_TOKEN`精确内容、非有限数和纯JSON类型检查。完整响应最多2 MiB，扩展规范化对象最多256 KiB，扩展最多64个根字段、4096个总元素、8层嵌套，单字符串最多65536字符。任何上限或secret检查失败都在解释上游错误前失败关闭。
 

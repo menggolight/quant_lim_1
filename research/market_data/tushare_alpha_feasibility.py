@@ -33,7 +33,7 @@ import time
 import unicodedata
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta, timezone
-from decimal import Decimal, InvalidOperation
+from decimal import Decimal, InvalidOperation, localcontext
 from pathlib import Path
 from types import MappingProxyType
 from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
@@ -61,8 +61,8 @@ LEGACY_RESPONSE_SCHEMA_VERSIONS = frozenset(
     }
 )
 QUARANTINE_SCHEMA_VERSION = "tushare-alpha-feasibility-quarantine.v4"
-PIT_REPORT_SCHEMA_VERSION = "pit-membership-coverage-report.v1"
-PIT_MANIFEST_SCHEMA_VERSION = "pit-membership-manifest.v1"
+PIT_REPORT_SCHEMA_VERSION = "pit-membership-coverage-report.v2"
+PIT_MANIFEST_SCHEMA_VERSION = "pit-membership-manifest.v2"
 HISTORY_COVERAGE_SCHEMA_VERSION = "tushare-alpha-feasibility-history-coverage.v2"
 HISTORY_MANIFEST_SCHEMA_VERSION = "tushare-alpha-feasibility-manifest.v3"
 HISTORY_MANIFEST_SCHEMA_PATH = (
@@ -148,11 +148,12 @@ MINIMUM_OPEN_SESSIONS_BY_YEAR: Mapping[int, int] = MappingProxyType(
 )
 MAXIMUM_OPEN_SESSIONS_PER_YEAR = 260
 
-_DATE8 = re.compile(r"^\d{8}$")
-_DATE10 = re.compile(r"^\d{4}-\d{2}-\d{2}$")
-_MONTH = re.compile(r"^\d{4}-\d{2}$")
-_TS_CODE = re.compile(r"^\d{6}\.(?:SH|SZ|BJ)$")
-_PIT_COMPONENT_CODE = re.compile(r"^\d{6}\.(?:SH|SZ)$")
+_DATE8 = re.compile(r"^[0-9]{8}$")
+_DATE10 = re.compile(r"^[0-9]{4}-[0-9]{2}-[0-9]{2}$")
+_MONTH = re.compile(r"^[0-9]{4}-[0-9]{2}$")
+_PLAIN_DECIMAL_STRING = re.compile(r"^-?[0-9]+(?:\.[0-9]+)?$")
+_TS_CODE = re.compile(r"^[0-9]{6}\.(?:SH|SZ|BJ)$")
+_PIT_COMPONENT_CODE = re.compile(r"^[0-9]{6}\.(?:SH|SZ)$")
 _SHA256 = re.compile(r"^[0-9a-f]{64}$")
 _SAFE_TASK_ID = re.compile(r"^[a-z_]+-[0-9a-f]{64}$")
 _SAFE_DATA_FIELD_NAME = re.compile(r"^[A-Za-z_][A-Za-z0-9_]{0,63}$")
@@ -175,6 +176,8 @@ MAXIMUM_TRANSPORT_EXTENSION_DEPTH = 8
 MAXIMUM_TRANSPORT_EXTENSION_FIELDS = 64
 MAXIMUM_TRANSPORT_EXTENSION_ELEMENTS = 4096
 MAXIMUM_TRANSPORT_EXTENSION_STRING_LENGTH = 65_536
+MAXIMUM_REQUIRED_DECIMAL_ADJUSTED_EXPONENT = 999
+MAXIMUM_REQUIRED_DECIMAL_SCALE = 999
 ADAPTER_PROTOCOL_FAILURES = frozenset(
     {
         "duplicate_json_key",
@@ -263,11 +266,18 @@ def _reject_nonfinite(value: str) -> None:
     raise AlphaFeasibilityDataError("nonfinite_json_number")
 
 
+def _parse_json_integer(value: str) -> int | Decimal:
+    # The standard int parser collapses the valid JSON token ``-0`` to 0 and
+    # loses the sign before field-level validation can reject signed zero.
+    return Decimal(value) if value == "-0" else int(value)
+
+
 def strict_json_loads(raw: bytes | str, *, label: str = "json") -> Any:
     try:
         return json.loads(
             raw,
             object_pairs_hook=_reject_duplicate_keys,
+            parse_int=_parse_json_integer,
             parse_float=Decimal,
             parse_constant=_reject_nonfinite,
         )
@@ -752,7 +762,7 @@ def validate_experiment_config(
         raise AlphaFeasibilityDataError("future_snapshot_guard_missing")
     if index.get("expected_component_count") != 800:
         raise AlphaFeasibilityDataError("unexpected_component_count")
-    if index.get("minimum_weight_decimal_places") != 3:
+    if index.get("minimum_weight_decimal_places") != 0:
         raise AlphaFeasibilityDataError("unexpected_weight_precision")
     evidence_hashes = index.get("controlled_adjustment_evidence_sha256s", [])
     if (
@@ -1173,12 +1183,41 @@ def _decimal(value: Any, label: str, *, minimum: Decimal | None = None) -> tuple
     return number, text
 
 
+def _index_weight_decimal(value: Any) -> tuple[Decimal, str]:
+    if type(value) is str and _PLAIN_DECIMAL_STRING.fullmatch(value) is None:
+        raise AlphaFeasibilityDataError("invalid_weight")
+    number, _text = _decimal(value, "weight", minimum=Decimal("0"))
+    if number.is_zero() and number.is_signed():
+        raise AlphaFeasibilityDataError("invalid_weight")
+    if (
+        number.as_tuple().exponent < -MAXIMUM_REQUIRED_DECIMAL_SCALE
+        or number.adjusted() > MAXIMUM_REQUIRED_DECIMAL_ADJUSTED_EXPONENT
+    ):
+        raise AlphaFeasibilityDataError("invalid_weight")
+    return number, format(number, "f")
+
+
 def _decimal_places(text: str) -> int:
     try:
         value = Decimal(text)
     except InvalidOperation as exc:
         raise AlphaFeasibilityDataError("invalid_decimal_precision") from exc
     return max(0, -value.as_tuple().exponent)
+
+
+def _exact_decimal_sum(values: Sequence[Decimal]) -> Decimal:
+    """Sum bounded Decimals without the process-wide context rounding rows."""
+
+    numbers = tuple(values)
+    if not numbers:
+        return Decimal("0")
+    minimum_exponent = min(number.as_tuple().exponent for number in numbers)
+    maximum_adjusted = max(number.adjusted() for number in numbers)
+    aligned_digits = maximum_adjusted - minimum_exponent + 1
+    carry_digits = len(str(len(numbers)))
+    with localcontext() as context:
+        context.prec = max(28, aligned_digits + carry_digits)
+        return sum(numbers, Decimal("0"))
 
 
 def _normalized_code(value: Any, label: str = "ts_code") -> str:
@@ -1234,9 +1273,7 @@ def _normalize_response_row(
             raise AlphaFeasibilityDataError("pit_component_exchange_not_allowed")
         parsed = _response_date_window(task, result["trade_date"], "trade_date")
         result["trade_date"] = _compact(parsed)
-        weight, text = _decimal(result["weight"], "weight", minimum=Decimal("0"))
-        if _decimal_places(text) < 3:
-            raise AlphaFeasibilityDataError("weight_precision_below_three_decimals")
+        weight, text = _index_weight_decimal(result["weight"])
         result["weight"] = text
         if weight < 0:  # kept explicit for the PIT contract
             raise AlphaFeasibilityDataError("negative_weight")
@@ -1724,13 +1761,17 @@ def validate_response_bytes(
         )
 
         data_extensions = set(data) - {"fields", "items"}
-        if data_extensions - {"has_more"}:
+        if data_extensions - {"has_more", "count"}:
             raise AlphaFeasibilityDataError("data_required_value_invalid")
         if "has_more" in data:
             if type(data["has_more"]) is not bool:
                 raise AlphaFeasibilityDataError("data_required_value_invalid")
             if data["has_more"]:
                 raise AlphaFeasibilityDataError("potential_upstream_truncation")
+        if "count" in data and (
+            type(data["count"]) is not int or data["count"] != 0
+        ):
+            raise AlphaFeasibilityDataError("data_required_value_invalid")
 
         _reject_response_post_cutoff_dates(task, root)
         if len(items) >= POTENTIAL_TRUNCATION_LIMIT[task.endpoint]:
@@ -2752,16 +2793,29 @@ def _validate_weight_snapshot(
         raise AlphaFeasibilityDataError("duplicate_component_in_snapshot", stage="pit")
     if len(rows) == 0:
         raise AlphaFeasibilityDataError("empty_pit_snapshot", stage="pit")
-    total = Decimal("0")
-    tolerance = Decimal("0")
+    coarsest_nonzero_places: int | None = None
+    weights: list[Decimal] = []
     for row in rows:
-        weight, text = _decimal(row["weight"], "weight", minimum=Decimal("0"))
+        weight, text = _index_weight_decimal(row["weight"])
         places = _decimal_places(text)
-        if places < 3:
-            raise AlphaFeasibilityDataError("weight_precision_below_three_decimals", stage="pit")
-        total += weight
-        tolerance += Decimal("0.5") * (Decimal(10) ** (-places))
-    if abs(total - Decimal("100")) > tolerance:
+        weights.append(weight)
+        # A reported zero is retained as membership evidence, but it must not
+        # determine aggregate precision.  Use one half-unit at the coarsest
+        # non-zero precision so row count cannot inflate the sum allowance.
+        if weight != 0:
+            coarsest_nonzero_places = (
+                places
+                if coarsest_nonzero_places is None
+                else min(coarsest_nonzero_places, places)
+            )
+    total = _exact_decimal_sum(weights)
+    tolerance = (
+        Decimal("0")
+        if coarsest_nonzero_places is None
+        else Decimal("0.5") * (Decimal(10) ** (-coarsest_nonzero_places))
+    )
+    difference = abs(_exact_decimal_sum((total, Decimal("-100"))))
+    if difference > tolerance:
         raise AlphaFeasibilityDataError("weight_sum_outside_row_precision_tolerance", stage="pit")
     return total, tolerance
 
@@ -2851,8 +2905,8 @@ def build_pit_membership_artifacts(
                         {
                             "snapshot_date": _iso(_parse_date(snapshot, "snapshot_date")),
                             "component_count": count,
-                            "weight_sum": str(total),
-                            "weight_tolerance": str(tolerance),
+                            "weight_sum": format(total, "f"),
+                            "weight_tolerance": format(tolerance, "f"),
                             "valid": True,
                             "issues": [],
                             "component_count_adjustment_evidence": adjustment_reason,
@@ -2862,13 +2916,15 @@ def build_pit_membership_artifacts(
                         {
                             "month": month,
                             "snapshot_date": _iso(_parse_date(snapshot, "snapshot_date")),
-                            "weight_sum": str(total),
-                            "weight_tolerance": str(tolerance),
+                            "weight_sum": format(total, "f"),
+                            "weight_tolerance": format(tolerance, "f"),
                             "members": sorted(
                                 (
                                     {
                                         "instrument_id": row["con_code"],
-                                        "weight": str(row["weight"]),
+                                        "weight": _index_weight_decimal(
+                                            row["weight"]
+                                        )[1],
                                     }
                                     for row in snapshot_rows
                                 ),
@@ -2882,17 +2938,25 @@ def build_pit_membership_artifacts(
                     candidate_failures.append(exc.code)
                     try:
                         invalid_weights = [
-                            _decimal(row["weight"], "weight", minimum=Decimal("0"))
+                            _index_weight_decimal(row["weight"])
                             for row in snapshot_rows
                         ]
-                        invalid_total = sum((item[0] for item in invalid_weights), Decimal("0"))
-                        invalid_tolerance = sum(
-                            (
-                                Decimal("0.5")
-                                * (Decimal(10) ** (-_decimal_places(item[1])))
-                                for item in invalid_weights
-                            ),
-                            Decimal("0"),
+                        invalid_total = _exact_decimal_sum(
+                            [item[0] for item in invalid_weights]
+                        )
+                        invalid_nonzero_places = [
+                            _decimal_places(text)
+                            for weight, text in invalid_weights
+                            if weight != 0
+                        ]
+                        invalid_tolerance = (
+                            Decimal("0")
+                            if not invalid_nonzero_places
+                            else Decimal("0.5")
+                            * (
+                                Decimal(10)
+                                ** (-min(invalid_nonzero_places))
+                            )
                         )
                     except AlphaFeasibilityDataError:
                         invalid_total = Decimal("0")
@@ -2901,8 +2965,8 @@ def build_pit_membership_artifacts(
                         {
                             "snapshot_date": _iso(_parse_date(snapshot, "snapshot_date")),
                             "component_count": len(snapshot_rows),
-                            "weight_sum": str(invalid_total),
-                            "weight_tolerance": str(invalid_tolerance),
+                            "weight_sum": format(invalid_total, "f"),
+                            "weight_tolerance": format(invalid_tolerance, "f"),
                             "valid": False,
                             "issues": [exc.code],
                             "component_count_adjustment_evidence": None,

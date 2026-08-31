@@ -176,7 +176,7 @@ GATE = {
 # It makes otherwise loose object sections in the JSON Schema fail closed too,
 # while remaining insensitive to whitespace and object key ordering.
 EXPECTED_EXPERIMENT_CANONICAL_SHA256 = (
-    "3338cbd852d3eec4adfef57a71855d80bdbcfd5db2bbcef94b8c06410de5d94f"
+    "358e2848d35084c4ec7dbf53abe0086e103992fe9b43c5e9f0464cf1e79f48de"
 )
 
 METRIC_FIELDS = (

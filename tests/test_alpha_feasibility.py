@@ -70,12 +70,30 @@ def _pit_fixture(
     instrument_ids: tuple[str, ...],
     *,
     same_month_early: tuple[str, tuple[str, ...]] | None = None,
+    weights_override: list[str] | None = None,
 ) -> tuple[tuple[PITMembershipSnapshot, ...], PITAdmissionArtifacts]:
     if len(instrument_ids) != 30:
         raise AssertionError("fixture weight vector assumes 30 instruments")
     if same_month_early is not None and len(same_month_early[1]) != 30:
         raise AssertionError("early fixture must also contain 30 instruments")
-    weights = ["3.343"] + ["3.333"] * (len(instrument_ids) - 1)
+    weights = (
+        list(weights_override)
+        if weights_override is not None
+        else ["3.343"] + ["3.333"] * (len(instrument_ids) - 1)
+    )
+    if len(weights) != len(instrument_ids):
+        raise AssertionError("weight vector must match fixture instruments")
+    weight_sum = str(af._exact_decimal_sum([D(value) for value in weights]))
+    positive_places = [
+        max(0, -D(value).as_tuple().exponent)
+        for value in weights
+        if D(value) != D("0")
+    ]
+    weight_tolerance = str(
+        D("0")
+        if not positive_places
+        else D("0.5") * (D(10) ** (-min(positive_places)))
+    )
     memberships: list[PITMembershipSnapshot] = []
     checks: list[dict] = []
     snapshots: list[dict] = []
@@ -96,8 +114,8 @@ def _pit_fixture(
                 {
                     "snapshot_date": snapshot_date,
                     "component_count": len(snapshot_members),
-                    "weight_sum": "100.000",
-                    "weight_tolerance": "0.015",
+                    "weight_sum": weight_sum,
+                    "weight_tolerance": weight_tolerance,
                     "component_count_adjustment_evidence": adjustment_reason,
                     "valid": True,
                     "issues": [],
@@ -113,8 +131,8 @@ def _pit_fixture(
                             snapshot_members, weights, strict=True
                         )
                     ],
-                    "weight_sum": "100.000",
-                    "weight_tolerance": "0.015",
+                    "weight_sum": weight_sum,
+                    "weight_tolerance": weight_tolerance,
                     "component_count_adjustment_evidence": adjustment_reason,
                     "source_response_sha256": "b" * 64,
                 }
@@ -140,7 +158,7 @@ def _pit_fixture(
     locked = {"access": "NOT_ACCESSED", "download": "NOT_DOWNLOADED", "run": "NOT_RUN"}
     report = _self_hash(
         {
-            "schema_version": "pit-membership-coverage-report.v1",
+            "schema_version": "pit-membership-coverage-report.v2",
             "experiment_id": "a-share-technical-alpha-feasibility-tushare-p1-v1",
             "generated_at": "2026-08-28T00:00:00+00:00",
             "index_code": BENCHMARK,
@@ -157,7 +175,7 @@ def _pit_fixture(
     )
     manifest = _self_hash(
         {
-            "schema_version": "pit-membership-manifest.v1",
+            "schema_version": "pit-membership-manifest.v2",
             "experiment_id": "a-share-technical-alpha-feasibility-tushare-p1-v1",
             "generated_at": "2026-08-28T00:00:00+00:00",
             "index_code": BENCHMARK,
@@ -249,6 +267,111 @@ class AlphaFeasibilityPITTests(unittest.TestCase):
         )
         with self.assertRaisesRegex(AlphaFeasibilityDataError, "no PIT membership"):
             select_pit_membership(snapshots, date(2022, 11, 30))
+
+    def test_mixed_scale_and_zero_weight_manifest_remains_admissible(self) -> None:
+        instrument_ids = tuple(f"{index + 1:06d}.SZ" for index in range(30))
+        weights = ["0", *(["3.3"] * 20), *(["3.8"] * 8), "3.6"]
+        memberships, admission = _pit_fixture(
+            instrument_ids,
+            weights_override=weights,
+        )
+        af._verify_pit_admission(
+            SimpleNamespace(pit_admission=admission),
+            memberships,
+        )
+
+    def test_manifest_cannot_inflate_zero_weight_rounding_tolerance(self) -> None:
+        instrument_ids = tuple(f"{index + 1:06d}.SZ" for index in range(30))
+        weights = ["0", *(["3.3"] * 20), *(["3.8"] * 8), "3.6"]
+        memberships, admission = _pit_fixture(
+            instrument_ids,
+            weights_override=weights,
+        )
+        manifest = json.loads(json.dumps(admission.manifest))
+        for snapshot in manifest["snapshots"]:
+            snapshot["weight_tolerance"] = "400"
+        manifest.pop("manifest_sha256")
+        manifest = _self_hash(manifest, "manifest_sha256")
+
+        with self.assertRaisesRegex(
+            AlphaFeasibilityDataError,
+            "PIT manifest weight check failed",
+        ):
+            af._verify_pit_admission(
+                SimpleNamespace(
+                    pit_admission=PITAdmissionArtifacts(
+                        coverage_report=admission.coverage_report,
+                        manifest=manifest,
+                    )
+                ),
+                memberships,
+            )
+
+    def test_high_precision_weight_sum_is_not_rounded_into_tolerance(self) -> None:
+        weights = [
+            "100.000000000000000000000000000001",
+            *(["0.000000000000000000000000000001"] * 29),
+        ]
+        exact = af._exact_decimal_sum([D(value) for value in weights])
+        self.assertEqual(exact, D("100.000000000000000000000000000030"))
+
+        instrument_ids = tuple(f"{index + 1:06d}.SZ" for index in range(30))
+        memberships, admission = _pit_fixture(
+            instrument_ids,
+            weights_override=weights,
+        )
+        with self.assertRaisesRegex(
+            AlphaFeasibilityDataError,
+            "PIT manifest weight check failed",
+        ):
+            af._verify_pit_admission(
+                SimpleNamespace(pit_admission=admission),
+                memberships,
+            )
+
+    def test_consumer_rejects_weights_outside_adapter_decimal_domain(self) -> None:
+        instrument_ids = tuple(f"{index + 1:06d}.SZ" for index in range(30))
+        cases = (
+            ["3.343" + "0" * 997, *(["3.333"] * 29)],
+            ["03.343", *(["3.333"] * 29)],
+        )
+        for weights in cases:
+            with self.subTest(first_weight_length=len(weights[0])):
+                memberships, admission = _pit_fixture(
+                    instrument_ids,
+                    weights_override=weights,
+                )
+                with self.assertRaisesRegex(
+                    AlphaFeasibilityDataError,
+                    "PIT member weight format is invalid",
+                ):
+                    af._verify_pit_admission(
+                        SimpleNamespace(pit_admission=admission),
+                        memberships,
+                    )
+
+    def test_consumer_explicitly_rejects_legacy_pit_v1_artifacts(self) -> None:
+        instrument_ids = tuple(f"{index + 1:06d}.SZ" for index in range(30))
+        memberships, admission = _pit_fixture(instrument_ids)
+        report = json.loads(json.dumps(admission.coverage_report))
+        manifest = json.loads(json.dumps(admission.manifest))
+        report["schema_version"] = "pit-membership-coverage-report.v1"
+        manifest["schema_version"] = "pit-membership-manifest.v1"
+        report.pop("report_sha256")
+        manifest.pop("manifest_sha256")
+        legacy = PITAdmissionArtifacts(
+            coverage_report=_self_hash(report, "report_sha256"),
+            manifest=_self_hash(manifest, "manifest_sha256"),
+        )
+
+        with self.assertRaisesRegex(
+            AlphaFeasibilityDataError,
+            "PIT admission status is not complete",
+        ):
+            af._verify_pit_admission(
+                SimpleNamespace(pit_admission=legacy),
+                memberships,
+            )
 
 
 class AlphaFeasibilityEngineTests(unittest.TestCase):

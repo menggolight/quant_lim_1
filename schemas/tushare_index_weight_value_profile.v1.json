@@ -1,0 +1,347 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "https://quant.local/schemas/tushare_index_weight_value_profile.v1.json",
+  "title": "P1.4D safe index_weight required-value profile",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "baseline_parser_commit",
+    "raw_transport_sha256",
+    "response_byte_count",
+    "token_leak_check",
+    "sensitive_field_name_scan",
+    "nonfinite_json_check",
+    "response_size_check",
+    "post_cutoff_market_date_check",
+    "decimal_magnitude_check",
+    "data_row_count",
+    "observed_data_fields",
+    "per_field_json_type_counts",
+    "per_field_null_counts",
+    "per_field_unique_counts",
+    "duplicate_primary_key_count",
+    "first_failing_row_index",
+    "first_failing_field",
+    "first_failing_json_type",
+    "first_failing_predicate",
+    "first_failing_projected_row",
+    "first_failing_row_sha256",
+    "index_code_profile",
+    "con_code_profile",
+    "trade_date_profile",
+    "weight_profile",
+    "locked_test_status",
+    "locked_test_consumed",
+    "profile_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "tushare-index-weight-value-profile.v1"},
+    "baseline_parser_commit": {
+      "const": "a0fadfc890d26be16e1d4c06e556674a59aa4be6"
+    },
+    "raw_transport_sha256": {"$ref": "#/$defs/sha256"},
+    "response_byte_count": {"type": "integer", "minimum": 1, "maximum": 2097152},
+    "token_leak_check": {"const": "PASSED"},
+    "sensitive_field_name_scan": {"const": "PASSED"},
+    "nonfinite_json_check": {"const": "PASSED"},
+    "response_size_check": {"const": "PASSED"},
+    "post_cutoff_market_date_check": {"const": "PASSED"},
+    "decimal_magnitude_check": {"const": "PASSED"},
+    "data_row_count": {"type": "integer", "minimum": 0, "maximum": 10000},
+    "observed_data_fields": {
+      "type": "array",
+      "minItems": 1,
+      "maxItems": 64,
+      "uniqueItems": true,
+      "items": {"$ref": "#/$defs/field_name"}
+    },
+    "per_field_json_type_counts": {"$ref": "#/$defs/per_field_type_counts"},
+    "per_field_null_counts": {"$ref": "#/$defs/per_field_count"},
+    "per_field_unique_counts": {"$ref": "#/$defs/per_field_count"},
+    "duplicate_primary_key_count": {"$ref": "#/$defs/count"},
+    "first_failing_row_index": {
+      "oneOf": [
+        {"type": "null"},
+        {"type": "integer", "minimum": 0, "maximum": 9999}
+      ]
+    },
+    "first_failing_field": {
+      "oneOf": [
+        {"type": "null"},
+        {"enum": ["index_code", "con_code", "trade_date", "weight", "primary_key"]}
+      ]
+    },
+    "first_failing_json_type": {
+      "oneOf": [{"type": "null"}, {"$ref": "#/$defs/json_type"}]
+    },
+    "first_failing_predicate": {
+      "oneOf": [
+        {"type": "null"},
+        {
+          "enum": [
+            "index_code_mismatch",
+            "con_code_non_string",
+            "con_code_format_invalid",
+            "con_code_exchange_not_allowed",
+            "trade_date_integer_rejected",
+            "trade_date_type_rejected",
+            "trade_date_format_invalid",
+            "trade_date_calendar_invalid",
+            "trade_date_out_of_window",
+            "weight_bool",
+            "weight_null",
+            "weight_type_rejected",
+            "weight_not_numeric",
+            "weight_nonfinite",
+            "weight_negative",
+            "weight_decimal_scale_below_three",
+            "weight_invalid_unknown",
+            "duplicate_primary_key",
+            "row_unexpectedly_isolated"
+          ]
+        }
+      ]
+    },
+    "first_failing_projected_row": {
+      "oneOf": [{"type": "null"}, {"$ref": "#/$defs/projected_row"}]
+    },
+    "first_failing_row_sha256": {
+      "oneOf": [{"type": "null"}, {"$ref": "#/$defs/sha256"}]
+    },
+    "index_code_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "unique_values",
+        "non_string_count",
+        "requested_index_mismatch_count",
+        "invalid_code_format_count"
+      ],
+      "properties": {
+        "unique_values": {
+          "type": "array",
+          "maxItems": 10000,
+          "uniqueItems": true,
+          "items": {"type": "string", "maxLength": 64}
+        },
+        "non_string_count": {"$ref": "#/$defs/count"},
+        "requested_index_mismatch_count": {"$ref": "#/$defs/count"},
+        "invalid_code_format_count": {"$ref": "#/$defs/count"}
+      }
+    },
+    "con_code_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "non_string_count",
+        "invalid_code_format_count",
+        "SH_count",
+        "SZ_count",
+        "other_exchange_count"
+      ],
+      "properties": {
+        "non_string_count": {"$ref": "#/$defs/count"},
+        "invalid_code_format_count": {"$ref": "#/$defs/count"},
+        "SH_count": {"$ref": "#/$defs/count"},
+        "SZ_count": {"$ref": "#/$defs/count"},
+        "other_exchange_count": {"$ref": "#/$defs/count"}
+      }
+    },
+    "trade_date_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "json_type_counts",
+        "format_YYYYMMDD_count",
+        "integer_8_digit_count",
+        "invalid_date_count",
+        "min_date",
+        "max_date",
+        "dates_outside_requested_month",
+        "unique_trade_dates"
+      ],
+      "properties": {
+        "json_type_counts": {"$ref": "#/$defs/json_type_counts"},
+        "format_YYYYMMDD_count": {"$ref": "#/$defs/count"},
+        "integer_8_digit_count": {"$ref": "#/$defs/count"},
+        "invalid_date_count": {"$ref": "#/$defs/count"},
+        "min_date": {"$ref": "#/$defs/nullable_date8"},
+        "max_date": {"$ref": "#/$defs/nullable_date8"},
+        "dates_outside_requested_month": {"$ref": "#/$defs/count"},
+        "unique_trade_dates": {
+          "type": "array",
+          "maxItems": 10000,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[0-9]{8}$"}
+        }
+      }
+    },
+    "weight_profile": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "json_type_counts",
+        "numeric_number_count",
+        "numeric_string_count",
+        "plain_numeric_string_count",
+        "null_count",
+        "bool_count",
+        "nonfinite_count",
+        "magnitude_out_of_bounds_count",
+        "negative_count",
+        "zero_count",
+        "positive_count",
+        "minimum",
+        "maximum",
+        "sum_by_trade_date",
+        "decimal_scale_distribution"
+      ],
+      "properties": {
+        "json_type_counts": {"$ref": "#/$defs/json_type_counts"},
+        "numeric_number_count": {"$ref": "#/$defs/count"},
+        "numeric_string_count": {"$ref": "#/$defs/count"},
+        "plain_numeric_string_count": {"$ref": "#/$defs/count"},
+        "null_count": {"$ref": "#/$defs/count"},
+        "bool_count": {"$ref": "#/$defs/count"},
+        "nonfinite_count": {"$ref": "#/$defs/count"},
+        "magnitude_out_of_bounds_count": {"$ref": "#/$defs/count"},
+        "negative_count": {"$ref": "#/$defs/count"},
+        "zero_count": {"$ref": "#/$defs/count"},
+        "positive_count": {"$ref": "#/$defs/count"},
+        "minimum": {"$ref": "#/$defs/nullable_decimal"},
+        "maximum": {"$ref": "#/$defs/nullable_decimal"},
+        "sum_by_trade_date": {
+          "type": "object",
+          "maxProperties": 10000,
+          "propertyNames": {"pattern": "^[0-9]{8}$"},
+          "additionalProperties": {"$ref": "#/$defs/decimal"}
+        },
+        "decimal_scale_distribution": {
+          "type": "object",
+          "maxProperties": 1000,
+          "propertyNames": {"pattern": "^(?:0|[1-9][0-9]{0,2})$"},
+          "additionalProperties": {"$ref": "#/$defs/count"}
+        }
+      }
+    },
+    "locked_test_status": {"$ref": "#/$defs/locked"},
+    "locked_test_consumed": {"const": false},
+    "profile_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"first_failing_row_index": {"type": "null"}}},
+      "then": {
+        "properties": {
+          "first_failing_field": {"type": "null"},
+          "first_failing_json_type": {"type": "null"},
+          "first_failing_predicate": {"type": "null"},
+          "first_failing_projected_row": {"type": "null"},
+          "first_failing_row_sha256": {"type": "null"}
+        }
+      },
+      "else": {
+        "properties": {
+          "first_failing_field": {"not": {"type": "null"}},
+          "first_failing_json_type": {"not": {"type": "null"}},
+          "first_failing_predicate": {"not": {"type": "null"}},
+          "first_failing_projected_row": {"not": {"type": "null"}},
+          "first_failing_row_sha256": {"not": {"type": "null"}}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "count": {"type": "integer", "minimum": 0, "maximum": 10000},
+    "field_name": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$"},
+    "json_type": {
+      "enum": ["null", "boolean", "integer", "number", "string", "array", "object", "unknown"]
+    },
+    "json_type_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "properties": {
+        "null": {"$ref": "#/$defs/count"},
+        "boolean": {"$ref": "#/$defs/count"},
+        "integer": {"$ref": "#/$defs/count"},
+        "number": {"$ref": "#/$defs/count"},
+        "string": {"$ref": "#/$defs/count"},
+        "array": {"$ref": "#/$defs/count"},
+        "object": {"$ref": "#/$defs/count"},
+        "unknown": {"$ref": "#/$defs/count"}
+      }
+    },
+    "per_field_type_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index_code", "con_code", "trade_date", "weight"],
+      "properties": {
+        "index_code": {"$ref": "#/$defs/json_type_counts"},
+        "con_code": {"$ref": "#/$defs/json_type_counts"},
+        "trade_date": {"$ref": "#/$defs/json_type_counts"},
+        "weight": {"$ref": "#/$defs/json_type_counts"}
+      }
+    },
+    "per_field_count": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index_code", "con_code", "trade_date", "weight"],
+      "properties": {
+        "index_code": {"$ref": "#/$defs/count"},
+        "con_code": {"$ref": "#/$defs/count"},
+        "trade_date": {"$ref": "#/$defs/count"},
+        "weight": {"$ref": "#/$defs/count"}
+      }
+    },
+    "scalar": {
+      "anyOf": [
+        {"type": "null"},
+        {"type": "boolean"},
+        {"type": "integer"},
+        {"type": "number"},
+        {"type": "string", "maxLength": 256}
+      ]
+    },
+    "projected_row": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index_code", "con_code", "trade_date", "weight"],
+      "properties": {
+        "index_code": {"$ref": "#/$defs/safe_projected_value"},
+        "con_code": {"$ref": "#/$defs/safe_projected_value"},
+        "trade_date": {"$ref": "#/$defs/safe_projected_value"},
+        "weight": {"$ref": "#/$defs/safe_projected_value"}
+      }
+    },
+    "safe_projected_value": {
+      "anyOf": [
+        {"$ref": "#/$defs/scalar"},
+        {
+          "type": "object",
+          "additionalProperties": false,
+          "required": ["redacted_json_type", "value_sha256"],
+          "properties": {
+            "redacted_json_type": {"$ref": "#/$defs/json_type"},
+            "value_sha256": {"$ref": "#/$defs/sha256"}
+          }
+        }
+      ]
+    },
+    "date8": {"type": "string", "pattern": "^[0-9]{8}$"},
+    "nullable_date8": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/date8"}]},
+    "decimal": {"type": "string", "pattern": "^-?(?:0|[1-9][0-9]*)(?:\\.[0-9]+)?$"},
+    "nullable_decimal": {"oneOf": [{"type": "null"}, {"$ref": "#/$defs/decimal"}]},
+    "locked": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["access", "download", "run"],
+      "properties": {
+        "access": {"const": "NOT_ACCESSED"},
+        "download": {"const": "NOT_DOWNLOADED"},
+        "run": {"const": "NOT_RUN"}
+      }
+    }
+  }
+}

@@ -22,8 +22,9 @@ JSON Schema 负责结构，`research/market_data/validation.py` 在无网络依�
 ## 其他契约
 
 - `technical_alpha_feasibility_experiment.v2.json`：冻结P1.3的6接口、`stock_basic`延期/零请求、121日个股资格、绝对日期截止，以及不变的ranker/Exposure、PIT、总回报、D+1开盘时序、小数仓位、成本与GO/NO_GO门；V1仅保留历史兼容。
-- `pit_membership_coverage_report.v1.json`、`pit_membership_manifest.v1.json`：分别约束73次逐月请求检查和合法截面/成员并集；非800截面必须携带受控指数公司调整说明，缺月或哈希/权重失败不得进入Alpha。
+- `pit_membership_coverage_report.v2.json`、`pit_membership_manifest.v2.json`：当前P1契约，分别约束73次逐月请求检查和合法截面/成员并集；成员权重接受有界普通十进制混合精度，总和容差固定为非零权重最粗精度的单个半单位。V1保留为历史Schema，但当前生产端和策略消费者显式拒绝。
 - `tushare_alpha_feasibility_task_response.v4.json`、`tushare_alpha_feasibility_quarantine.v4.json`：绑定服务端实际/必需/缺失/额外字段、顺序诊断、provider/normalized双内容哈希、额外列逐列哈希和安全行数；旧v2/v3证据只读兼容，不重签覆盖。
+- `tushare_index_weight_value_request.v1.json`、`tushare_index_weight_value_profile.v1.json`、`tushare_index_weight_offline_replay.v1.json`：约束P1.4D唯一一次2017-12请求保留、原始正文安全扫描后的必需值画像，以及同一raw两次确定性离线重放receipt；原始正文始终位于忽略Git的create-only目录，Schema或诊断通过不授权其余72个月、Development/Validation、Locked Test、Paper或交易。
 - `tushare_alpha_feasibility_manifest.v3.json`：汇总6接口真实请求计数、`stock_basic`零请求/延期状态、逐决策候选与历史不足数、首次停牌无初始价数量、异常行情缺口及六类数据集覆盖/哈希；V1/V2仅保留历史兼容。
 - `technical_alpha_feasibility_report.v3.json`：在四种终态和Development/Validation双情景指标上绑定首个 `index_weight` 字段证据、首次停牌无初始价数量与异常缺口计数；READY要求缺口为0，blocked指标仍必须为`null`，Locked Test和全部执行权限固定关闭。V1/V2仅保留历史兼容。
 - `technical_momentum_experiment.v1.json`：当前唯一正式研究主线 `a-share-technical-momentum-adaptive-v1` 的独立冻结规格；哈希绑定既有 Technical Alpha/Exposure 真源，锁定九类数据、双价格、最多3只/40%、基础与压力成本，以及 Development/Validation/Locked 日期。Locked 固定 `NOT_RUN`、`consumed=false`，安全权限全关闭。

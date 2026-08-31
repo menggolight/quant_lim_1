@@ -56,9 +56,9 @@
     "expected_component_count": 800,
     "non_800_policy": "block_unless_controlled_index_company_adjustment_evidence",
     "weight_minimum": "0",
-    "minimum_weight_decimal_places": 3,
+    "minimum_weight_decimal_places": 0,
     "weight_sum_target": "100",
-    "weight_sum_tolerance": "sum_half_unit_in_last_reported_decimal_place",
+    "weight_sum_tolerance": "half_unit_in_coarsest_nonzero_reported_decimal_place",
     "future_snapshot_backfill_forbidden": true
   },
   "requests": {
