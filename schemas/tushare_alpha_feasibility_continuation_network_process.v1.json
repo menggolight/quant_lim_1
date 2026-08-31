@@ -1,0 +1,35 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tushare_alpha_feasibility_continuation_network_process.v1.json",
+  "title": "P1.5C One-Shot Network Process Marker V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "network_process_id", "started_at",
+    "continuation_run_id", "continuation_claim_sha256",
+    "reuse_manifest_sha256", "parent_reuse_stage_sha256",
+    "completed_request_fingerprint_count_at_start",
+    "first_unfinished_task_id", "next_attempt_number",
+    "network_process_count", "locked_test_status", "locked_test_consumed",
+    "marker_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "tushare-alpha-feasibility-continuation-network-process.v1"},
+    "network_process_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{2,95}$"},
+    "started_at": {"type": "string", "format": "date-time"},
+    "continuation_run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{2,95}$"},
+    "continuation_claim_sha256": {"$ref": "#/$defs/sha256"},
+    "reuse_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "parent_reuse_stage_sha256": {"$ref": "#/$defs/sha256"},
+    "completed_request_fingerprint_count_at_start": {"const": 19},
+    "first_unfinished_task_id": {"const": "index_weight-63ab4e7a5df236828d4f750812809bc78a6e1f8e9cfdad64c8128431da6a741b"},
+    "next_attempt_number": {"const": 2},
+    "network_process_count": {"const": 1},
+    "locked_test_status": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/locked"},
+    "locked_test_consumed": {"const": false},
+    "marker_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"}
+  }
+}

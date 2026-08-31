@@ -1,0 +1,139 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tushare_alpha_feasibility_business_error.v1.json",
+  "title": "Tushare Alpha Feasibility Business Error Attempt V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "state",
+    "task_id",
+    "endpoint",
+    "plan_sha256",
+    "task_sha256",
+    "attempt_number",
+    "network_request_count",
+    "request_count_semantics",
+    "evidence",
+    "raw_error_artifact_sha256",
+    "raw_error_persisted",
+    "locked_test_status",
+    "locked_test_consumed",
+    "business_error_artifact_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "tushare-alpha-feasibility-business-error.v1"},
+    "state": {"const": "BUSINESS_ERROR_RESPONSE_SCANNED"},
+    "task_id": {"type": "string", "pattern": "^[a-z_]+-[0-9a-f]{64}$"},
+    "endpoint": {"enum": ["trade_cal", "index_weight", "daily", "adj_factor", "index_daily", "suspend_d", "stock_basic"]},
+    "plan_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+    "task_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+    "attempt_number": {"type": "integer", "minimum": 1},
+    "network_request_count": {"const": 1},
+    "request_count_semantics": {"const": "conservative_durable_pre_transport_attempt_claim"},
+    "evidence": {"$ref": "#/$defs/safe_response_semantics"},
+    "raw_error_artifact_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+    "raw_error_persisted": {"const": true},
+    "locked_test_status": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/locked"},
+    "locked_test_consumed": {"const": false},
+    "business_error_artifact_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"}
+  },
+  "$defs": {
+    "nullable_sha256": {
+      "oneOf": [
+        {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+        {"type": "null"}
+      ]
+    },
+    "classification": {
+      "enum": [
+        "RATE_LIMITED",
+        "PERMISSION_DENIED",
+        "INVALID_PARAMETER",
+        "DATA_UNAVAILABLE",
+        "UPSTREAM_SERVER_ERROR",
+        "ACCOUNT_OR_QUOTA_LIMIT",
+        "UPSTREAM_UNKNOWN_ERROR"
+      ]
+    },
+    "safe_detail_projection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["json_type", "value", "sanitized_text", "semantic_category"],
+      "properties": {
+        "json_type": {"enum": ["null", "boolean", "integer", "number", "string", "array", "object"]},
+        "value": {},
+        "sanitized_text": {"type": "string", "maxLength": 1000},
+        "semantic_category": {
+          "oneOf": [
+            {"$ref": "#/$defs/classification"},
+            {"type": "null"}
+          ]
+        }
+      }
+    },
+    "safe_response_semantics": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "business_code",
+        "classification",
+        "sanitized_msg",
+        "msg_sha256",
+        "detail_type",
+        "safe_detail_projection",
+        "detail_sha256",
+        "request_id_sha256",
+        "raw_transport_sha256",
+        "response_body_sha256",
+        "response_byte_count",
+        "sanitized_params",
+        "requested_fields",
+        "requested_at",
+        "completed_at",
+        "retry_after_seconds"
+      ],
+      "properties": {
+        "business_code": {"type": "integer", "not": {"const": 0}},
+        "classification": {"$ref": "#/$defs/classification"},
+        "sanitized_msg": {"type": "string", "maxLength": 1000},
+        "msg_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+        "detail_type": {
+          "oneOf": [
+            {"enum": ["null", "boolean", "integer", "number", "string", "array", "object"]},
+            {"type": "null"}
+          ]
+        },
+        "safe_detail_projection": {
+          "oneOf": [
+            {"$ref": "#/$defs/safe_detail_projection"},
+            {"type": "null"}
+          ]
+        },
+        "detail_sha256": {"$ref": "#/$defs/nullable_sha256"},
+        "request_id_sha256": {"$ref": "#/$defs/nullable_sha256"},
+        "raw_transport_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+        "response_body_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+        "response_byte_count": {"type": "integer", "minimum": 1},
+        "sanitized_params": {
+          "type": "object",
+          "additionalProperties": {"type": "string"}
+        },
+        "requested_fields": {
+          "type": "array",
+          "minItems": 1,
+          "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^[A-Za-z_][A-Za-z0-9_]{0,63}$"}
+        },
+        "requested_at": {"type": "string", "format": "date-time"},
+        "completed_at": {"type": "string", "format": "date-time"},
+        "retry_after_seconds": {
+          "oneOf": [
+            {"type": "integer", "minimum": 1, "maximum": 300},
+            {"type": "null"}
+          ]
+        }
+      }
+    }
+  }
+}

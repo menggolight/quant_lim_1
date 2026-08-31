@@ -305,38 +305,151 @@ class TushareResponseEnvelopeTests(unittest.TestCase):
         with self.assertRaises(AlphaFeasibilityDataError) as malformed:
             self._validate(b'{"code":0')
         self.assertEqual(malformed.exception.code, "unknown_non_json_value")
+        self.assertIn("invalid_response_json", taf.ADAPTER_PROTOCOL_FAILURES)
 
     def test_nonzero_code_is_classified_and_extensions_do_not_bypass_it(self):
         classifications = (
-            (2002, "opaque upstream text", "permission"),
-            (-1, "permission denied snapshot 2024-01-02", "permission"),
-            (-1, "invalid parameter supplied", "invalid_parameter"),
-            (-1, "too many requests", "rate_limit"),
-            (-1, "service unavailable", "server_internal"),
+            (2002, "opaque upstream text", {}, "UPSTREAM_UNKNOWN_ERROR", "unknown"),
+            (2002, "corporate serverless concatenated quotable parameterized", {}, "UPSTREAM_UNKNOWN_ERROR", "unknown"),
+            (-1, "积分不足 quota", {}, "PERMISSION_DENIED", "permission"),
+            (-1, "每分钟访问次数受限且没有权限", {}, "RATE_LIMITED", "rate_limit"),
+            (-1, "权限", {}, "PERMISSION_DENIED", "permission"),
+            (-1, "额度不足", {"note": "访问过快"}, "RATE_LIMITED", "rate_limit"),
+            (-1, "日期格式错误", {"note": "该日期无数据"}, "INVALID_PARAMETER", "invalid_parameter"),
+            (-1, "参数", {}, "INVALID_PARAMETER", "invalid_parameter"),
+            (-1, "该日期无数据", {"note": "服务异常"}, "DATA_UNAVAILABLE", "data_unavailable"),
+            (-1, "系统错误", {"note": "总量限制"}, "UPSTREAM_SERVER_ERROR", "server_internal"),
+            (-1, "请求总量已达", {}, "ACCOUNT_OR_QUOTA_LIMIT", "authentication_account"),
+            (-1, "总量", {}, "ACCOUNT_OR_QUOTA_LIMIT", "authentication_account"),
+            (-1, "额度", {}, "ACCOUNT_OR_QUOTA_LIMIT", "authentication_account"),
         )
-        for code, message, category in classifications:
-            with self.subTest(category=category):
+        for code, message, detail, classification, category in classifications:
+            with self.subTest(classification=classification):
                 raw = self._payload(
                     code=code,
                     msg=message,
                     data={"reason": "controlled error object"},
                     request_id="error-request",
-                    detail={"provider": "opaque error detail"},
+                    detail=detail,
                     trace_id="future-extension",
                 )
                 with self.assertRaises(AlphaFeasibilityDataError) as raised:
                     self._validate(raw)
-                self.assertEqual(raised.exception.code, f"upstream_{category}_error")
+                self.assertEqual(
+                    raised.exception.code,
+                    taf._BUSINESS_CLASSIFICATION_TO_FAILURE_CODE[classification],
+                )
                 self.assertEqual(raised.exception.diagnostic["upstream_code"], code)
                 self.assertEqual(
                     raised.exception.diagnostic["upstream_error_category"], category
                 )
-                diagnostic = json.dumps(
-                    dict(raised.exception.diagnostic), sort_keys=True
+                self.assertEqual(
+                    raised.exception.diagnostic["business_error_classification"],
+                    classification,
                 )
-                self.assertNotIn(message, diagnostic)
+                diagnostic = json.dumps(
+                    dict(raised.exception.diagnostic),
+                    sort_keys=True,
+                    ensure_ascii=False,
+                )
                 self.assertNotIn("controlled error object", diagnostic)
-                self.assertNotIn("opaque error detail", diagnostic)
+                self.assertNotIn("error-request", diagnostic)
+
+    def test_safe_response_semantics_preserves_bounded_nonsecret_detail(self):
+        detail = {
+            "limit": 100,
+            "remaining": 0,
+            "reset": "2023-12-31",
+            "retry_after": 30,
+            "nested": [{"message": "访问频率过高"}],
+        }
+        raw = self._payload(
+            code=-1,
+            msg="访问过快",
+            data=None,
+            request_id="request-id-must-not-persist-in-evidence",
+            detail=detail,
+        )
+        evidence = taf.extract_safe_response_semantics(
+            raw,
+            task=self.task,
+            token=TOKEN,
+            requested_at=NOW,
+            completed_at=NOW + timedelta(seconds=1),
+        )
+        self.assertEqual(evidence.classification, "RATE_LIMITED")
+        self.assertEqual(evidence.retry_after_seconds, 30)
+        projection = evidence.safe_detail_projection
+        self.assertEqual(projection["value"], detail)
+        self.assertEqual(projection["semantic_category"], "RATE_LIMITED")
+        serialized = json.dumps(evidence.to_dict(), ensure_ascii=False)
+        self.assertNotIn("request-id-must-not-persist-in-evidence", serialized)
+        self.assertEqual(
+            evidence.response_body_sha256, hashlib.sha256(raw).hexdigest()
+        )
+        self.assertEqual(
+            evidence.raw_transport_sha256, evidence.response_body_sha256
+        )
+        self.assertEqual(
+            evidence.request_id_sha256,
+            hashlib.sha256(
+                taf._canonical_transport_json_bytes(
+                    "request-id-must-not-persist-in-evidence"
+                )
+            ).hexdigest(),
+        )
+
+        success = taf.extract_safe_response_semantics(
+            self._payload(detail={"limit": 100}),
+            task=self.task,
+            token=TOKEN,
+            requested_at=NOW,
+            completed_at=NOW,
+        )
+        self.assertEqual(success.business_code, 0)
+        self.assertIsNone(success.classification)
+        self.assertEqual(success.safe_detail_projection["value"], {"limit": 100})
+
+    def test_safe_detail_projection_rejects_secret_future_and_bounds(self):
+        cases = (
+            (
+                self._payload(
+                    code=-1,
+                    msg="server error",
+                    data=None,
+                    detail={"nested": {"password": "must-not-survive"}},
+                ),
+                "transport_extension_secret_detected",
+            ),
+            (
+                self._payload(
+                    code=-1,
+                    msg="server error 2025-01-02",
+                    data=None,
+                    detail={"limit": 1},
+                ),
+                "post_cutoff_response_date",
+            ),
+            (
+                self._payload(
+                    code=-1,
+                    msg="server error",
+                    data=None,
+                    detail=[0] * (taf.MAXIMUM_SAFE_DETAIL_PROJECTION_ELEMENTS + 1),
+                ),
+                "safe_detail_projection_too_large",
+            ),
+        )
+        for raw, expected in cases:
+            with self.subTest(expected=expected):
+                with self.assertRaisesRegex(AlphaFeasibilityDataError, expected):
+                    taf.extract_safe_response_semantics(
+                        raw,
+                        task=self.task,
+                        token=TOKEN,
+                        requested_at=NOW,
+                        completed_at=NOW,
+                    )
 
     def test_data_internal_contract_keeps_stable_outer_code_and_precise_subclass(self):
         invalid_payloads = (
@@ -2402,6 +2515,35 @@ class P15DataLaneTests(unittest.TestCase):
         }
         return json.dumps(payload, separators=(",", ":")).encode("utf-8")
 
+    def _stage_synthetic_continuation_prefix(self, root):
+        """Stage replayable tasks 1-19 plus the inherited task-20 attempt."""
+
+        store = CreateOnlyTaskStore(root)
+        for task in self.plan.pit_tasks[:19]:
+            rows = self._rows()
+            for row in rows:
+                row["trade_date"] = task.params["end_date"]
+            store.execute(
+                task,
+                token=TOKEN,
+                transport=FakeTransport(lambda **_kwargs: self._raw(rows)),
+                timeout_seconds=30,
+                maximum_response_bytes=2097152,
+                persist_full_raw_transport=True,
+            )
+        task20 = self.plan.pit_tasks[19]
+        taf._write_json_create_only(
+            store.started_path(task20),
+            taf._started_payload(task20, recoverable=True),
+            token=TOKEN,
+        )
+        taf._write_json_create_only(
+            store.attempt_path(task20, 1),
+            taf._attempt_payload(task20, 1),
+            token=TOKEN,
+        )
+        return store
+
     def test_fixed_weight_hard_gate_warning_and_zero_evidence(self):
         warning_rows = self._rows(last_weight="0.19")
         result = build_pit_membership_artifacts(
@@ -2548,6 +2690,533 @@ class P15DataLaneTests(unittest.TestCase):
                 )
             self.assertEqual(len(first.calls), 1)
             self.assertEqual(len(second.calls), 0)
+
+    def test_business_error_evidence_and_single_rate_retry_are_durable(self):
+        first_requested = NOW
+        first_completed = NOW + timedelta(seconds=1)
+        first_clock_values = iter((first_requested, first_completed))
+        error_raw = json.dumps(
+            {
+                "code": -1,
+                "msg": "访问过快",
+                "data": None,
+                "request_id": "full-request-id-must-only-exist-in-deep-scanned-raw",
+                "detail": {
+                    "limit": 100,
+                    "remaining": 0,
+                    "reset": "2023-12-31",
+                    "retry_after": 15,
+                    "message": "访问频率过高",
+                },
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        success_raw = self._raw(self._rows(), request_id="success-request-id")
+        with tempfile.TemporaryDirectory(dir=taf.DATA_TMP_ROOT) as temporary:
+            store = CreateOnlyTaskStore(temporary)
+            with self.assertRaisesRegex(
+                AlphaFeasibilityDataError, "upstream_rate_limit_error"
+            ):
+                store.execute(
+                    self.task,
+                    token=TOKEN,
+                    transport=FakeTransport(lambda **_kwargs: error_raw),
+                    timeout_seconds=30,
+                    maximum_response_bytes=2097152,
+                    recover_interrupted_attempts=True,
+                    maximum_attempts_per_fingerprint=3,
+                    persist_full_raw_transport=True,
+                    clock=lambda: next(first_clock_values),
+                    defer_retryable_business_errors=True,
+                )
+            self.assertFalse(store.quarantine_path(self.task).exists())
+            self.assertEqual(store.raw_error_path(self.task, 1).read_bytes(), error_raw)
+            business_error = json.loads(
+                store.business_error_path(self.task, 1).read_text(encoding="utf-8")
+            )
+            validate_json_schema(
+                business_error,
+                ROOT / "schemas" / "tushare_alpha_feasibility_business_error.v1.json",
+            )
+            evidence = business_error["evidence"]
+            self.assertEqual(evidence["classification"], "RATE_LIMITED")
+            self.assertEqual(evidence["retry_after_seconds"], 15)
+            self.assertEqual(evidence["safe_detail_projection"]["value"]["limit"], 100)
+            self.assertNotIn(
+                "full-request-id-must-only-exist-in-deep-scanned-raw",
+                json.dumps(business_error, ensure_ascii=False),
+            )
+            self.assertEqual(
+                evidence["response_body_sha256"], hashlib.sha256(error_raw).hexdigest()
+            )
+            self.assertEqual(evidence["raw_transport_sha256"], evidence["response_body_sha256"])
+            self.assertEqual(evidence["response_byte_count"], len(error_raw))
+            original_business_error_bytes = store.business_error_path(
+                self.task, 1
+            ).read_bytes()
+            resigned = json.loads(original_business_error_bytes)
+            resigned["evidence"]["safe_detail_projection"]["value"][
+                "message"
+            ] = "password=forged"
+            unsigned = dict(resigned)
+            unsigned.pop("business_error_artifact_sha256")
+            resigned["business_error_artifact_sha256"] = canonical_sha256(unsigned)
+            store.business_error_path(self.task, 1).write_bytes(
+                canonical_json_bytes(resigned)
+            )
+            with self.assertRaisesRegex(
+                AlphaFeasibilityDataError, "business_error_evidence_invalid"
+            ):
+                store._load_business_errors(self.task)
+            store.business_error_path(self.task, 1).write_bytes(
+                original_business_error_bytes
+            )
+
+            sleep_calls = []
+            retry_clock_values = iter(
+                (
+                    first_completed + timedelta(seconds=5),
+                    first_completed + timedelta(seconds=15),
+                    first_completed + timedelta(seconds=16),
+                )
+            )
+            completed = taf.retry_business_error_once(
+                store,
+                self.task,
+                token=TOKEN,
+                transport=FakeTransport(lambda **_kwargs: success_raw),
+                timeout_seconds=30,
+                maximum_response_bytes=2097152,
+                maximum_attempts_per_fingerprint=3,
+                clock=lambda: next(retry_clock_values),
+                sleeper=sleep_calls.append,
+            )
+            self.assertEqual(sleep_calls, [10.0])
+            self.assertEqual(completed.network_request_count, 2)
+            self.assertTrue(store.is_complete(self.task))
+            self.assertEqual(
+                taf.actual_tushare_request_count_by_endpoint(
+                    temporary,
+                    self.plan.pit_tasks,
+                    plan_sha256=self.plan.plan_sha256,
+                )["index_weight"],
+                2,
+            )
+            with self.assertRaisesRegex(
+                AlphaFeasibilityDataError, "business_error_retry_already_consumed"
+            ):
+                taf.retry_business_error_once(
+                    store,
+                    self.task,
+                    token=TOKEN,
+                    transport=FakeTransport(lambda **_kwargs: success_raw),
+                    timeout_seconds=30,
+                    maximum_response_bytes=2097152,
+                    maximum_attempts_per_fingerprint=3,
+                    clock=lambda: first_completed + timedelta(seconds=30),
+                    sleeper=lambda _seconds: None,
+                )
+
+        self.assertEqual(
+            taf.business_error_retry_policy(
+                "RATE_LIMITED", retry_after_seconds=999
+            ).delay_seconds,
+            taf.Decimal("65"),
+        )
+        self.assertEqual(
+            taf.business_error_retry_policy(
+                "UPSTREAM_SERVER_ERROR", retry_after_seconds=None
+            ).delay_seconds,
+            taf.Decimal("12"),
+        )
+        self.assertEqual(
+            taf.business_error_retry_policy(
+                "PERMISSION_DENIED", retry_after_seconds=None
+            ).maximum_additional_attempts,
+            0,
+        )
+
+    def test_execute_tasks_continuation_consumes_parent_attempt_and_server_retry(self):
+        server_error = json.dumps(
+            {
+                "code": -1,
+                "msg": "系统错误",
+                "data": None,
+                "detail": {"message": "服务异常"},
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        success = self._raw(self._rows())
+        with tempfile.TemporaryDirectory(dir=taf.DATA_TMP_ROOT) as temporary:
+            store = CreateOnlyTaskStore(temporary)
+            taf._write_json_create_only(
+                store.started_path(self.task),
+                taf._started_payload(self.task, recoverable=True),
+                token=TOKEN,
+            )
+            taf._write_json_create_only(
+                store.attempt_path(self.task, 1),
+                taf._attempt_payload(self.task, 1),
+                token=TOKEN,
+            )
+            bodies = iter((server_error, success))
+            transport = FakeTransport(lambda **_kwargs: next(bodies))
+            clock_values = iter(
+                (
+                    NOW,
+                    NOW + timedelta(seconds=1),
+                    NOW + timedelta(seconds=1),
+                    NOW + timedelta(seconds=13),
+                    NOW + timedelta(seconds=14),
+                )
+            )
+            sleeps = []
+            results = taf.execute_tasks(
+                (self.task,),
+                store=store,
+                token=TOKEN,
+                transport=transport,
+                timeout_seconds=30,
+                maximum_response_bytes=2097152,
+                recover_interrupted_attempts=True,
+                maximum_attempts_per_fingerprint=3,
+                persist_full_raw_transport=True,
+                minimum_request_interval_seconds=taf.Decimal("12"),
+                business_error_retry_once=True,
+                clock=lambda: next(clock_values),
+                sleeper=sleeps.append,
+            )
+            self.assertEqual(len(results), 1)
+            self.assertEqual(results[0].network_request_count, 3)
+            self.assertEqual(len(transport.calls), 2)
+            self.assertEqual(sleeps, [12.0])
+            self.assertTrue(store.attempt_path(self.task, 3).is_file())
+            self.assertFalse(store.quarantine_path(self.task).exists())
+
+    def test_legacy_quarantine_remains_terminal_and_continuation_shape_is_gated(self):
+        permission_error = json.dumps(
+            {"code": -1, "msg": "积分不足", "data": None},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        with tempfile.TemporaryDirectory(dir=ROOT) as temporary:
+            store = CreateOnlyTaskStore(temporary)
+            with self.assertRaisesRegex(
+                AlphaFeasibilityDataError, "upstream_permission_error"
+            ):
+                store.execute(
+                    self.task,
+                    token=TOKEN,
+                    transport=FakeTransport(lambda **_kwargs: permission_error),
+                    timeout_seconds=30,
+                    maximum_response_bytes=2097152,
+                    recover_interrupted_attempts=True,
+                    maximum_attempts_per_fingerprint=3,
+                    persist_full_raw_transport=True,
+                )
+            current = json.loads(
+                store.quarantine_path(self.task).read_text(encoding="utf-8")
+            )
+            v4_schema = json.loads(
+                (
+                    ROOT
+                    / "schemas"
+                    / "tushare_alpha_feasibility_quarantine.v4.json"
+                ).read_text(encoding="utf-8")
+            )
+            legacy = {
+                key: current[key]
+                for key in v4_schema["properties"]
+                if key in current
+            }
+            legacy["schema_version"] = "tushare-alpha-feasibility-quarantine.v4"
+            legacy["raw_response_persisted"] = False
+            store.quarantine_path(self.task).write_bytes(
+                canonical_json_bytes(legacy)
+            )
+            never = FakeTransport(lambda **_kwargs: self.fail("legacy retried"))
+            with self.assertRaisesRegex(
+                AlphaFeasibilityDataError, "upstream_permission_error"
+            ):
+                taf.retry_business_error_once(
+                    store,
+                    self.task,
+                    token=TOKEN,
+                    transport=never,
+                    timeout_seconds=30,
+                    maximum_response_bytes=2097152,
+                    maximum_attempts_per_fingerprint=3,
+                )
+            self.assertEqual(len(never.calls), 0)
+
+    def test_continuation_data_unavailable_maps_to_pit_source_coverage(self):
+        unavailable = json.dumps(
+            {
+                "code": -1,
+                "msg": "该日期无数据",
+                "data": None,
+                "detail": {"message": "历史区间不支持"},
+            },
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        with tempfile.TemporaryDirectory(dir=taf.DATA_TMP_ROOT) as temporary:
+            self._stage_synthetic_continuation_prefix(temporary)
+            transport = FakeTransport(lambda **_kwargs: unavailable)
+            with (
+                patch.object(
+                    taf, "_validate_parent_reuse_continuation_child", return_value=None
+                ),
+                patch.object(
+                    taf,
+                    "_consume_parent_reuse_continuation_network_process",
+                    return_value=None,
+                ),
+            ):
+                result = run_backfill(
+                    P15_CONFIG,
+                    temporary,
+                    TOKEN,
+                    transport=transport,
+                    generated_at=NOW,
+                    sleeper=lambda _seconds: None,
+                    _continuation_execution=taf._CONTINUATION_EXECUTION_CAPABILITY,
+                )
+            self.assertEqual(result["stage_status"], "BLOCKED_PIT_SOURCE_COVERAGE")
+            self.assertEqual(result["terminal_status"], "BLOCKED_DATA")
+            self.assertEqual(
+                result["remaining_blockers"],
+                ["upstream_data_unavailable_error"],
+            )
+            self.assertEqual(len(transport.calls), 1)
+
+    def test_continuation_task20_snapshot_gate_precedes_task21_request(self):
+        with tempfile.TemporaryDirectory(dir=taf.DATA_TMP_ROOT) as temporary:
+            store = self._stage_synthetic_continuation_prefix(temporary)
+            task20 = self.plan.pit_tasks[19]
+            task21 = self.plan.pit_tasks[20]
+            invalid_rows = self._rows()[:-1]
+            for row in invalid_rows:
+                row["trade_date"] = task20.params["end_date"]
+            transport = FakeTransport(
+                lambda **_kwargs: self._raw(invalid_rows)
+            )
+            with (
+                patch.object(
+                    taf, "_validate_parent_reuse_continuation_child", return_value=None
+                ),
+                patch.object(
+                    taf,
+                    "_consume_parent_reuse_continuation_network_process",
+                    return_value=None,
+                ),
+            ):
+                result = run_backfill(
+                    P15_CONFIG,
+                    temporary,
+                    TOKEN,
+                    transport=transport,
+                    generated_at=NOW,
+                    sleeper=lambda _seconds: None,
+                    _continuation_execution=taf._CONTINUATION_EXECUTION_CAPABILITY,
+                )
+            self.assertEqual(result["stage_status"], "BLOCKED_PIT_MEMBERSHIP")
+            self.assertEqual(len(transport.calls), 1)
+            self.assertTrue(store.is_complete(task20))
+            self.assertFalse(store.started_path(task21).exists())
+            self.assertFalse((store.root / "attempts" / task21.task_id).exists())
+
+    def test_continuation_initial_no_response_is_terminal_attempt2(self):
+        with tempfile.TemporaryDirectory(dir=taf.DATA_TMP_ROOT) as temporary:
+            store = self._stage_synthetic_continuation_prefix(temporary)
+            task20 = self.plan.pit_tasks[19]
+
+            def interrupted(**_kwargs):
+                raise AlphaFeasibilityDataError("https_transport_failed")
+
+            transport = FakeTransport(interrupted)
+            with (
+                patch.object(
+                    taf, "_validate_parent_reuse_continuation_child", return_value=None
+                ),
+                patch.object(
+                    taf,
+                    "_consume_parent_reuse_continuation_network_process",
+                    return_value=None,
+                ),
+            ):
+                result = run_backfill(
+                    P15_CONFIG,
+                    temporary,
+                    TOKEN,
+                    transport=transport,
+                    generated_at=NOW,
+                    sleeper=lambda _seconds: None,
+                    _continuation_execution=taf._CONTINUATION_EXECUTION_CAPABILITY,
+                )
+            self.assertEqual(result["terminal_status"], "BLOCKED_DATA")
+            self.assertEqual(len(transport.calls), 1)
+            quarantine = json.loads(
+                store.quarantine_path(task20).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                quarantine["state"],
+                "TRANSPORT_ATTEMPT_QUARANTINED_NO_RESPONSE",
+            )
+            self.assertEqual(quarantine["failure_code"], "https_transport_failed")
+            self.assertEqual(quarantine["terminal_attempt_number"], 2)
+            for field in (
+                "raw_transport_sha256",
+                "http_status",
+                "response_byte_count",
+                "upstream_code",
+                "business_error_classification",
+                "business_error_evidence",
+                "business_error_artifact_sha256",
+                "provider_payload_sha256",
+                "normalized_content_sha256",
+            ):
+                self.assertIsNone(quarantine[field], field)
+            self.assertFalse(quarantine["raw_response_persisted"])
+            self.assertEqual(store._terminal_quarantine_code(task20), "https_transport_failed")
+
+            forged = deepcopy(quarantine)
+            forged["raw_transport_sha256"] = "0" * 64
+            with self.assertRaises(SchemaValidationError):
+                validate_json_schema(
+                    forged,
+                    ROOT / "schemas" / "tushare_alpha_feasibility_quarantine.v5.json",
+                )
+
+    def test_continuation_retry_no_response_is_terminal_attempt3(self):
+        rate_error = json.dumps(
+            {"code": -1, "msg": "访问频率过高", "data": None},
+            ensure_ascii=False,
+            separators=(",", ":"),
+        ).encode("utf-8")
+        with tempfile.TemporaryDirectory(dir=taf.DATA_TMP_ROOT) as temporary:
+            store = self._stage_synthetic_continuation_prefix(temporary)
+            task20 = self.plan.pit_tasks[19]
+            call_count = 0
+
+            def rate_then_interrupt(**_kwargs):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    return rate_error
+                raise AlphaFeasibilityDataError("https_transport_failed")
+
+            transport = FakeTransport(rate_then_interrupt)
+            clock_values = iter(
+                (
+                    NOW,
+                    NOW + timedelta(seconds=1),
+                    NOW + timedelta(seconds=1),
+                    NOW + timedelta(seconds=66),
+                )
+            )
+            with (
+                patch.object(
+                    taf, "_validate_parent_reuse_continuation_child", return_value=None
+                ),
+                patch.object(
+                    taf,
+                    "_consume_parent_reuse_continuation_network_process",
+                    return_value=None,
+                ),
+            ):
+                result = run_backfill(
+                    P15_CONFIG,
+                    temporary,
+                    TOKEN,
+                    transport=transport,
+                    generated_at=NOW,
+                    sleeper=lambda _seconds: None,
+                    _continuation_execution=taf._CONTINUATION_EXECUTION_CAPABILITY,
+                    _clock=lambda: next(clock_values),
+                )
+            self.assertEqual(result["terminal_status"], "BLOCKED_DATA")
+            self.assertEqual(len(transport.calls), 2)
+            self.assertTrue(store.business_error_path(task20, 2).is_file())
+            quarantine = json.loads(
+                store.quarantine_path(task20).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                quarantine["state"],
+                "TRANSPORT_ATTEMPT_QUARANTINED_NO_RESPONSE",
+            )
+            self.assertEqual(quarantine["terminal_attempt_number"], 3)
+            self.assertIsNone(quarantine["business_error_evidence"])
+            self.assertFalse(quarantine["raw_response_persisted"])
+            self.assertEqual(store._terminal_quarantine_code(task20), "https_transport_failed")
+
+    def test_continuation_later_task_no_response_is_terminal(self):
+        with tempfile.TemporaryDirectory(dir=taf.DATA_TMP_ROOT) as temporary:
+            store = self._stage_synthetic_continuation_prefix(temporary)
+            task20 = self.plan.pit_tasks[19]
+            task21 = self.plan.pit_tasks[20]
+            task22 = self.plan.pit_tasks[21]
+            task20_rows = self._rows()
+            for row in task20_rows:
+                row["trade_date"] = task20.params["end_date"]
+            call_count = 0
+
+            def success_then_interrupt(**_kwargs):
+                nonlocal call_count
+                call_count += 1
+                if call_count == 1:
+                    return self._raw(task20_rows)
+                raise AlphaFeasibilityDataError("https_transport_failed")
+
+            transport = FakeTransport(success_then_interrupt)
+            with (
+                patch.object(
+                    taf, "_validate_parent_reuse_continuation_child", return_value=None
+                ),
+                patch.object(
+                    taf,
+                    "_consume_parent_reuse_continuation_network_process",
+                    return_value=None,
+                ),
+            ):
+                result = run_backfill(
+                    P15_CONFIG,
+                    temporary,
+                    TOKEN,
+                    transport=transport,
+                    generated_at=NOW,
+                    sleeper=lambda _seconds: None,
+                    _continuation_execution=taf._CONTINUATION_EXECUTION_CAPABILITY,
+                    _clock=lambda: NOW,
+                )
+            self.assertEqual(result["terminal_status"], "BLOCKED_DATA")
+            self.assertEqual(len(transport.calls), 2)
+            quarantine = json.loads(
+                store.quarantine_path(task21).read_text(encoding="utf-8")
+            )
+            self.assertEqual(
+                quarantine["state"],
+                "TRANSPORT_ATTEMPT_QUARANTINED_NO_RESPONSE",
+            )
+            self.assertEqual(quarantine["terminal_attempt_number"], 1)
+            self.assertFalse(store.started_path(task22).exists())
+
+        with tempfile.TemporaryDirectory(dir=taf.DATA_TMP_ROOT) as temporary:
+            never = FakeTransport(lambda **_kwargs: self.fail("gate reached network"))
+            with self.assertRaisesRegex(
+                AlphaFeasibilityDataError, "continuation_reuse_prefix_incomplete"
+            ):
+                taf.run_parent_reuse_continuation_backfill(
+                    P15_CONFIG,
+                    temporary,
+                    TOKEN,
+                    transport=never,
+                    generated_at=NOW,
+                    sleeper=lambda _seconds: None,
+                )
+            self.assertEqual(len(never.calls), 0)
 
     def test_p15_full_raw_rejects_secret_assignment_and_future_trace(self):
         cases = (
@@ -2766,6 +3435,123 @@ class P15DataLaneTests(unittest.TestCase):
                         output_root=Path(temporary) / "forged-output",
                         plan=self.plan,
                     )
+
+    def test_parent_run_reuse_v2_is_parent_bound_and_zero_request(self):
+        with tempfile.TemporaryDirectory(dir=taf.DATA_TMP_ROOT) as temporary:
+            root = Path(temporary)
+            parent = root / "parent"
+            child = root / "child"
+            parent.mkdir()
+            child.mkdir()
+            parent_store = CreateOnlyTaskStore(parent)
+            raw = self._raw(self._rows(), request_id="parent-success-request")
+            parent_result = parent_store.execute(
+                self.task,
+                token=TOKEN,
+                transport=FakeTransport(lambda **_kwargs: raw),
+                timeout_seconds=30,
+                maximum_response_bytes=2097152,
+                recover_interrupted_attempts=True,
+                maximum_attempts_per_fingerprint=3,
+                persist_full_raw_transport=True,
+            )
+            parent_binding = {
+                "network_run_id": "parent-run-001",
+                "run_claim_sha256": "1" * 64,
+                "receipt_sha256": "0" * 64,
+                "report_sha256": "2" * 64,
+                "pit_coverage_report_sha256": "3" * 64,
+                "pit_manifest_sha256": "4" * 64,
+                "runtime_bundle_sha256": "5" * 64,
+                "experiment_config_canonical_sha256": "6" * 64,
+            }
+            receipt = taf._self_hashed(
+                {
+                    "network_run_id": parent_binding["network_run_id"],
+                    "collection_plan_sha256": self.task.plan_sha256,
+                    "run_claim_sha256": parent_binding["run_claim_sha256"],
+                    "report_sha256": parent_binding["report_sha256"],
+                    "locked_test_status": dict(LOCKED_TEST_STATUS),
+                    "locked_test_consumed": False,
+                },
+                "receipt_sha256",
+            )
+            parent_binding["receipt_sha256"] = receipt["receipt_sha256"]
+            (parent / "p1_5_run_receipt.json").write_bytes(
+                canonical_json_bytes(receipt)
+            )
+            response_bytes_on_disk = parent_store.response_path(self.task).read_bytes()
+            response = json.loads(response_bytes_on_disk)
+            reuse = {
+                "ordinal": 1,
+                "request_fingerprint": self.task.task_id,
+                "task_id": self.task.task_id,
+                "task_sha256": canonical_sha256(self.task.to_dict()),
+                "endpoint": self.task.endpoint,
+                "month": "2017-12",
+                "params": dict(self.task.params),
+                "provenance_kind": "network",
+                "started_artifact_sha256": hashlib.sha256(
+                    parent_store.started_path(self.task).read_bytes()
+                ).hexdigest(),
+                "import_artifact_sha256": None,
+                "raw_artifact_sha256": hashlib.sha256(raw).hexdigest(),
+                "response_file_sha256": hashlib.sha256(
+                    response_bytes_on_disk
+                ).hexdigest(),
+                "response_artifact_sha256": response["response_artifact_sha256"],
+                "normalized_content_sha256": parent_result.normalized_content_sha256,
+                "attempt_artifact_sha256_by_number": [
+                    hashlib.sha256(
+                        parent_store.attempt_path(self.task, 1).read_bytes()
+                    ).hexdigest()
+                ],
+                "network_request_count": 1,
+            }
+            imported = taf.import_parent_reuse_task_v2(
+                task=self.task,
+                parent_root=parent,
+                child_root=child,
+                parent_binding=parent_binding,
+                reuse_evidence=reuse,
+            )
+            child_store = CreateOnlyTaskStore(child)
+            self.assertTrue(child_store.is_complete(self.task))
+            self.assertEqual(imported.request_origin, "offline_parent_run_reuse")
+            self.assertEqual(imported.network_request_count, 0)
+            self.assertEqual(child_store.raw_path(self.task).read_bytes(), raw)
+            self.assertEqual(
+                child_store.response_path(self.task).read_bytes(),
+                response_bytes_on_disk,
+            )
+            self.assertEqual(
+                taf.actual_tushare_request_count_by_endpoint(
+                    child,
+                    self.plan.pit_tasks,
+                    plan_sha256=self.plan.plan_sha256,
+                )["index_weight"],
+                0,
+            )
+            marker_path = child_store.import_path(self.task)
+            marker = json.loads(marker_path.read_text(encoding="utf-8"))
+            self.assertEqual(
+                marker["schema_version"],
+                "tushare-alpha-feasibility-task-import.v2",
+            )
+            self.assertEqual(
+                marker["parent_binding"]["receipt_sha256"],
+                receipt["receipt_sha256"],
+            )
+            marker["parent_raw_artifact_sha256"] = "f" * 64
+            unsigned = dict(marker)
+            unsigned.pop("import_artifact_sha256")
+            marker["import_artifact_sha256"] = canonical_sha256(unsigned)
+            marker_path.write_bytes(canonical_json_bytes(marker))
+            with self.assertRaisesRegex(
+                AlphaFeasibilityDataError,
+                "parent_reuse_import_semantics_mismatch",
+            ):
+                child_store._load_response(self.task)
 
 
 class PitMembershipTests(unittest.TestCase):

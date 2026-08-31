@@ -195,6 +195,9 @@ class RunAlphaFeasibilityCliTests(unittest.TestCase):
     def test_adapter_protocol_failure_sets_remain_exactly_aligned(self) -> None:
         expected = {
             "duplicate_json_key",
+            "invalid_response_json",
+            "http_status_not_success",
+            "http_redirect_forbidden",
             "semantic_core_missing",
             "semantic_core_type_invalid",
             "response_body_too_large",
@@ -588,10 +591,10 @@ class RunAlphaFeasibilityCliTests(unittest.TestCase):
                 token="UnitTestCredentialNeverPersist123456",
             )
         upstream_error = raised.exception
-        self.assertEqual(upstream_error.code, "upstream_permission_error")
+        self.assertEqual(upstream_error.code, "upstream_unknown_error")
         self.assertNotIn(upstream_error.code, cli.data_lane.ADAPTER_PROTOCOL_FAILURES)
         self.assertEqual(upstream_error.diagnostic["upstream_code"], 2002)
-        self.assertEqual(upstream_error.diagnostic["upstream_error_category"], "permission")
+        self.assertEqual(upstream_error.diagnostic["upstream_error_category"], "unknown")
         self.assertEqual(
             upstream_error.diagnostic["transport_extension_field_names"],
             ["detail", "request_id", "trace_id"],
@@ -634,7 +637,7 @@ class RunAlphaFeasibilityCliTests(unittest.TestCase):
         self.assertEqual(code, 1)
         self.assertEqual(summary["terminal_status"], "BLOCKED_DATA")
         self.assertEqual(report["terminal_status"], "BLOCKED_DATA")
-        self.assertEqual(report["remaining_blockers"], ["upstream_permission_error"])
+        self.assertEqual(report["remaining_blockers"], ["upstream_unknown_error"])
         persisted_text = serialized + json.dumps(report, sort_keys=True)
         self.assertNotIn("do-not-persist-this-value", persisted_text)
         self.assertNotIn("request-opaque-1", persisted_text)

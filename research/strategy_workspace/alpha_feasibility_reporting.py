@@ -77,6 +77,9 @@ ALLOWED_ENDPOINTS = (
 ADAPTER_PROTOCOL_BLOCKERS = frozenset(
     {
         "duplicate_json_key",
+        "invalid_response_json",
+        "http_status_not_success",
+        "http_redirect_forbidden",
         "semantic_core_missing",
         "semantic_core_type_invalid",
         "response_body_too_large",

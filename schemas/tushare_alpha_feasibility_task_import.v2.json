@@ -1,0 +1,83 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tushare_alpha_feasibility_task_import.v2.json",
+  "title": "Tushare Alpha Feasibility Parent Run Reuse Import V2",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version",
+    "state",
+    "task_id",
+    "endpoint",
+    "plan_sha256",
+    "task",
+    "task_sha256",
+    "parent_binding",
+    "parent_provenance_kind",
+    "parent_provenance_artifact_sha256",
+    "parent_attempt_artifact_sha256_by_number",
+    "parent_network_request_count",
+    "parent_raw_artifact_sha256",
+    "parent_response_file_sha256",
+    "parent_response_artifact_sha256",
+    "raw_transport_sha256",
+    "normalized_content_sha256",
+    "network_request_count",
+    "locked_test_status",
+    "locked_test_consumed",
+    "import_artifact_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "tushare-alpha-feasibility-task-import.v2"},
+    "state": {"const": "PARENT_RUN_TASK_REUSED"},
+    "task_id": {"type": "string", "pattern": "^[a-z_]+-[0-9a-f]{64}$"},
+    "endpoint": {"enum": ["trade_cal", "index_weight", "daily", "adj_factor", "index_daily", "suspend_d", "stock_basic"]},
+    "plan_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+    "task": {"type": "object"},
+    "task_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+    "parent_binding": {"$ref": "#/$defs/parent_binding"},
+    "parent_provenance_kind": {"enum": ["offline_p14d_import", "network"]},
+    "parent_provenance_artifact_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+    "parent_attempt_artifact_sha256_by_number": {
+      "type": "array",
+      "maxItems": 10,
+      "items": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"}
+    },
+    "parent_network_request_count": {"type": "integer", "minimum": 0, "maximum": 10},
+    "parent_raw_artifact_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+    "parent_response_file_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+    "parent_response_artifact_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+    "raw_transport_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+    "normalized_content_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+    "network_request_count": {"const": 0},
+    "locked_test_status": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/locked"},
+    "locked_test_consumed": {"const": false},
+    "import_artifact_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"}
+  },
+  "$defs": {
+    "parent_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "network_run_id",
+        "run_claim_sha256",
+        "receipt_sha256",
+        "report_sha256",
+        "pit_coverage_report_sha256",
+        "pit_manifest_sha256",
+        "runtime_bundle_sha256",
+        "experiment_config_canonical_sha256"
+      ],
+      "properties": {
+        "network_run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{2,95}$"},
+        "run_claim_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+        "receipt_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+        "report_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+        "pit_coverage_report_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+        "pit_manifest_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+        "runtime_bundle_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+        "experiment_config_canonical_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"}
+      }
+    }
+  }
+}

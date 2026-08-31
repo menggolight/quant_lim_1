@@ -30,6 +30,7 @@ import os
 import re
 import ssl
 import tempfile
+import threading
 import time
 import unicodedata
 from dataclasses import dataclass
@@ -40,10 +41,10 @@ from types import MappingProxyType
 from typing import Any, Callable, Iterable, Mapping, Protocol, Sequence
 
 from research.market_data.validation import SchemaValidationError, validate_json_schema
-from research.market_data.tushare_diagnostic import classify_message_category
 
 
 REPOSITORY_ROOT = Path(__file__).resolve().parents[2]
+DATA_TMP_ROOT = REPOSITORY_ROOT / "data" / "tmp"
 DEFAULT_CONFIG_PATH = (
     REPOSITORY_ROOT / "configs" / "a_share_technical_alpha_feasibility.v2.json"
 )
@@ -60,6 +61,7 @@ STARTED_SCHEMA_VERSION = "tushare-alpha-feasibility-task-started.v1"
 RECOVERABLE_STARTED_SCHEMA_VERSION = "tushare-alpha-feasibility-task-started.v2"
 ATTEMPT_SCHEMA_VERSION = "tushare-alpha-feasibility-attempt.v1"
 IMPORT_SCHEMA_VERSION = "tushare-alpha-feasibility-task-import.v1"
+PARENT_REUSE_IMPORT_SCHEMA_VERSION = "tushare-alpha-feasibility-task-import.v2"
 RESPONSE_SCHEMA_VERSION = "tushare-alpha-feasibility-task-response.v4"
 LEGACY_RESPONSE_SCHEMA_VERSIONS = frozenset(
     {
@@ -67,7 +69,11 @@ LEGACY_RESPONSE_SCHEMA_VERSIONS = frozenset(
         "tushare-alpha-feasibility-task-response.v3",
     }
 )
-QUARANTINE_SCHEMA_VERSION = "tushare-alpha-feasibility-quarantine.v4"
+QUARANTINE_SCHEMA_VERSION = "tushare-alpha-feasibility-quarantine.v5"
+LEGACY_QUARANTINE_SCHEMA_VERSIONS = frozenset(
+    {"tushare-alpha-feasibility-quarantine.v4"}
+)
+BUSINESS_ERROR_SCHEMA_VERSION = "tushare-alpha-feasibility-business-error.v1"
 PIT_REPORT_SCHEMA_VERSION = "pit-membership-coverage-report.v2"
 PIT_MANIFEST_SCHEMA_VERSION = "pit-membership-manifest.v2"
 P15_PIT_REPORT_SCHEMA_VERSION = "pit-membership-coverage-report.v3"
@@ -88,14 +94,48 @@ HISTORY_MANIFEST_SCHEMA_PATHS = MappingProxyType(
 RESPONSE_SCHEMA_PATH = (
     REPOSITORY_ROOT / "schemas" / "tushare_alpha_feasibility_task_response.v4.json"
 )
-QUARANTINE_SCHEMA_PATH = (
-    REPOSITORY_ROOT / "schemas" / "tushare_alpha_feasibility_quarantine.v4.json"
+QUARANTINE_SCHEMA_PATHS = MappingProxyType(
+    {
+        "tushare-alpha-feasibility-quarantine.v4": REPOSITORY_ROOT
+        / "schemas"
+        / "tushare_alpha_feasibility_quarantine.v4.json",
+        QUARANTINE_SCHEMA_VERSION: REPOSITORY_ROOT
+        / "schemas"
+        / "tushare_alpha_feasibility_quarantine.v5.json",
+    }
+)
+QUARANTINE_SCHEMA_PATH = QUARANTINE_SCHEMA_PATHS[QUARANTINE_SCHEMA_VERSION]
+BUSINESS_ERROR_SCHEMA_PATH = (
+    REPOSITORY_ROOT / "schemas" / "tushare_alpha_feasibility_business_error.v1.json"
 )
 ATTEMPT_SCHEMA_PATH = (
     REPOSITORY_ROOT / "schemas" / "tushare_alpha_feasibility_attempt.v1.json"
 )
 IMPORT_SCHEMA_PATH = (
     REPOSITORY_ROOT / "schemas" / "tushare_alpha_feasibility_task_import.v1.json"
+)
+PARENT_REUSE_IMPORT_SCHEMA_PATH = (
+    REPOSITORY_ROOT / "schemas" / "tushare_alpha_feasibility_task_import.v2.json"
+)
+CONTINUATION_CONTROL_ARTIFACTS = MappingProxyType(
+    {
+        "p1_5_continuation_reuse_manifest.json": (
+            "tushare_alpha_feasibility_continuation_reuse_manifest.v1.json",
+            "manifest_sha256",
+        ),
+        "p1_5_continuation_claim.json": (
+            "tushare_alpha_feasibility_continuation_claim.v1.json",
+            "claim_sha256",
+        ),
+        "p1_5_continuation_parent_reuse_stage.json": (
+            "tushare_alpha_feasibility_continuation_parent_reuse_stage.v1.json",
+            "stage_sha256",
+        ),
+        "p1_5_continuation_network_process.json": (
+            "tushare_alpha_feasibility_continuation_network_process.v1.json",
+            "marker_sha256",
+        ),
+    }
 )
 PIT_REPORT_SCHEMA_PATHS = MappingProxyType(
     {
@@ -237,6 +277,14 @@ _SECRET_STRING_ASSIGNMENT = re.compile(
     r"api[_-]?key|access[_-]?key)\s*(?::|=)\s*\S+",
     re.IGNORECASE,
 )
+_EMAIL_ADDRESS = re.compile(r"(?<![\w.+-])[\w.+-]+@[A-Za-z0-9.-]+\.[A-Za-z]{2,}(?!\w)")
+_CHINA_ID_NUMBER = re.compile(r"(?<!\d)\d{17}[0-9Xx](?!\d)")
+_PHONE_NUMBER = re.compile(r"(?<!\d)(?:\+?86[- ]?)?1[3-9]\d{9}(?!\d)")
+_LONG_OPAQUE_TEXT = re.compile(r"(?<![A-Za-z0-9])[A-Za-z0-9_-]{24,}(?![A-Za-z0-9])")
+_RETRY_AFTER_TEXT = re.compile(
+    r"(?:retry[-_ ]?after|重试间隔|等待)\s*(?::|=|为)?\s*([0-9]{1,3})\s*(?:s|sec|secs|second|seconds|秒)?",
+    re.IGNORECASE,
+)
 MAXIMUM_RESPONSE_BYTES = 2 * 1024 * 1024
 MAXIMUM_TRANSPORT_EXTENSIONS_BYTES = 256 * 1024
 MAXIMUM_TRANSPORT_EXTENSION_DEPTH = 8
@@ -262,9 +310,33 @@ P14D_SOURCE_ARTIFACT_NAMES = (
     "offline_replay.json",
 )
 RETRYABLE_ATTEMPT_FAILURES = frozenset({"https_transport_failed"})
+BUSINESS_ERROR_CLASSIFICATIONS = frozenset(
+    {
+        "RATE_LIMITED",
+        "PERMISSION_DENIED",
+        "INVALID_PARAMETER",
+        "DATA_UNAVAILABLE",
+        "UPSTREAM_SERVER_ERROR",
+        "ACCOUNT_OR_QUOTA_LIMIT",
+        "UPSTREAM_UNKNOWN_ERROR",
+    }
+)
+RETRYABLE_BUSINESS_ERROR_CLASSIFICATIONS = frozenset(
+    {"RATE_LIMITED", "UPSTREAM_SERVER_ERROR"}
+)
+MINIMUM_REAL_TRANSPORT_INTERVAL_SECONDS = Decimal("12")
+DEFAULT_RATE_LIMIT_RETRY_SECONDS = Decimal("65")
+MAXIMUM_REASONABLE_RETRY_AFTER_SECONDS = 300
+MAXIMUM_SAFE_DETAIL_PROJECTION_DEPTH = 8
+MAXIMUM_SAFE_DETAIL_PROJECTION_ELEMENTS = 1024
+MAXIMUM_SAFE_DETAIL_PROJECTION_BYTES = 32 * 1024
+REDACTED_SECRET_DETAIL_VALUE = "[REDACTED_SECRET_FIELD]"
 ADAPTER_PROTOCOL_FAILURES = frozenset(
     {
         "duplicate_json_key",
+        "invalid_response_json",
+        "http_status_not_success",
+        "http_redirect_forbidden",
         "semantic_core_missing",
         "semantic_core_type_invalid",
         "response_body_too_large",
@@ -281,6 +353,9 @@ ADAPTER_PROTOCOL_FAILURES = frozenset(
         "unknown_non_json_value",
     }
 )
+_CONTINUATION_NETWORK_PROCESS_AUTHORIZATIONS: set[tuple[str, str]] = set()
+_CONTINUATION_NETWORK_PROCESS_AUTHORIZATIONS_LOCK = threading.Lock()
+_CONTINUATION_EXECUTION_CAPABILITY = object()
 
 
 class AlphaFeasibilityDataError(RuntimeError):
@@ -322,6 +397,228 @@ class TushareHttpResponse:
             raise AlphaFeasibilityDataError("unknown_non_json_value")
         if not isinstance(self.body, bytes):
             raise AlphaFeasibilityDataError("unknown_non_json_value")
+
+
+@dataclass(frozen=True, slots=True)
+class SafeResponseSemantics:
+    """Closed, secret-free response semantics shared by success and error paths."""
+
+    business_code: int
+    classification: str | None
+    sanitized_msg: str
+    msg_sha256: str
+    detail_type: str | None
+    safe_detail_projection: Mapping[str, Any] | None
+    detail_sha256: str | None
+    request_id_sha256: str | None
+    raw_transport_sha256: str
+    response_body_sha256: str
+    response_byte_count: int
+    sanitized_params: Mapping[str, str]
+    requested_fields: tuple[str, ...]
+    requested_at: datetime
+    completed_at: datetime
+    retry_after_seconds: int | None
+
+    def __post_init__(self) -> None:
+        if type(self.business_code) is not int:
+            raise AlphaFeasibilityDataError("business_error_evidence_invalid")
+        if self.business_code == 0:
+            if self.classification is not None:
+                raise AlphaFeasibilityDataError("business_error_evidence_invalid")
+        elif self.classification not in BUSINESS_ERROR_CLASSIFICATIONS:
+            raise AlphaFeasibilityDataError("business_error_evidence_invalid")
+        if (
+            type(self.sanitized_msg) is not str
+            or len(self.sanitized_msg) > 1000
+            or _contains_control_character(self.sanitized_msg)
+            or _SECRET_STRING_ASSIGNMENT.search(self.sanitized_msg) is not None
+        ):
+            raise AlphaFeasibilityDataError("business_error_evidence_invalid")
+        for digest in (
+            self.msg_sha256,
+            self.raw_transport_sha256,
+            self.response_body_sha256,
+        ):
+            if type(digest) is not str or _SHA256.fullmatch(digest) is None:
+                raise AlphaFeasibilityDataError("business_error_evidence_invalid")
+        if self.raw_transport_sha256 != self.response_body_sha256:
+            raise AlphaFeasibilityDataError("business_error_evidence_invalid")
+        if type(self.response_byte_count) is not int or self.response_byte_count < 1:
+            raise AlphaFeasibilityDataError("business_error_evidence_invalid")
+        for digest in (self.detail_sha256, self.request_id_sha256):
+            if digest is not None and (
+                type(digest) is not str or _SHA256.fullmatch(digest) is None
+            ):
+                raise AlphaFeasibilityDataError("business_error_evidence_invalid")
+        allowed_types = {
+            "null",
+            "boolean",
+            "integer",
+            "number",
+            "string",
+            "array",
+            "object",
+        }
+        projection = self.safe_detail_projection
+        if self.detail_type is None:
+            if projection is not None or self.detail_sha256 is not None:
+                raise AlphaFeasibilityDataError("business_error_evidence_invalid")
+        elif self.detail_type not in allowed_types or not isinstance(projection, Mapping):
+            raise AlphaFeasibilityDataError("business_error_evidence_invalid")
+        else:
+            expected_projection_fields = {
+                "json_type",
+                "value",
+                "sanitized_text",
+                "semantic_category",
+            }
+            if (
+                set(projection) != expected_projection_fields
+                or projection["json_type"] != self.detail_type
+                or type(projection["sanitized_text"]) is not str
+                or len(projection["sanitized_text"]) > 1000
+                or _contains_control_character(projection["sanitized_text"])
+                or _SECRET_STRING_ASSIGNMENT.search(projection["sanitized_text"])
+                is not None
+                or (
+                    projection["semantic_category"] is not None
+                    and projection["semantic_category"]
+                    not in BUSINESS_ERROR_CLASSIFICATIONS
+                )
+            ):
+                raise AlphaFeasibilityDataError("business_error_evidence_invalid")
+            _validate_safe_detail_projection_value(projection["value"])
+            if len(canonical_json_bytes(projection)) > MAXIMUM_SAFE_DETAIL_PROJECTION_BYTES:
+                raise AlphaFeasibilityDataError("business_error_evidence_invalid")
+            object.__setattr__(
+                self, "safe_detail_projection", MappingProxyType(dict(projection))
+            )
+        params = dict(self.sanitized_params)
+        if (
+            any(type(key) is not str or type(value) is not str for key, value in params.items())
+            or any(_FORBIDDEN_PARAM_KEY.search(key) for key in params)
+            or list(params) != sorted(params)
+        ):
+            raise AlphaFeasibilityDataError("business_error_evidence_invalid")
+        object.__setattr__(self, "sanitized_params", MappingProxyType(params))
+        if (
+            not self.requested_fields
+            or any(type(field) is not str for field in self.requested_fields)
+            or len(set(self.requested_fields)) != len(self.requested_fields)
+        ):
+            raise AlphaFeasibilityDataError("business_error_evidence_invalid")
+        for timestamp in (self.requested_at, self.completed_at):
+            if not isinstance(timestamp, datetime) or timestamp.tzinfo is None:
+                raise AlphaFeasibilityDataError("business_error_evidence_invalid")
+            if timestamp.utcoffset() != timedelta(0):
+                raise AlphaFeasibilityDataError("business_error_evidence_invalid")
+        if self.completed_at < self.requested_at:
+            raise AlphaFeasibilityDataError("business_error_evidence_invalid")
+        if self.retry_after_seconds is not None and (
+            type(self.retry_after_seconds) is not int
+            or not 1
+            <= self.retry_after_seconds
+            <= MAXIMUM_REASONABLE_RETRY_AFTER_SECONDS
+        ):
+            raise AlphaFeasibilityDataError("business_error_evidence_invalid")
+
+    def to_dict(self) -> dict[str, Any]:
+        return {
+            "business_code": self.business_code,
+            "classification": self.classification,
+            "sanitized_msg": self.sanitized_msg,
+            "msg_sha256": self.msg_sha256,
+            "detail_type": self.detail_type,
+            "safe_detail_projection": (
+                dict(self.safe_detail_projection)
+                if self.safe_detail_projection is not None
+                else None
+            ),
+            "detail_sha256": self.detail_sha256,
+            "request_id_sha256": self.request_id_sha256,
+            "raw_transport_sha256": self.raw_transport_sha256,
+            "response_body_sha256": self.response_body_sha256,
+            "response_byte_count": self.response_byte_count,
+            "sanitized_params": dict(self.sanitized_params),
+            "requested_fields": list(self.requested_fields),
+            "requested_at": self.requested_at.isoformat(),
+            "completed_at": self.completed_at.isoformat(),
+            "retry_after_seconds": self.retry_after_seconds,
+        }
+
+
+@dataclass(frozen=True, slots=True)
+class BusinessErrorRetryPolicy:
+    classification: str
+    maximum_additional_attempts: int
+    delay_seconds: Decimal
+
+    def __post_init__(self) -> None:
+        if self.classification not in BUSINESS_ERROR_CLASSIFICATIONS:
+            raise AlphaFeasibilityDataError("business_retry_policy_invalid")
+        if self.maximum_additional_attempts not in {0, 1}:
+            raise AlphaFeasibilityDataError("business_retry_policy_invalid")
+        if not isinstance(self.delay_seconds, Decimal) or not self.delay_seconds.is_finite():
+            raise AlphaFeasibilityDataError("business_retry_policy_invalid")
+        if self.maximum_additional_attempts == 0 and self.delay_seconds != 0:
+            raise AlphaFeasibilityDataError("business_retry_policy_invalid")
+        if (
+            self.maximum_additional_attempts == 1
+            and self.delay_seconds < MINIMUM_REAL_TRANSPORT_INTERVAL_SECONDS
+        ):
+            raise AlphaFeasibilityDataError("business_retry_policy_invalid")
+
+
+def _safe_response_semantics_from_mapping(
+    value: Mapping[str, Any],
+) -> SafeResponseSemantics:
+    expected_fields = {
+        "business_code",
+        "classification",
+        "sanitized_msg",
+        "msg_sha256",
+        "detail_type",
+        "safe_detail_projection",
+        "detail_sha256",
+        "request_id_sha256",
+        "raw_transport_sha256",
+        "response_body_sha256",
+        "response_byte_count",
+        "sanitized_params",
+        "requested_fields",
+        "requested_at",
+        "completed_at",
+        "retry_after_seconds",
+    }
+    if not isinstance(value, Mapping) or set(value) != expected_fields:
+        raise AlphaFeasibilityDataError("business_error_evidence_invalid")
+    try:
+        requested_at = datetime.fromisoformat(str(value["requested_at"]))
+        completed_at = datetime.fromisoformat(str(value["completed_at"]))
+        semantics = SafeResponseSemantics(
+            business_code=value["business_code"],
+            classification=value["classification"],
+            sanitized_msg=value["sanitized_msg"],
+            msg_sha256=value["msg_sha256"],
+            detail_type=value["detail_type"],
+            safe_detail_projection=value["safe_detail_projection"],
+            detail_sha256=value["detail_sha256"],
+            request_id_sha256=value["request_id_sha256"],
+            raw_transport_sha256=value["raw_transport_sha256"],
+            response_body_sha256=value["response_body_sha256"],
+            response_byte_count=value["response_byte_count"],
+            sanitized_params=value["sanitized_params"],
+            requested_fields=tuple(value["requested_fields"]),
+            requested_at=requested_at,
+            completed_at=completed_at,
+            retry_after_seconds=value["retry_after_seconds"],
+        )
+    except (KeyError, TypeError, ValueError) as exc:
+        raise AlphaFeasibilityDataError("business_error_evidence_invalid") from exc
+    if semantics.to_dict() != dict(value):
+        raise AlphaFeasibilityDataError("business_error_evidence_invalid")
+    return semantics
 
 
 class TushareTransport(Protocol):
@@ -731,6 +1028,521 @@ def _reject_p15_full_raw_tree(
             continue
         if parsed > ABSOLUTE_CUTOFF:
             raise AlphaFeasibilityDataError("post_cutoff_response_date")
+
+
+_BUSINESS_ERROR_MARKERS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    (
+        "RATE_LIMITED",
+        (
+            "rate limit",
+            "rate",
+            "too many requests",
+            "too many",
+            "frequency",
+            "每分钟",
+            "访问频率",
+            "频率",
+            "频率过高",
+            "访问过快",
+            "请求过于频繁",
+            "限频",
+        ),
+    ),
+    (
+        "PERMISSION_DENIED",
+        (
+            "permission denied",
+            "no permission",
+            "no access",
+            "not authorized",
+            "没有访问该接口的权限",
+            "没有权限",
+            "无权限",
+            "权限不足",
+            "权限",
+            "积分不足",
+        ),
+    ),
+    (
+        "INVALID_PARAMETER",
+        (
+            "invalid parameter",
+            "invalid argument",
+            "missing parameter",
+            "invalid date format",
+            "参数错误",
+            "参数无效",
+            "参数不正确",
+            "参数缺失",
+            "缺少参数",
+            "参数",
+            "日期格式",
+            "不包含字段",
+            "没有接口",
+            "接口不存在",
+        ),
+    ),
+    (
+        "DATA_UNAVAILABLE",
+        (
+            "data unavailable",
+            "no data available",
+            "data not available",
+            "暂无数据",
+            "无可用数据",
+            "无数据",
+            "该日期无数据",
+            "历史区间不支持",
+            "数据不存在",
+            "数据暂不可用",
+        ),
+    ),
+    (
+        "UPSTREAM_SERVER_ERROR",
+        (
+            "internal server",
+            "server error",
+            "server",
+            "service unavailable",
+            "bad gateway",
+            "gateway timeout",
+            "系统错误",
+            "系统内部错误",
+            "内部错误",
+            "服务器内部",
+            "服务异常",
+            "服务不可用",
+        ),
+    ),
+    (
+        "ACCOUNT_OR_QUOTA_LIMIT",
+        (
+            "token invalid",
+            "invalid token",
+            "token无效",
+            "token 无效",
+            "token expired",
+            "invalid credential",
+            "account disabled",
+            "account invalid",
+            "账号异常",
+            "账户异常",
+            "账户不存在",
+            "账号被禁用",
+            "quota",
+            "配额",
+            "额度",
+            "额度不足",
+            "额度用尽",
+            "总量",
+            "总量限制",
+            "总量已达",
+            "请求总量",
+            "次数已用完",
+            "次数用完",
+        ),
+    ),
+)
+
+_BUSINESS_CLASSIFICATION_TO_FAILURE_CODE = MappingProxyType(
+    {
+        "RATE_LIMITED": "upstream_rate_limit_error",
+        "PERMISSION_DENIED": "upstream_permission_error",
+        "INVALID_PARAMETER": "upstream_invalid_parameter_error",
+        "DATA_UNAVAILABLE": "upstream_data_unavailable_error",
+        "UPSTREAM_SERVER_ERROR": "upstream_server_internal_error",
+        "ACCOUNT_OR_QUOTA_LIMIT": "upstream_authentication_account_error",
+        "UPSTREAM_UNKNOWN_ERROR": "upstream_unknown_error",
+    }
+)
+
+_BUSINESS_CLASSIFICATION_TO_LEGACY_CATEGORY = MappingProxyType(
+    {
+        "RATE_LIMITED": "rate_limit",
+        "PERMISSION_DENIED": "permission",
+        "INVALID_PARAMETER": "invalid_parameter",
+        "DATA_UNAVAILABLE": "data_unavailable",
+        "UPSTREAM_SERVER_ERROR": "server_internal",
+        "ACCOUNT_OR_QUOTA_LIMIT": "authentication_account",
+        "UPSTREAM_UNKNOWN_ERROR": "unknown",
+    }
+)
+
+
+def _sanitize_provider_text(
+    value: Any,
+    *,
+    token: str | None,
+    request_id: str | None,
+) -> str:
+    if type(value) is not str:
+        return ""
+    text = unicodedata.normalize("NFKC", value)
+    for secret in (token, request_id):
+        if secret:
+            text = text.replace(secret, "[REDACTED]")
+    text = _SECRET_STRING_ASSIGNMENT.sub("[REDACTED_SECRET_ASSIGNMENT]", text)
+    text = _EMAIL_ADDRESS.sub("[REDACTED_EMAIL]", text)
+    text = _CHINA_ID_NUMBER.sub("[REDACTED_ID]", text)
+    text = _PHONE_NUMBER.sub("[REDACTED_PHONE]", text)
+    text = _LONG_OPAQUE_TEXT.sub("[REDACTED_OPAQUE]", text)
+    text = _redact_post_cutoff_dates(text)
+    text = " ".join(text.split())
+    return text[:1000]
+
+
+def _redact_post_cutoff_dates(value: str) -> str:
+    def replace(match: re.Match[str]) -> str:
+        try:
+            parsed = date(
+                int(match.group(1)), int(match.group(2)), int(match.group(3))
+            )
+        except ValueError:
+            return match.group(0)
+        return (
+            "[REDACTED_POST_CUTOFF_DATE]"
+            if parsed > ABSOLUTE_CUTOFF
+            else match.group(0)
+        )
+
+    return _EMBEDDED_DATE.sub(replace, value)
+
+
+def _safe_detail_projection_value(
+    value: Any,
+    *,
+    token: str | None,
+    request_id: str | None,
+) -> Any:
+    element_count = 0
+
+    def project(current: Any, depth: int) -> Any:
+        nonlocal element_count
+        if depth > MAXIMUM_SAFE_DETAIL_PROJECTION_DEPTH:
+            raise AlphaFeasibilityDataError("safe_detail_projection_too_deep")
+        element_count += 1
+        if element_count > MAXIMUM_SAFE_DETAIL_PROJECTION_ELEMENTS:
+            raise AlphaFeasibilityDataError("safe_detail_projection_too_large")
+        if isinstance(current, Mapping):
+            result: dict[str, Any] = {}
+            redacted_secret_field = False
+            for key in sorted(current):
+                if type(key) is not str or _contains_control_character(key):
+                    raise AlphaFeasibilityDataError(
+                        "safe_detail_projection_invalid"
+                    )
+                if _SECRET_TRANSPORT_KEY.search(key) is not None:
+                    redacted_secret_field = True
+                    continue
+                safe_key = _sanitize_provider_text(
+                    key, token=token, request_id=request_id
+                )
+                if not safe_key or safe_key in result:
+                    raise AlphaFeasibilityDataError(
+                        "safe_detail_projection_invalid"
+                    )
+                result[safe_key] = project(current[key], depth + 1)
+            if redacted_secret_field:
+                result["[REDACTED_SECRET_FIELDS]"] = REDACTED_SECRET_DETAIL_VALUE
+            return result
+        if isinstance(current, (list, tuple)):
+            return [project(item, depth + 1) for item in current]
+        if type(current) is str:
+            return _sanitize_provider_text(
+                current, token=token, request_id=request_id
+            )
+        if current is None or type(current) in {bool, int}:
+            return current
+        if isinstance(current, Decimal):
+            if not current.is_finite():
+                raise AlphaFeasibilityDataError("safe_detail_projection_invalid")
+            return format(current, "f")
+        raise AlphaFeasibilityDataError("safe_detail_projection_invalid")
+
+    projected = project(value, 0)
+    if len(canonical_json_bytes(projected)) > MAXIMUM_SAFE_DETAIL_PROJECTION_BYTES:
+        raise AlphaFeasibilityDataError("safe_detail_projection_too_large")
+    return projected
+
+
+def _validate_safe_detail_projection_value(value: Any) -> None:
+    element_count = 0
+
+    def validate(current: Any, depth: int) -> None:
+        nonlocal element_count
+        if depth > MAXIMUM_SAFE_DETAIL_PROJECTION_DEPTH:
+            raise AlphaFeasibilityDataError("business_error_evidence_invalid")
+        element_count += 1
+        if element_count > MAXIMUM_SAFE_DETAIL_PROJECTION_ELEMENTS:
+            raise AlphaFeasibilityDataError("business_error_evidence_invalid")
+        if isinstance(current, Mapping):
+            for key, item in current.items():
+                if (
+                    type(key) is not str
+                    or _contains_control_character(key)
+                    or (
+                        key != "[REDACTED_SECRET_FIELDS]"
+                        and _SECRET_TRANSPORT_KEY.search(key) is not None
+                    )
+                ):
+                    raise AlphaFeasibilityDataError(
+                        "business_error_evidence_invalid"
+                    )
+                validate(item, depth + 1)
+            return
+        if isinstance(current, (list, tuple)):
+            for item in current:
+                validate(item, depth + 1)
+            return
+        if type(current) is str:
+            if (
+                _contains_control_character(current)
+                or _SECRET_STRING_ASSIGNMENT.search(current) is not None
+            ):
+                raise AlphaFeasibilityDataError(
+                    "business_error_evidence_invalid"
+                )
+            _reject_embedded_post_cutoff_date(
+                current, "business_error_evidence_invalid"
+            )
+            return
+        if current is None or type(current) in {bool, int}:
+            return
+        raise AlphaFeasibilityDataError("business_error_evidence_invalid")
+
+    validate(value, 0)
+
+
+def _detail_semantic_text(
+    value: Any,
+    *,
+    token: str | None,
+    request_id: str | None,
+) -> str:
+    fragments: list[str] = []
+    pending = [value]
+    while pending and sum(len(item) for item in fragments) < 4000:
+        current = pending.pop()
+        if isinstance(current, Mapping):
+            for key in sorted(current, reverse=True):
+                fragments.append(str(key))
+                pending.append(current[key])
+        elif isinstance(current, (list, tuple)):
+            pending.extend(reversed(current))
+        elif type(current) is str:
+            fragments.append(current)
+        elif type(current) is int or isinstance(current, Decimal):
+            fragments.append(str(current))
+    return _sanitize_provider_text(
+        " ".join(fragments), token=token, request_id=request_id
+    )
+
+
+def _classify_business_error_semantics(
+    sanitized_msg: str,
+    sanitized_detail: str,
+) -> str:
+    """Classify only provider text semantics; the numeric code is never consulted."""
+
+    text = f"{sanitized_msg}\n{sanitized_detail}".casefold()
+    for category, markers in _BUSINESS_ERROR_MARKERS:
+        if any(_semantic_marker_present(text, marker) for marker in markers):
+            return category
+    return "UPSTREAM_UNKNOWN_ERROR"
+
+
+def _semantic_marker_present(text: str, marker: str) -> bool:
+    if marker.isascii() and re.fullmatch(r"[a-z ]+", marker) is not None:
+        return re.search(rf"(?<![a-z]){re.escape(marker)}(?![a-z])", text) is not None
+    return marker in text
+
+
+def _reasonable_retry_after_seconds(value: Any) -> int | None:
+    if type(value) is int:
+        parsed = value
+    elif type(value) is str and re.fullmatch(r"[0-9]{1,3}", value.strip()):
+        parsed = int(value.strip())
+    else:
+        return None
+    if 1 <= parsed <= MAXIMUM_REASONABLE_RETRY_AFTER_SECONDS:
+        return parsed
+    return None
+
+
+def _extract_retry_after_seconds(detail: Any, semantic_text: str) -> int | None:
+    pending = [detail]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, Mapping):
+            for key in sorted(current, reverse=True):
+                value = current[key]
+                if str(key).casefold() in {
+                    "retry_after",
+                    "retry_after_seconds",
+                    "retry-after",
+                }:
+                    parsed = _reasonable_retry_after_seconds(value)
+                    if parsed is not None:
+                        return parsed
+                pending.append(value)
+        elif isinstance(current, (list, tuple)):
+            pending.extend(reversed(current))
+    match = _RETRY_AFTER_TEXT.search(semantic_text)
+    if match is None:
+        return None
+    return _reasonable_retry_after_seconds(match.group(1))
+
+
+def _utc_timestamp(value: datetime, label: str) -> datetime:
+    if not isinstance(value, datetime) or value.tzinfo is None:
+        raise AlphaFeasibilityDataError(f"invalid_{label}")
+    return value.astimezone(timezone.utc)
+
+
+def _utc_now() -> datetime:
+    return datetime.now(timezone.utc)
+
+
+def _path_is_within_data_tmp(path: Path) -> bool:
+    try:
+        path.resolve(strict=False).relative_to(DATA_TMP_ROOT.resolve(strict=False))
+    except ValueError:
+        return False
+    return True
+
+
+def extract_safe_response_semantics(
+    raw: bytes,
+    *,
+    task: "CollectionTask",
+    token: str | None,
+    requested_at: datetime,
+    completed_at: datetime,
+) -> SafeResponseSemantics:
+    """Extract a closed safe summary after the complete P1.5 tree scan.
+
+    The function performs no I/O.  It is intentionally usable for both
+    successful ``code == 0`` responses and non-zero business responses.
+    """
+
+    _validate_collection_task_contract(task)
+    if not isinstance(raw, bytes) or len(raw) > MAXIMUM_RESPONSE_BYTES:
+        raise AlphaFeasibilityDataError("response_body_too_large")
+    if token and token.encode("utf-8") in raw:
+        raise AlphaFeasibilityDataError("transport_extension_secret_detected")
+    root = strict_json_loads(raw, label="response")
+    if not isinstance(root, Mapping):
+        raise AlphaFeasibilityDataError("semantic_core_type_invalid")
+    if _contains_unicode_surrogate(root):
+        raise AlphaFeasibilityDataError("unknown_non_json_value")
+    if token and _contains_decoded_text(root, token):
+        raise AlphaFeasibilityDataError("transport_extension_secret_detected")
+    _reject_p15_full_raw_tree(root, token=token)
+    if not REQUIRED_RESPONSE_ROOT_FIELDS.issubset(root):
+        raise AlphaFeasibilityDataError("semantic_core_missing")
+    code = root["code"]
+    msg = root["msg"]
+    if type(code) is not int or (msg is not None and type(msg) is not str):
+        raise AlphaFeasibilityDataError("semantic_core_type_invalid")
+    extensions = {
+        key: value for key, value in root.items() if key not in REQUIRED_RESPONSE_ROOT_FIELDS
+    }
+    extension_metadata = _validate_transport_extensions(extensions, token=token)
+    request_id_value = extensions.get("request_id")
+    request_id = request_id_value if type(request_id_value) is str else None
+    detail_present = "detail" in extensions
+    detail = extensions.get("detail")
+    sanitized_msg = _sanitize_provider_text(msg, token=token, request_id=request_id)
+    sanitized_detail = (
+        _detail_semantic_text(detail, token=token, request_id=request_id)
+        if detail_present
+        else ""
+    )
+    classification = (
+        None
+        if code == 0
+        else _classify_business_error_semantics(sanitized_msg, sanitized_detail)
+    )
+    detail_category = (
+        None
+        if code == 0 or not detail_present
+        else _classify_business_error_semantics("", sanitized_detail)
+    )
+    if detail_category == "UPSTREAM_UNKNOWN_ERROR":
+        detail_category = None
+    retry_after_seconds = (
+        _extract_retry_after_seconds(detail, f"{sanitized_msg}\n{sanitized_detail}")
+        if classification == "RATE_LIMITED"
+        else None
+    )
+    requested_utc = _utc_timestamp(requested_at, "requested_at")
+    completed_utc = _utc_timestamp(completed_at, "completed_at")
+    if completed_utc < requested_utc:
+        raise AlphaFeasibilityDataError("invalid_completed_at")
+    return SafeResponseSemantics(
+        business_code=code,
+        classification=classification,
+        sanitized_msg=sanitized_msg,
+        msg_sha256=hashlib.sha256(_canonical_transport_json_bytes(msg)).hexdigest(),
+        detail_type=(
+            extension_metadata.type_by_field["detail"] if detail_present else None
+        ),
+        safe_detail_projection=(
+            {
+                "json_type": extension_metadata.type_by_field["detail"],
+                "value": _safe_detail_projection_value(
+                    detail, token=token, request_id=request_id
+                ),
+                "sanitized_text": sanitized_detail,
+                "semantic_category": detail_category,
+            }
+            if detail_present
+            else None
+        ),
+        detail_sha256=(
+            extension_metadata.value_sha256_by_field["detail"]
+            if detail_present
+            else None
+        ),
+        request_id_sha256=extension_metadata.value_sha256_by_field.get("request_id"),
+        raw_transport_sha256=hashlib.sha256(raw).hexdigest(),
+        response_body_sha256=hashlib.sha256(raw).hexdigest(),
+        response_byte_count=len(raw),
+        sanitized_params=MappingProxyType(dict(sorted(task.params.items()))),
+        requested_fields=tuple(task.fields),
+        requested_at=requested_utc,
+        completed_at=completed_utc,
+        retry_after_seconds=retry_after_seconds,
+    )
+
+
+def business_error_retry_policy(
+    classification: str,
+    *,
+    retry_after_seconds: int | None,
+    minimum_request_interval_seconds: Decimal = MINIMUM_REAL_TRANSPORT_INTERVAL_SECONDS,
+) -> BusinessErrorRetryPolicy:
+    if classification not in BUSINESS_ERROR_CLASSIFICATIONS:
+        raise AlphaFeasibilityDataError("business_retry_policy_invalid")
+    if (
+        not isinstance(minimum_request_interval_seconds, Decimal)
+        or not minimum_request_interval_seconds.is_finite()
+        or minimum_request_interval_seconds < MINIMUM_REAL_TRANSPORT_INTERVAL_SECONDS
+    ):
+        raise AlphaFeasibilityDataError("business_retry_interval_too_short")
+    if classification not in RETRYABLE_BUSINESS_ERROR_CLASSIFICATIONS:
+        return BusinessErrorRetryPolicy(classification, 0, Decimal("0"))
+    if classification == "RATE_LIMITED":
+        accepted_retry_after = _reasonable_retry_after_seconds(retry_after_seconds)
+        delay = (
+            Decimal(accepted_retry_after)
+            if accepted_retry_after is not None
+            else DEFAULT_RATE_LIMIT_RETRY_SECONDS
+        )
+        delay = max(delay, minimum_request_interval_seconds)
+    else:
+        delay = minimum_request_interval_seconds
+    return BusinessErrorRetryPolicy(classification, 1, delay)
 
 
 def _contains_decoded_text(value: Any, needle: str) -> bool:
@@ -1428,6 +2240,12 @@ def _validate_token(token: Any) -> str:
     return token
 
 
+def validate_tushare_token_for_process(value: Any) -> str:
+    """Validate an in-memory credential without logging or persistence."""
+
+    return _validate_token(value)
+
+
 def _decimal(value: Any, label: str, *, minimum: Decimal | None = None) -> tuple[Decimal, str]:
     if isinstance(value, bool) or value is None:
         raise AlphaFeasibilityDataError(f"invalid_{label}")
@@ -1932,21 +2750,82 @@ def validate_response_bytes(
                 _validate_transport_extensions({"error": data}, token=token)
             except AlphaFeasibilityDataError as exc:
                 raise AlphaFeasibilityDataError(exc.code, diagnostic=diagnostic) from exc
-        category = classify_message_category(
-            upstream_code=code,
-            http_status=http_status,
-            message=root["msg"],
-            error=None,
-            transport_status="response_received",
-            channel="http",
-            secret=token or "",
+        request_id_value = transport_extensions.get("request_id")
+        request_id = request_id_value if type(request_id_value) is str else None
+        detail_present = "detail" in transport_extensions
+        detail = transport_extensions.get("detail")
+        sanitized_msg = _sanitize_provider_text(
+            root["msg"], token=token, request_id=request_id
+        )
+        sanitized_detail = (
+            _detail_semantic_text(detail, token=token, request_id=request_id)
+            if detail_present
+            else ""
+        )
+        classification = _classify_business_error_semantics(
+            sanitized_msg, sanitized_detail
+        )
+        detail_category = (
+            _classify_business_error_semantics("", sanitized_detail)
+            if detail_present
+            else None
+        )
+        if detail_category == "UPSTREAM_UNKNOWN_ERROR":
+            detail_category = None
+        category = _BUSINESS_CLASSIFICATION_TO_LEGACY_CATEGORY[classification]
+        safe_evidence_diagnostic = (
+            {
+                "sanitized_msg": sanitized_msg,
+                "msg_sha256": hashlib.sha256(
+                    _canonical_transport_json_bytes(root["msg"])
+                ).hexdigest(),
+                "detail_type": (
+                    extension_metadata.type_by_field["detail"]
+                    if detail_present
+                    else None
+                ),
+                "safe_detail_projection": (
+                    {
+                        "json_type": extension_metadata.type_by_field["detail"],
+                        "value": _safe_detail_projection_value(
+                            detail, token=token, request_id=request_id
+                        ),
+                        "sanitized_text": sanitized_detail,
+                        "semantic_category": detail_category,
+                    }
+                    if detail_present
+                    else None
+                ),
+                "detail_sha256": (
+                    extension_metadata.value_sha256_by_field["detail"]
+                    if detail_present
+                    else None
+                ),
+                "request_id_sha256": extension_metadata.value_sha256_by_field.get(
+                    "request_id"
+                ),
+                "response_body_sha256": raw_sha,
+                "retry_after_seconds": (
+                    _extract_retry_after_seconds(
+                        detail, f"{sanitized_msg}\n{sanitized_detail}"
+                    )
+                    if classification == "RATE_LIMITED"
+                    else None
+                ),
+            }
+            if require_full_raw_safety
+            else {}
         )
         diagnostic = {
             **diagnostic,
             "upstream_code": code,
             "upstream_error_category": category,
+            "business_error_classification": classification,
+            **safe_evidence_diagnostic,
         }
-        _raise_response_error(f"upstream_{category}_error", diagnostic)
+        _raise_response_error(
+            _BUSINESS_CLASSIFICATION_TO_FAILURE_CODE[classification], diagnostic
+        )
 
     # A successful semantic core must not smuggle a post-cutoff observation in
     # its message. Error messages are classified above by code/msg and are
@@ -2453,6 +3332,24 @@ class CreateOnlyTaskStore:
     def raw_path(self, task: CollectionTask) -> Path:
         return self.root / "raw" / f"{task.task_id}.json"
 
+    def raw_error_path(self, task: CollectionTask, attempt_number: int) -> Path:
+        return (
+            self.root
+            / "raw_errors"
+            / task.task_id
+            / f"{attempt_number:06d}.json"
+        )
+
+    def business_error_path(
+        self, task: CollectionTask, attempt_number: int
+    ) -> Path:
+        return (
+            self.root
+            / "business_errors"
+            / task.task_id
+            / f"{attempt_number:06d}.json"
+        )
+
     def is_complete(self, task: CollectionTask) -> bool:
         provenance_count = sum(
             path.is_file() for path in (self.started_path(task), self.import_path(task))
@@ -2480,8 +3377,18 @@ class CreateOnlyTaskStore:
             raise AlphaFeasibilityDataError("import_artifact_unreadable") from exc
         if not isinstance(value, Mapping):
             raise AlphaFeasibilityDataError("import_artifact_invalid")
+        schema_version = value.get("schema_version")
+        schema_path = (
+            IMPORT_SCHEMA_PATH
+            if schema_version == IMPORT_SCHEMA_VERSION
+            else PARENT_REUSE_IMPORT_SCHEMA_PATH
+            if schema_version == PARENT_REUSE_IMPORT_SCHEMA_VERSION
+            else None
+        )
+        if schema_path is None:
+            raise AlphaFeasibilityDataError("import_artifact_schema_invalid")
         try:
-            validate_json_schema(value, IMPORT_SCHEMA_PATH)
+            validate_json_schema(value, schema_path)
         except SchemaValidationError as exc:
             raise AlphaFeasibilityDataError("import_artifact_schema_invalid") from exc
         unsigned = dict(value)
@@ -2495,6 +3402,65 @@ class CreateOnlyTaskStore:
             or declared != canonical_sha256(unsigned)
         ):
             raise AlphaFeasibilityDataError("import_artifact_semantics_mismatch")
+        if schema_version == PARENT_REUSE_IMPORT_SCHEMA_VERSION:
+            try:
+                raw_bytes = self.raw_path(task).read_bytes()
+                response_bytes = self.response_path(task).read_bytes()
+                response = strict_json_loads(
+                    response_bytes, label="parent_reuse_response_artifact"
+                )
+            except OSError as exc:
+                raise AlphaFeasibilityDataError(
+                    "parent_reuse_artifact_unreadable"
+                ) from exc
+            if not isinstance(response, Mapping):
+                raise AlphaFeasibilityDataError(
+                    "parent_reuse_response_artifact_invalid"
+                )
+            response_unsigned = dict(response)
+            response_artifact_sha256 = response_unsigned.pop(
+                "response_artifact_sha256", None
+            )
+            raw_sha256 = hashlib.sha256(raw_bytes).hexdigest()
+            response_file_sha256 = hashlib.sha256(response_bytes).hexdigest()
+            parent_kind = value.get("parent_provenance_kind")
+            parent_attempt_hashes = value.get(
+                "parent_attempt_artifact_sha256_by_number"
+            )
+            parent_request_count = value.get("parent_network_request_count")
+            if (
+                value.get("state") != "PARENT_RUN_TASK_REUSED"
+                or value.get("task_sha256") != canonical_sha256(task.to_dict())
+                or value.get("parent_raw_artifact_sha256") != raw_sha256
+                or value.get("raw_transport_sha256") != raw_sha256
+                or value.get("parent_response_file_sha256")
+                != response_file_sha256
+                or value.get("parent_response_artifact_sha256")
+                != response_artifact_sha256
+                or response_artifact_sha256 != canonical_sha256(response_unsigned)
+                or response.get("task_id") != task.task_id
+                or response.get("endpoint") != task.endpoint
+                or response.get("plan_sha256") != task.plan_sha256
+                or response.get("raw_response_sha256") != raw_sha256
+                or response.get("normalized_content_sha256")
+                != value.get("normalized_content_sha256")
+                or not isinstance(parent_attempt_hashes, list)
+                or (
+                    parent_kind == "offline_p14d_import"
+                    and (parent_request_count != 0 or parent_attempt_hashes)
+                )
+                or (
+                    parent_kind == "network"
+                    and (
+                        type(parent_request_count) is not int
+                        or parent_request_count < 1
+                        or len(parent_attempt_hashes) != parent_request_count
+                    )
+                )
+            ):
+                raise AlphaFeasibilityDataError(
+                    "parent_reuse_import_semantics_mismatch"
+                )
         return value
 
     def _load_attempts(self, task: CollectionTask) -> tuple[Mapping[str, Any], ...]:
@@ -2526,6 +3492,112 @@ class CreateOnlyTaskStore:
             attempts.append(value)
         return tuple(attempts)
 
+    def _load_business_errors(
+        self, task: CollectionTask
+    ) -> tuple[Mapping[str, Any], ...]:
+        directory = self.root / "business_errors" / task.task_id
+        raw_directory = self.root / "raw_errors" / task.task_id
+        if not directory.exists():
+            if raw_directory.exists():
+                if (
+                    not raw_directory.is_dir()
+                    or raw_directory.is_symlink()
+                    or any(raw_directory.iterdir())
+                ):
+                    raise AlphaFeasibilityDataError(
+                        "business_error_journal_incomplete"
+                    )
+            return ()
+        if not directory.is_dir() or directory.is_symlink():
+            raise AlphaFeasibilityDataError("business_error_journal_invalid")
+        paths = sorted(directory.iterdir())
+        if any(not path.is_file() or path.is_symlink() for path in paths):
+            raise AlphaFeasibilityDataError("business_error_journal_invalid")
+        errors: list[Mapping[str, Any]] = []
+        seen_attempts: set[int] = set()
+        for path in paths:
+            match = re.fullmatch(r"([0-9]{6})\.json", path.name)
+            if match is None:
+                raise AlphaFeasibilityDataError("business_error_journal_invalid")
+            attempt_number = int(match.group(1))
+            if attempt_number < 1 or attempt_number in seen_attempts:
+                raise AlphaFeasibilityDataError("business_error_journal_invalid")
+            seen_attempts.add(attempt_number)
+            if path != self.business_error_path(task, attempt_number):
+                raise AlphaFeasibilityDataError("business_error_journal_invalid")
+            if not self.attempt_path(task, attempt_number).is_file():
+                raise AlphaFeasibilityDataError("business_error_without_attempt_claim")
+            try:
+                value = strict_json_loads(
+                    path.read_bytes(), label="business_error_artifact"
+                )
+            except OSError as exc:
+                raise AlphaFeasibilityDataError(
+                    "business_error_artifact_unreadable"
+                ) from exc
+            if not isinstance(value, Mapping):
+                raise AlphaFeasibilityDataError("business_error_artifact_invalid")
+            try:
+                validate_json_schema(value, BUSINESS_ERROR_SCHEMA_PATH)
+            except SchemaValidationError as exc:
+                raise AlphaFeasibilityDataError(
+                    "business_error_artifact_schema_invalid"
+                ) from exc
+            unsigned = dict(value)
+            declared = unsigned.pop("business_error_artifact_sha256", None)
+            evidence = value.get("evidence")
+            if not isinstance(evidence, Mapping):
+                raise AlphaFeasibilityDataError("business_error_evidence_invalid")
+            semantics = _safe_response_semantics_from_mapping(evidence)
+            raw_path = self.raw_error_path(task, attempt_number)
+            try:
+                raw_error = raw_path.read_bytes()
+                raw_sha256 = hashlib.sha256(raw_error).hexdigest()
+            except OSError as exc:
+                raise AlphaFeasibilityDataError(
+                    "business_error_raw_artifact_unreadable"
+                ) from exc
+            if (
+                value.get("task_id") != task.task_id
+                or value.get("endpoint") != task.endpoint
+                or value.get("plan_sha256") != task.plan_sha256
+                or value.get("task_sha256") != canonical_sha256(task.to_dict())
+                or value.get("attempt_number") != attempt_number
+                or value.get("network_request_count") != 1
+                or value.get("request_count_semantics")
+                != P15_REQUEST_COUNT_SEMANTICS
+                or value.get("raw_error_artifact_sha256") != raw_sha256
+                or evidence.get("response_body_sha256") != raw_sha256
+                or evidence.get("raw_transport_sha256") != raw_sha256
+                or evidence.get("response_byte_count") != len(raw_error)
+                or evidence.get("sanitized_params") != dict(task.params)
+                or evidence.get("requested_fields") != list(task.fields)
+                or declared != canonical_sha256(unsigned)
+            ):
+                raise AlphaFeasibilityDataError(
+                    "business_error_artifact_semantics_mismatch"
+                )
+            replayed_semantics = extract_safe_response_semantics(
+                raw_error,
+                task=task,
+                token=None,
+                requested_at=semantics.requested_at,
+                completed_at=semantics.completed_at,
+            )
+            if replayed_semantics.to_dict() != dict(evidence):
+                raise AlphaFeasibilityDataError(
+                    "business_error_artifact_semantics_mismatch"
+                )
+            errors.append(value)
+        if (
+            not raw_directory.is_dir()
+            or raw_directory.is_symlink()
+            or {path.name for path in raw_directory.iterdir()}
+            != {f"{item['attempt_number']:06d}.json" for item in errors}
+        ):
+            raise AlphaFeasibilityDataError("business_error_journal_incomplete")
+        return tuple(sorted(errors, key=lambda item: item["attempt_number"]))
+
     def _terminal_quarantine_code(self, task: CollectionTask) -> str | None:
         path = self.quarantine_path(task)
         if not path.exists():
@@ -2536,8 +3608,12 @@ class CreateOnlyTaskStore:
             raise AlphaFeasibilityDataError("quarantine_artifact_unreadable") from exc
         if not isinstance(value, Mapping):
             raise AlphaFeasibilityDataError("quarantine_artifact_invalid")
+        schema_version = value.get("schema_version")
+        schema_path = QUARANTINE_SCHEMA_PATHS.get(schema_version)
+        if schema_path is None:
+            raise AlphaFeasibilityDataError("quarantine_artifact_schema_invalid")
         try:
-            validate_json_schema(value, QUARANTINE_SCHEMA_PATH)
+            validate_json_schema(value, schema_path)
         except SchemaValidationError as exc:
             raise AlphaFeasibilityDataError("quarantine_artifact_schema_invalid") from exc
         if (
@@ -2549,6 +3625,64 @@ class CreateOnlyTaskStore:
         code = value.get("failure_code")
         if type(code) is not str:
             raise AlphaFeasibilityDataError("quarantine_artifact_invalid")
+        if schema_version == QUARANTINE_SCHEMA_VERSION:
+            if value.get("state") == "TRANSPORT_ATTEMPT_QUARANTINED_NO_RESPONSE":
+                attempts = self._load_attempts(task)
+                if (
+                    code not in RETRYABLE_ATTEMPT_FAILURES
+                    or value.get("reason") != code
+                    or value.get("terminal_attempt_number") != len(attempts)
+                    or not attempts
+                ):
+                    raise AlphaFeasibilityDataError(
+                        "quarantine_artifact_semantics_mismatch"
+                    )
+            evidence = value.get("business_error_evidence")
+            classification = value.get("business_error_classification")
+            attempt_number = value.get("terminal_attempt_number")
+            artifact_sha256 = value.get("business_error_artifact_sha256")
+            raw_persisted = value.get("raw_response_persisted")
+            if evidence is None:
+                if classification is not None or artifact_sha256 is not None or raw_persisted:
+                    raise AlphaFeasibilityDataError(
+                        "quarantine_artifact_semantics_mismatch"
+                    )
+            else:
+                safe_semantics = _safe_response_semantics_from_mapping(evidence)
+                if (
+                    not isinstance(evidence, Mapping)
+                    or classification != evidence.get("classification")
+                    or value.get("upstream_code") != evidence.get("business_code")
+                    or value.get("raw_transport_sha256")
+                    != evidence.get("response_body_sha256")
+                    or evidence.get("raw_transport_sha256")
+                    != evidence.get("response_body_sha256")
+                    or evidence.get("sanitized_params") != dict(task.params)
+                    or evidence.get("requested_fields") != list(task.fields)
+                    or safe_semantics.classification != classification
+                ):
+                    raise AlphaFeasibilityDataError(
+                        "quarantine_artifact_semantics_mismatch"
+                    )
+                if raw_persisted:
+                    errors = {
+                        item["attempt_number"]: item
+                        for item in self._load_business_errors(task)
+                    }
+                    artifact = errors.get(attempt_number)
+                    if (
+                        artifact is None
+                        or artifact.get("business_error_artifact_sha256")
+                        != artifact_sha256
+                        or artifact.get("evidence") != evidence
+                    ):
+                        raise AlphaFeasibilityDataError(
+                            "quarantine_artifact_semantics_mismatch"
+                        )
+                elif artifact_sha256 is not None:
+                    raise AlphaFeasibilityDataError(
+                        "quarantine_artifact_semantics_mismatch"
+                    )
         return code
 
     def _load_response(self, task: CollectionTask) -> TaskExecutionResult:
@@ -2557,8 +3691,13 @@ class CreateOnlyTaskStore:
         if started_exists == import_exists:
             raise AlphaFeasibilityDataError("response_provenance_invalid")
         if import_exists:
-            self._load_import(task)
-            request_origin = "offline_p14d_import"
+            imported = self._load_import(task)
+            request_origin = (
+                "offline_parent_run_reuse"
+                if imported.get("schema_version")
+                == PARENT_REUSE_IMPORT_SCHEMA_VERSION
+                else "offline_p14d_import"
+            )
             network_request_count = 0
         else:
             started = self._load_started(task)
@@ -2777,6 +3916,10 @@ class CreateOnlyTaskStore:
         recover_interrupted_attempts: bool = False,
         maximum_attempts_per_fingerprint: int = 1,
         persist_full_raw_transport: bool = False,
+        clock: Callable[[], datetime] = _utc_now,
+        authorized_business_retry_parent_attempt: int | None = None,
+        defer_retryable_business_errors: bool = False,
+        terminalize_transport_interruptions: bool = False,
     ) -> TaskExecutionResult:
         # Revalidate even frozen dataclasses at the store boundary so a forged
         # or deserialized task cannot create a durable started claim or reach
@@ -2803,9 +3946,25 @@ class CreateOnlyTaskStore:
             raise AlphaFeasibilityDataError("invalid_maximum_attempts")
         if type(persist_full_raw_transport) is not bool:
             raise AlphaFeasibilityDataError("invalid_raw_persistence_setting")
+        if type(defer_retryable_business_errors) is not bool:
+            raise AlphaFeasibilityDataError("invalid_business_retry_setting")
+        if type(terminalize_transport_interruptions) is not bool:
+            raise AlphaFeasibilityDataError("invalid_transport_interruption_setting")
+        if terminalize_transport_interruptions and (
+            not recover_interrupted_attempts or not persist_full_raw_transport
+        ):
+            raise AlphaFeasibilityDataError("invalid_transport_interruption_setting")
+        if not callable(clock):
+            raise AlphaFeasibilityDataError("invalid_business_retry_clock")
+        if authorized_business_retry_parent_attempt is not None and (
+            type(authorized_business_retry_parent_attempt) is not int
+            or authorized_business_retry_parent_attempt < 1
+        ):
+            raise AlphaFeasibilityDataError("invalid_business_retry_authorization")
         _validate_token(token)
 
         attempts: tuple[Mapping[str, Any], ...] = ()
+        business_errors: tuple[Mapping[str, Any], ...] = ()
         if started_exists:
             started = self._load_started(task)
             recoverable_started = (
@@ -2817,6 +3976,31 @@ class CreateOnlyTaskStore:
             if terminal_code is not None:
                 raise AlphaFeasibilityDataError(terminal_code)
             attempts = self._load_attempts(task)
+            business_errors = self._load_business_errors(task)
+            if business_errors:
+                last_business_error = business_errors[-1]
+                parent_attempt = last_business_error["attempt_number"]
+                if authorized_business_retry_parent_attempt != parent_attempt:
+                    raise AlphaFeasibilityDataError(
+                        "business_error_retry_authorization_required"
+                    )
+                if len(attempts) != parent_attempt:
+                    raise AlphaFeasibilityDataError(
+                        "business_error_retry_already_consumed"
+                    )
+                evidence = last_business_error["evidence"]
+                policy = business_error_retry_policy(
+                    evidence["classification"],
+                    retry_after_seconds=evidence["retry_after_seconds"],
+                )
+                if policy.maximum_additional_attempts != 1:
+                    raise AlphaFeasibilityDataError(
+                        "business_error_not_retryable"
+                    )
+            elif authorized_business_retry_parent_attempt is not None:
+                raise AlphaFeasibilityDataError(
+                    "business_error_retry_parent_missing"
+                )
             if self.raw_path(task).exists():
                 try:
                     persisted_raw = self.raw_path(task).read_bytes()
@@ -2841,16 +4025,23 @@ class CreateOnlyTaskStore:
                 return self._load_response(task)
             if len(attempts) >= maximum_attempts_per_fingerprint:
                 raise AlphaFeasibilityDataError("maximum_attempts_exhausted")
-        elif self.raw_path(task).exists() or self.quarantine_path(task).exists():
+        elif (
+            self.raw_path(task).exists()
+            or self.quarantine_path(task).exists()
+            or (self.root / "business_errors" / task.task_id).exists()
+            or (self.root / "raw_errors" / task.task_id).exists()
+        ):
             raise AlphaFeasibilityDataError("orphan_task_artifact")
+        elif authorized_business_retry_parent_attempt is not None:
+            raise AlphaFeasibilityDataError("business_error_retry_parent_missing")
 
         if not started_exists:
             started = _started_payload(
                 task, recoverable=recover_interrupted_attempts
             )
             _write_json_create_only(self.started_path(task), started, token=token)
+        attempt_number = len(attempts) + 1 if recover_interrupted_attempts else 1
         if recover_interrupted_attempts:
-            attempt_number = len(attempts) + 1
             _write_json_create_only(
                 self.attempt_path(task, attempt_number),
                 _attempt_payload(task, attempt_number),
@@ -2861,7 +4052,10 @@ class CreateOnlyTaskStore:
         response_byte_count: int | None = None
         token_leak_check = "NOT_CONFIRMED"
         validated: ValidatedResponse | None = None
+        raw: bytes | None = None
+        safe_semantics: SafeResponseSemantics | None = None
         try:
+            requested_at = _utc_timestamp(clock(), "requested_at")
             transport_response = transport(
                 endpoint=task.endpoint,
                 params=task.params,
@@ -2870,6 +4064,7 @@ class CreateOnlyTaskStore:
                 timeout_seconds=timeout_seconds,
                 maximum_response_bytes=maximum_response_bytes,
             )
+            completed_at = _utc_timestamp(clock(), "completed_at")
             if isinstance(transport_response, bytes):
                 # Backward-compatible offline injection boundary.  The real
                 # HTTPS transport always supplies the observed status.
@@ -2885,6 +4080,20 @@ class CreateOnlyTaskStore:
             if token.encode("utf-8") not in raw:
                 raw_sha = hashlib.sha256(raw).hexdigest()
                 token_leak_check = "RAW_BYTES_PASSED"
+            if http_status != 200:
+                # An HTTP status rejected by the transport contract is not a
+                # provider business response.  Bind only transport metadata;
+                # never accept or classify message/detail semantics from it.
+                raise AlphaFeasibilityDataError("http_status_not_success")
+            if persist_full_raw_transport:
+                safe_semantics = extract_safe_response_semantics(
+                    raw,
+                    task=task,
+                    token=token,
+                    requested_at=requested_at,
+                    completed_at=completed_at,
+                )
+                token_leak_check = "PASSED"
             validated = validate_response_bytes(
                 task,
                 raw,
@@ -2968,8 +4177,72 @@ class CreateOnlyTaskStore:
                 if isinstance(exc, AlphaFeasibilityDataError)
                 else {}
             )
-            if recover_interrupted_attempts and code in RETRYABLE_ATTEMPT_FAILURES:
+            if (
+                recover_interrupted_attempts
+                and code in RETRYABLE_ATTEMPT_FAILURES
+                and not terminalize_transport_interruptions
+            ):
                 raise
+            business_error_artifact: Mapping[str, Any] | None = None
+            business_error_artifact_sha256: str | None = None
+            business_error_evidence: Mapping[str, Any] | None = None
+            if (
+                safe_semantics is not None
+                and safe_semantics.business_code != 0
+                and safe_semantics.classification is not None
+            ):
+                expected_code = _BUSINESS_CLASSIFICATION_TO_FAILURE_CODE[
+                    safe_semantics.classification
+                ]
+                if code != expected_code:
+                    raise AlphaFeasibilityDataError(
+                        "business_error_evidence_mismatch"
+                    ) from exc
+                business_error_evidence = safe_semantics.to_dict()
+                if (
+                    raw is not None
+                    and recover_interrupted_attempts
+                    and persist_full_raw_transport
+                    and _path_is_within_data_tmp(self.root)
+                ):
+                    _guard_artifact_secret(raw, token)
+                    _write_create_only(
+                        self.raw_error_path(task, attempt_number), raw
+                    )
+                    business_error_artifact = _business_error_payload(
+                        task,
+                        attempt_number=attempt_number,
+                        evidence=safe_semantics,
+                        raw_error_artifact_sha256=safe_semantics.response_body_sha256,
+                    )
+                    try:
+                        validate_json_schema(
+                            business_error_artifact, BUSINESS_ERROR_SCHEMA_PATH
+                        )
+                    except SchemaValidationError as schema_exc:
+                        raise AlphaFeasibilityDataError(
+                            "business_error_artifact_schema_invalid"
+                        ) from schema_exc
+                    _write_json_create_only(
+                        self.business_error_path(task, attempt_number),
+                        business_error_artifact,
+                        token=token,
+                    )
+                    business_error_artifact_sha256 = business_error_artifact[
+                        "business_error_artifact_sha256"
+                    ]
+                    policy = business_error_retry_policy(
+                        safe_semantics.classification,
+                        retry_after_seconds=safe_semantics.retry_after_seconds,
+                    )
+                    if (
+                        defer_retryable_business_errors
+                        and
+                        policy.maximum_additional_attempts == 1
+                        and not business_errors
+                        and attempt_number < maximum_attempts_per_fingerprint
+                    ):
+                        raise
             if (
                 code == "transport_extension_secret_detected"
                 and "token_leak_check" not in diagnostic
@@ -2983,9 +4256,18 @@ class CreateOnlyTaskStore:
                 "observed_root_fields",
                 list(validated.observed_root_fields) if validated is not None else [],
             )
+            no_response_interruption = (
+                terminalize_transport_interruptions
+                and code in RETRYABLE_ATTEMPT_FAILURES
+                and raw is None
+            )
             quarantine = {
                 "schema_version": QUARANTINE_SCHEMA_VERSION,
-                "state": "RESPONSE_QUARANTINED",
+                "state": (
+                    "TRANSPORT_ATTEMPT_QUARANTINED_NO_RESPONSE"
+                    if no_response_interruption
+                    else "RESPONSE_QUARANTINED"
+                ),
                 "task_id": task.task_id,
                 "endpoint": task.endpoint,
                 "plan_sha256": task.plan_sha256,
@@ -3020,6 +4302,17 @@ class CreateOnlyTaskStore:
                 "upstream_error_category": diagnostic.get(
                     "upstream_error_category"
                 ),
+                "business_error_classification": (
+                    safe_semantics.classification
+                    if safe_semantics is not None
+                    and safe_semantics.business_code != 0
+                    else None
+                ),
+                "business_error_evidence": business_error_evidence,
+                "business_error_artifact_sha256": (
+                    business_error_artifact_sha256
+                ),
+                "terminal_attempt_number": attempt_number,
                 "data_failure_category": diagnostic.get("data_failure_category"),
                 "observed_data_fields": diagnostic.get(
                     "observed_data_fields",
@@ -3033,6 +4326,8 @@ class CreateOnlyTaskStore:
                     (
                         list(validated.missing_required_data_fields)
                         if validated is not None
+                        else []
+                        if no_response_interruption
                         else list(task.fields)
                     ),
                 ),
@@ -3075,7 +4370,7 @@ class CreateOnlyTaskStore:
                 "token_leak_check": diagnostic.get(
                     "token_leak_check", token_leak_check
                 ),
-                "raw_response_persisted": False,
+                "raw_response_persisted": business_error_artifact is not None,
                 "locked_test_status": dict(LOCKED_TEST_STATUS),
                 "locked_test_consumed": False,
             }
@@ -3090,6 +4385,78 @@ class CreateOnlyTaskStore:
             if isinstance(exc, AlphaFeasibilityDataError):
                 raise
             raise AlphaFeasibilityDataError("unclassified_task_failure") from exc
+
+
+def retry_business_error_once(
+    store: CreateOnlyTaskStore,
+    task: CollectionTask,
+    *,
+    token: str,
+    transport: TushareTransport,
+    timeout_seconds: int,
+    maximum_response_bytes: int,
+    maximum_attempts_per_fingerprint: int,
+    minimum_request_interval_seconds: Decimal = MINIMUM_REAL_TRANSPORT_INTERVAL_SECONDS,
+    clock: Callable[[], datetime] = _utc_now,
+    sleeper: Callable[[float], None] = time.sleep,
+    terminalize_transport_interruptions: bool = False,
+) -> TaskExecutionResult:
+    """Consume the sole durable business-error retry for one fingerprint."""
+
+    if not isinstance(store, CreateOnlyTaskStore):
+        raise AlphaFeasibilityDataError("invalid_business_retry_store")
+    _validate_collection_task_contract(task)
+    if not callable(clock) or not callable(sleeper):
+        raise AlphaFeasibilityDataError("invalid_business_retry_clock")
+    terminal_code = store._terminal_quarantine_code(task)
+    if terminal_code is not None:
+        raise AlphaFeasibilityDataError(terminal_code)
+    started = store._load_started(task)
+    if started.get("schema_version") != RECOVERABLE_STARTED_SCHEMA_VERSION:
+        raise AlphaFeasibilityDataError("business_error_retry_parent_missing")
+    attempts = store._load_attempts(task)
+    business_errors = store._load_business_errors(task)
+    if not business_errors:
+        raise AlphaFeasibilityDataError("business_error_retry_parent_missing")
+    parent = business_errors[-1]
+    parent_attempt_number = parent["attempt_number"]
+    if len(attempts) != parent_attempt_number:
+        raise AlphaFeasibilityDataError("business_error_retry_already_consumed")
+    if len(business_errors) != 1:
+        raise AlphaFeasibilityDataError("business_error_retry_already_consumed")
+    evidence = parent["evidence"]
+    policy = business_error_retry_policy(
+        evidence["classification"],
+        retry_after_seconds=evidence["retry_after_seconds"],
+        minimum_request_interval_seconds=minimum_request_interval_seconds,
+    )
+    if policy.maximum_additional_attempts != 1:
+        raise AlphaFeasibilityDataError("business_error_not_retryable")
+    if parent_attempt_number >= maximum_attempts_per_fingerprint:
+        raise AlphaFeasibilityDataError("maximum_attempts_exhausted")
+    try:
+        completed_at = datetime.fromisoformat(evidence["completed_at"])
+    except (TypeError, ValueError) as exc:
+        raise AlphaFeasibilityDataError("business_error_evidence_invalid") from exc
+    completed_at = _utc_timestamp(completed_at, "completed_at")
+    now = _utc_timestamp(clock(), "retry_clock")
+    elapsed_seconds = Decimal(str((now - completed_at).total_seconds()))
+    remaining_seconds = policy.delay_seconds - max(elapsed_seconds, Decimal("0"))
+    if remaining_seconds > 0:
+        sleeper(float(remaining_seconds))
+    return store.execute(
+        task,
+        token=token,
+        transport=transport,
+        timeout_seconds=timeout_seconds,
+        maximum_response_bytes=maximum_response_bytes,
+        recover_interrupted_attempts=True,
+        maximum_attempts_per_fingerprint=maximum_attempts_per_fingerprint,
+        persist_full_raw_transport=True,
+        clock=clock,
+        authorized_business_retry_parent_attempt=parent_attempt_number,
+        terminalize_transport_interruptions=terminalize_transport_interruptions,
+    )
 
 
 def _started_payload(
@@ -3130,6 +4497,36 @@ def _attempt_payload(task: CollectionTask, attempt_number: int) -> dict[str, Any
         "locked_test_status": dict(LOCKED_TEST_STATUS),
         "locked_test_consumed": False,
     }
+
+
+def _business_error_payload(
+    task: CollectionTask,
+    *,
+    attempt_number: int,
+    evidence: SafeResponseSemantics,
+    raw_error_artifact_sha256: str,
+) -> dict[str, Any]:
+    if evidence.business_code == 0 or evidence.classification is None:
+        raise AlphaFeasibilityDataError("business_error_evidence_invalid")
+    return _self_hashed(
+        {
+            "schema_version": BUSINESS_ERROR_SCHEMA_VERSION,
+            "state": "BUSINESS_ERROR_RESPONSE_SCANNED",
+            "task_id": task.task_id,
+            "endpoint": task.endpoint,
+            "plan_sha256": task.plan_sha256,
+            "task_sha256": canonical_sha256(task.to_dict()),
+            "attempt_number": attempt_number,
+            "network_request_count": 1,
+            "request_count_semantics": P15_REQUEST_COUNT_SEMANTICS,
+            "evidence": evidence.to_dict(),
+            "raw_error_artifact_sha256": raw_error_artifact_sha256,
+            "raw_error_persisted": True,
+            "locked_test_status": dict(LOCKED_TEST_STATUS),
+            "locked_test_consumed": False,
+        },
+        "business_error_artifact_sha256",
+    )
 
 
 def _self_hashed(value: Mapping[str, Any], field: str) -> dict[str, Any]:
@@ -3311,6 +4708,211 @@ def _strict_request_counts(value: Mapping[str, int]) -> dict[str, int]:
             raise AlphaFeasibilityDataError("request_count_value_invalid")
         counts[endpoint] = count
     return counts
+
+
+def import_parent_reuse_task_v2(
+    *,
+    task: CollectionTask,
+    parent_root: Path | str,
+    child_root: Path | str,
+    parent_binding: Mapping[str, Any],
+    reuse_evidence: Mapping[str, Any],
+) -> TaskExecutionResult:
+    """Create one zero-request child provenance marker from a sealed parent task."""
+
+    _validate_collection_task_contract(task)
+    parent_path = Path(parent_root)
+    child_path = Path(child_root)
+    if (
+        parent_path.is_symlink()
+        or not parent_path.is_dir()
+        or child_path.is_symlink()
+        or not isinstance(parent_binding, Mapping)
+        or not isinstance(reuse_evidence, Mapping)
+    ):
+        raise AlphaFeasibilityDataError("parent_reuse_root_invalid")
+    parent_resolved = parent_path.resolve()
+    child_resolved = child_path.resolve(strict=False)
+    if (
+        parent_resolved == child_resolved
+        or child_resolved.is_relative_to(parent_resolved)
+        or parent_resolved.is_relative_to(child_resolved)
+    ):
+        raise AlphaFeasibilityDataError("parent_reuse_roots_not_disjoint")
+
+    try:
+        receipt_bytes = (parent_path / "p1_5_run_receipt.json").read_bytes()
+        receipt = strict_json_loads(receipt_bytes, label="parent_reuse_receipt")
+    except OSError as exc:
+        raise AlphaFeasibilityDataError("parent_reuse_receipt_unreadable") from exc
+    if (
+        not isinstance(receipt, Mapping)
+        or receipt_bytes != canonical_json_bytes(receipt)
+    ):
+        raise AlphaFeasibilityDataError("parent_reuse_receipt_invalid")
+    unsigned_receipt = dict(receipt)
+    receipt_sha256 = unsigned_receipt.pop("receipt_sha256", None)
+    if (
+        receipt_sha256 != canonical_sha256(unsigned_receipt)
+        or parent_binding.get("receipt_sha256") != receipt_sha256
+        or receipt.get("collection_plan_sha256") != task.plan_sha256
+        or receipt.get("network_run_id") != parent_binding.get("network_run_id")
+        or receipt.get("run_claim_sha256")
+        != parent_binding.get("run_claim_sha256")
+        or receipt.get("report_sha256") != parent_binding.get("report_sha256")
+        or receipt.get("locked_test_status") != dict(LOCKED_TEST_STATUS)
+        or receipt.get("locked_test_consumed") is not False
+    ):
+        raise AlphaFeasibilityDataError("parent_reuse_receipt_binding_mismatch")
+
+    parent_store = CreateOnlyTaskStore(parent_path)
+    if parent_store.quarantine_path(task).exists() or not parent_store.is_complete(task):
+        raise AlphaFeasibilityDataError("parent_reuse_task_not_complete")
+    parent_result = parent_store._load_response(task)
+    try:
+        parent_raw = parent_store.raw_path(task).read_bytes()
+        parent_response_bytes = parent_store.response_path(task).read_bytes()
+        parent_response = strict_json_loads(
+            parent_response_bytes, label="parent_reuse_response"
+        )
+    except OSError as exc:
+        raise AlphaFeasibilityDataError("parent_reuse_artifact_unreadable") from exc
+    if not isinstance(parent_response, Mapping):
+        raise AlphaFeasibilityDataError("parent_reuse_response_invalid")
+    replay = validate_response_bytes(
+        task, parent_raw, token=None, require_full_raw_safety=True
+    )
+    if [dict(row) for row in replay.rows] != [dict(row) for row in parent_result.rows]:
+        raise AlphaFeasibilityDataError("parent_reuse_raw_replay_mismatch")
+
+    parent_raw_sha256 = hashlib.sha256(parent_raw).hexdigest()
+    parent_response_file_sha256 = hashlib.sha256(
+        parent_response_bytes
+    ).hexdigest()
+    task_sha256 = canonical_sha256(task.to_dict())
+    if parent_result.request_origin == "offline_p14d_import":
+        provenance_path = parent_store.import_path(task)
+        expected_started_sha256 = None
+        expected_import_sha256 = hashlib.sha256(
+            provenance_path.read_bytes()
+        ).hexdigest()
+        attempt_hashes: list[str] = []
+    elif parent_result.request_origin == "network":
+        provenance_path = parent_store.started_path(task)
+        expected_started_sha256 = hashlib.sha256(
+            provenance_path.read_bytes()
+        ).hexdigest()
+        expected_import_sha256 = None
+        attempts = parent_store._load_attempts(task)
+        attempt_hashes = [
+            hashlib.sha256(
+                parent_store.attempt_path(task, number).read_bytes()
+            ).hexdigest()
+            for number in range(1, len(attempts) + 1)
+        ]
+    else:
+        raise AlphaFeasibilityDataError("parent_reuse_provenance_invalid")
+    provenance_sha256 = hashlib.sha256(provenance_path.read_bytes()).hexdigest()
+    expected_reuse_fields = {
+        "ordinal",
+        "request_fingerprint",
+        "task_id",
+        "task_sha256",
+        "endpoint",
+        "month",
+        "params",
+        "provenance_kind",
+        "started_artifact_sha256",
+        "import_artifact_sha256",
+        "raw_artifact_sha256",
+        "response_file_sha256",
+        "response_artifact_sha256",
+        "normalized_content_sha256",
+        "attempt_artifact_sha256_by_number",
+        "network_request_count",
+    }
+    expected_month = (
+        f"{task.params['start_date'][:4]}-{task.params['start_date'][4:6]}"
+        if "start_date" in task.params
+        else None
+    )
+    if (
+        set(reuse_evidence) != expected_reuse_fields
+        or type(reuse_evidence.get("ordinal")) is not int
+        or reuse_evidence["ordinal"] < 1
+        or reuse_evidence.get("request_fingerprint") != task.task_id
+        or reuse_evidence.get("task_id") != task.task_id
+        or reuse_evidence.get("task_sha256") != task_sha256
+        or reuse_evidence.get("endpoint") != task.endpoint
+        or reuse_evidence.get("month") != expected_month
+        or reuse_evidence.get("params") != dict(task.params)
+        or reuse_evidence.get("provenance_kind") != parent_result.request_origin
+        or reuse_evidence.get("started_artifact_sha256")
+        != expected_started_sha256
+        or reuse_evidence.get("import_artifact_sha256")
+        != expected_import_sha256
+        or reuse_evidence.get("raw_artifact_sha256") != parent_raw_sha256
+        or reuse_evidence.get("response_file_sha256")
+        != parent_response_file_sha256
+        or reuse_evidence.get("response_artifact_sha256")
+        != parent_response.get("response_artifact_sha256")
+        or reuse_evidence.get("normalized_content_sha256")
+        != parent_result.normalized_content_sha256
+        or reuse_evidence.get("attempt_artifact_sha256_by_number")
+        != attempt_hashes
+        or reuse_evidence.get("network_request_count")
+        != parent_result.network_request_count
+    ):
+        raise AlphaFeasibilityDataError("parent_reuse_evidence_mismatch")
+
+    child_store = CreateOnlyTaskStore(child_path)
+    if child_store.started_path(task).exists() or child_store.quarantine_path(task).exists():
+        raise AlphaFeasibilityDataError("parent_reuse_child_provenance_conflict")
+    if child_store.is_complete(task):
+        result = child_store._load_response(task)
+        if result.request_origin != "offline_parent_run_reuse":
+            raise AlphaFeasibilityDataError("parent_reuse_child_provenance_conflict")
+        return result
+    _publish_bytes_or_verify_identical(child_store.raw_path(task), parent_raw)
+    _publish_bytes_or_verify_identical(
+        child_store.response_path(task), parent_response_bytes
+    )
+    imported = _self_hashed(
+        {
+            "schema_version": PARENT_REUSE_IMPORT_SCHEMA_VERSION,
+            "state": "PARENT_RUN_TASK_REUSED",
+            "task_id": task.task_id,
+            "endpoint": task.endpoint,
+            "plan_sha256": task.plan_sha256,
+            "task": task.to_dict(),
+            "task_sha256": task_sha256,
+            "parent_binding": dict(parent_binding),
+            "parent_provenance_kind": parent_result.request_origin,
+            "parent_provenance_artifact_sha256": provenance_sha256,
+            "parent_attempt_artifact_sha256_by_number": attempt_hashes,
+            "parent_network_request_count": parent_result.network_request_count,
+            "parent_raw_artifact_sha256": parent_raw_sha256,
+            "parent_response_file_sha256": parent_response_file_sha256,
+            "parent_response_artifact_sha256": parent_response[
+                "response_artifact_sha256"
+            ],
+            "raw_transport_sha256": parent_raw_sha256,
+            "normalized_content_sha256": parent_result.normalized_content_sha256,
+            "network_request_count": 0,
+            "locked_test_status": dict(LOCKED_TEST_STATUS),
+            "locked_test_consumed": False,
+        },
+        "import_artifact_sha256",
+    )
+    try:
+        validate_json_schema(imported, PARENT_REUSE_IMPORT_SCHEMA_PATH)
+    except SchemaValidationError as exc:
+        raise AlphaFeasibilityDataError("import_artifact_schema_invalid") from exc
+    _write_json_create_only(child_store.import_path(task), imported)
+    result = child_store._load_response(task)
+    if result.request_origin != "offline_parent_run_reuse" or result.network_request_count != 0:
+        raise AlphaFeasibilityDataError("parent_reuse_child_semantics_mismatch")
+    return result
 
 
 def import_p14d_diagnostic_into_plan(
@@ -3539,7 +5141,19 @@ def execute_tasks(
     minimum_request_interval_seconds: Decimal = Decimal("0"),
     monotonic: Callable[[], float] = time.monotonic,
     sleeper: Callable[[float], None] = time.sleep,
+    business_error_retry_once: bool = False,
+    clock: Callable[[], datetime] = _utc_now,
+    terminalize_transport_interruptions: bool = False,
 ) -> tuple[TaskExecutionResult, ...]:
+    if (
+        type(business_error_retry_once) is not bool
+        or type(terminalize_transport_interruptions) is not bool
+    ):
+        raise AlphaFeasibilityDataError("invalid_business_retry_setting")
+    if business_error_retry_once and (
+        minimum_request_interval_seconds < MINIMUM_REAL_TRANSPORT_INTERVAL_SECONDS
+    ):
+        raise AlphaFeasibilityDataError("business_retry_interval_too_short")
     results: list[TaskExecutionResult] = []
     last_network_call: float | None = None
     interval = float(minimum_request_interval_seconds)
@@ -3549,16 +5163,45 @@ def execute_tasks(
             delay = interval - (monotonic() - last_network_call)
             if delay > 0:
                 sleeper(delay)
-        result = store.execute(
-            task,
-            token=token,
-            transport=transport,
-            timeout_seconds=timeout_seconds,
-            maximum_response_bytes=maximum_response_bytes,
-            recover_interrupted_attempts=recover_interrupted_attempts,
-            maximum_attempts_per_fingerprint=maximum_attempts_per_fingerprint,
-            persist_full_raw_transport=persist_full_raw_transport,
-        )
+        try:
+            result = store.execute(
+                task,
+                token=token,
+                transport=transport,
+                timeout_seconds=timeout_seconds,
+                maximum_response_bytes=maximum_response_bytes,
+                recover_interrupted_attempts=recover_interrupted_attempts,
+                maximum_attempts_per_fingerprint=maximum_attempts_per_fingerprint,
+                persist_full_raw_transport=persist_full_raw_transport,
+                clock=clock,
+                defer_retryable_business_errors=business_error_retry_once,
+                terminalize_transport_interruptions=terminalize_transport_interruptions,
+            )
+        except AlphaFeasibilityDataError as exc:
+            if (
+                not business_error_retry_once
+                or exc.code
+                not in {
+                    _BUSINESS_CLASSIFICATION_TO_FAILURE_CODE["RATE_LIMITED"],
+                    _BUSINESS_CLASSIFICATION_TO_FAILURE_CODE[
+                        "UPSTREAM_SERVER_ERROR"
+                    ],
+                }
+            ):
+                raise
+            result = retry_business_error_once(
+                store,
+                task,
+                token=token,
+                transport=transport,
+                timeout_seconds=timeout_seconds,
+                maximum_response_bytes=maximum_response_bytes,
+                maximum_attempts_per_fingerprint=maximum_attempts_per_fingerprint,
+                minimum_request_interval_seconds=minimum_request_interval_seconds,
+                clock=clock,
+                sleeper=sleeper,
+                terminalize_transport_interruptions=terminalize_transport_interruptions,
+            )
         if not result.replayed:
             last_network_call = monotonic()
         results.append(result)
@@ -3579,9 +5222,21 @@ def execute_tasks_bounded(
     minimum_request_interval_seconds: Decimal = Decimal("0"),
     monotonic: Callable[[], float] = time.monotonic,
     sleeper: Callable[[float], None] = time.sleep,
+    business_error_retry_once: bool = False,
+    clock: Callable[[], datetime] = _utc_now,
+    terminalize_transport_interruptions: bool = False,
 ) -> None:
     """Execute tasks while retaining at most one normalized response in memory."""
 
+    if (
+        type(business_error_retry_once) is not bool
+        or type(terminalize_transport_interruptions) is not bool
+    ):
+        raise AlphaFeasibilityDataError("invalid_business_retry_setting")
+    if business_error_retry_once and (
+        minimum_request_interval_seconds < MINIMUM_REAL_TRANSPORT_INTERVAL_SECONDS
+    ):
+        raise AlphaFeasibilityDataError("business_retry_interval_too_short")
     last_network_call: float | None = None
     interval = float(minimum_request_interval_seconds)
     for task in tasks:
@@ -3590,16 +5245,45 @@ def execute_tasks_bounded(
             delay = interval - (monotonic() - last_network_call)
             if delay > 0:
                 sleeper(delay)
-        result = store.execute(
-            task,
-            token=token,
-            transport=transport,
-            timeout_seconds=timeout_seconds,
-            maximum_response_bytes=maximum_response_bytes,
-            recover_interrupted_attempts=recover_interrupted_attempts,
-            maximum_attempts_per_fingerprint=maximum_attempts_per_fingerprint,
-            persist_full_raw_transport=persist_full_raw_transport,
-        )
+        try:
+            result = store.execute(
+                task,
+                token=token,
+                transport=transport,
+                timeout_seconds=timeout_seconds,
+                maximum_response_bytes=maximum_response_bytes,
+                recover_interrupted_attempts=recover_interrupted_attempts,
+                maximum_attempts_per_fingerprint=maximum_attempts_per_fingerprint,
+                persist_full_raw_transport=persist_full_raw_transport,
+                clock=clock,
+                defer_retryable_business_errors=business_error_retry_once,
+                terminalize_transport_interruptions=terminalize_transport_interruptions,
+            )
+        except AlphaFeasibilityDataError as exc:
+            if (
+                not business_error_retry_once
+                or exc.code
+                not in {
+                    _BUSINESS_CLASSIFICATION_TO_FAILURE_CODE["RATE_LIMITED"],
+                    _BUSINESS_CLASSIFICATION_TO_FAILURE_CODE[
+                        "UPSTREAM_SERVER_ERROR"
+                    ],
+                }
+            ):
+                raise
+            result = retry_business_error_once(
+                store,
+                task,
+                token=token,
+                transport=transport,
+                timeout_seconds=timeout_seconds,
+                maximum_response_bytes=maximum_response_bytes,
+                maximum_attempts_per_fingerprint=maximum_attempts_per_fingerprint,
+                minimum_request_interval_seconds=minimum_request_interval_seconds,
+                clock=clock,
+                sleeper=sleeper,
+                terminalize_transport_interruptions=terminalize_transport_interruptions,
+            )
         if not result.replayed:
             last_network_call = monotonic()
         # Do not append result: its rows are already durably content-addressed.
@@ -5689,6 +7373,332 @@ def _blocked_history_coverage(
     return HistoryCoverageResult(report=MappingProxyType(report), passed=False, trading_dates=())
 
 
+def _validate_parent_reuse_continuation_child(
+    plan: CollectionPlan,
+    child_root: Path,
+) -> None:
+    if (
+        not _p15_enabled(plan)
+        or child_root.is_symlink()
+        or not child_root.is_dir()
+        or not _path_is_within_data_tmp(child_root)
+    ):
+        raise AlphaFeasibilityDataError("continuation_child_root_invalid")
+    if len(plan.pit_tasks) != 73:
+        raise AlphaFeasibilityDataError("continuation_plan_invalid")
+    store = CreateOnlyTaskStore(child_root)
+    prefix = plan.pit_tasks[:19]
+    first_unfinished = plan.pit_tasks[19]
+    tail = plan.pit_tasks[20:]
+    parent_bindings: set[str] = set()
+    for task in prefix:
+        if (
+            store.started_path(task).exists()
+            or store.quarantine_path(task).exists()
+            or not store.import_path(task).is_file()
+            or not store.response_path(task).is_file()
+            or not store.raw_path(task).is_file()
+        ):
+            raise AlphaFeasibilityDataError(
+                "continuation_reuse_prefix_incomplete"
+            )
+        result = store._load_response(task)
+        imported = store._load_import(task)
+        if (
+            result.request_origin != "offline_parent_run_reuse"
+            or result.network_request_count != 0
+            or imported.get("schema_version")
+            != PARENT_REUSE_IMPORT_SCHEMA_VERSION
+        ):
+            raise AlphaFeasibilityDataError(
+                "continuation_reuse_prefix_invalid"
+            )
+        parent_bindings.add(canonical_sha256(imported["parent_binding"]))
+    if len(parent_bindings) != 1:
+        raise AlphaFeasibilityDataError("continuation_parent_binding_mismatch")
+
+    if (
+        not store.started_path(first_unfinished).is_file()
+        or store.import_path(first_unfinished).exists()
+        or store.response_path(first_unfinished).exists()
+        or store.raw_path(first_unfinished).exists()
+        or store.quarantine_path(first_unfinished).exists()
+        or (child_root / "business_errors" / first_unfinished.task_id).exists()
+        or (child_root / "raw_errors" / first_unfinished.task_id).exists()
+    ):
+        raise AlphaFeasibilityDataError(
+            "continuation_first_unfinished_invalid"
+        )
+    started = store._load_started(first_unfinished)
+    attempts = store._load_attempts(first_unfinished)
+    if (
+        started.get("schema_version") != RECOVERABLE_STARTED_SCHEMA_VERSION
+        or len(attempts) != 1
+        or attempts[0] != _attempt_payload(first_unfinished, 1)
+    ):
+        raise AlphaFeasibilityDataError(
+            "continuation_parent_attempt_invalid"
+        )
+
+    for task in tail:
+        artifacts = (
+            store.started_path(task),
+            store.import_path(task),
+            store.response_path(task),
+            store.raw_path(task),
+            store.quarantine_path(task),
+            child_root / "attempts" / task.task_id,
+            child_root / "business_errors" / task.task_id,
+            child_root / "raw_errors" / task.task_id,
+        )
+        if any(path.exists() for path in artifacts):
+            raise AlphaFeasibilityDataError("continuation_tail_not_pristine")
+
+    expected_task_files = {
+        *(f"{task.task_id}.import.json" for task in prefix),
+        *(f"{task.task_id}.response.json" for task in prefix),
+        f"{first_unfinished.task_id}.started.json",
+    }
+    task_directory = child_root / "tasks"
+    observed_task_files = (
+        {path.name for path in task_directory.iterdir()}
+        if task_directory.is_dir() and not task_directory.is_symlink()
+        else set()
+    )
+    raw_directory = child_root / "raw"
+    expected_raw_files = {f"{task.task_id}.json" for task in prefix}
+    observed_raw_files = (
+        {path.name for path in raw_directory.iterdir()}
+        if raw_directory.is_dir() and not raw_directory.is_symlink()
+        else set()
+    )
+    attempt_root = child_root / "attempts"
+    observed_attempt_task_ids = (
+        {path.name for path in attempt_root.iterdir()}
+        if attempt_root.is_dir() and not attempt_root.is_symlink()
+        else set()
+    )
+    if (
+        observed_task_files != expected_task_files
+        or observed_raw_files != expected_raw_files
+        or observed_attempt_task_ids != {first_unfinished.task_id}
+        or any(
+            (child_root / name).exists()
+            for name in (
+                "pit_membership_coverage_report.json",
+                "pit_membership_manifest.json",
+                "history_coverage_report.json",
+                "history_manifest.json",
+            )
+        )
+    ):
+        raise AlphaFeasibilityDataError("continuation_child_artifact_set_invalid")
+    counts = actual_tushare_request_count_by_endpoint(
+        child_root, plan.pit_tasks, plan_sha256=plan.plan_sha256
+    )
+    if counts != {
+        "trade_cal": 0,
+        "index_weight": 1,
+        "daily": 0,
+        "adj_factor": 0,
+        "index_daily": 0,
+        "suspend_d": 0,
+    }:
+        raise AlphaFeasibilityDataError("continuation_parent_request_count_invalid")
+
+
+def validate_parent_reuse_continuation_child(
+    config_path: Path | str,
+    child_root: Path | str,
+    *,
+    repository_root: Path | str = REPOSITORY_ROOT,
+) -> CollectionPlan:
+    """Offline preflight for the exact parent-reuse continuation boundary."""
+
+    plan = load_config_and_build_plan(config_path, repository_root=repository_root)
+    _validate_parent_reuse_continuation_child(plan, Path(child_root))
+    return plan
+
+
+def _arm_parent_reuse_continuation_network_process(
+    child_root: Path | str,
+    marker_sha256: str,
+) -> None:
+    """Arm one process-local continuation authorization after marker creation."""
+
+    root = Path(child_root)
+    if (
+        root.is_symlink()
+        or type(marker_sha256) is not str
+        or _SHA256.fullmatch(marker_sha256) is None
+    ):
+        raise AlphaFeasibilityDataError(
+            "continuation_network_process_authorization_invalid"
+        )
+    key = (str(root.resolve(strict=False)), marker_sha256)
+    with _CONTINUATION_NETWORK_PROCESS_AUTHORIZATIONS_LOCK:
+        if key in _CONTINUATION_NETWORK_PROCESS_AUTHORIZATIONS:
+            raise AlphaFeasibilityDataError(
+                "continuation_network_process_authorization_already_armed"
+            )
+        _CONTINUATION_NETWORK_PROCESS_AUTHORIZATIONS.add(key)
+
+
+def _load_continuation_control_artifact(
+    root: Path,
+    filename: str,
+    *,
+    repository_root: Path,
+) -> Mapping[str, Any]:
+    schema_name, hash_field = CONTINUATION_CONTROL_ARTIFACTS[filename]
+    path = root / filename
+    if path.is_symlink() or not path.is_file():
+        code = (
+            "continuation_network_process_marker_missing"
+            if filename == "p1_5_continuation_network_process.json"
+            and not path.exists()
+            and not path.is_symlink()
+            else "continuation_network_process_binding_invalid"
+        )
+        raise AlphaFeasibilityDataError(code)
+    try:
+        raw = path.read_bytes()
+        value = strict_json_loads(raw, label="continuation_control_artifact")
+        if not isinstance(value, Mapping) or raw != canonical_json_bytes(value):
+            raise AlphaFeasibilityDataError(
+                "continuation_network_process_binding_invalid"
+            )
+        validate_json_schema(value, repository_root / "schemas" / schema_name)
+    except (
+        OSError,
+        SchemaValidationError,
+        AlphaFeasibilityDataError,
+    ) as exc:
+        if (
+            isinstance(exc, AlphaFeasibilityDataError)
+            and exc.code == "continuation_network_process_binding_invalid"
+        ):
+            raise
+        raise AlphaFeasibilityDataError(
+            "continuation_network_process_binding_invalid"
+        ) from exc
+    unsigned = dict(value)
+    declared = unsigned.pop(hash_field, None)
+    if declared != canonical_sha256(unsigned):
+        raise AlphaFeasibilityDataError(
+            "continuation_network_process_binding_invalid"
+        )
+    return value
+
+
+def _consume_parent_reuse_continuation_network_process(
+    plan: CollectionPlan,
+    child_root: Path,
+    *,
+    repository_root: Path,
+) -> None:
+    """Validate marker lineage and consume its same-process one-shot permit."""
+
+    reuse = _load_continuation_control_artifact(
+        child_root,
+        "p1_5_continuation_reuse_manifest.json",
+        repository_root=repository_root,
+    )
+    claim = _load_continuation_control_artifact(
+        child_root,
+        "p1_5_continuation_claim.json",
+        repository_root=repository_root,
+    )
+    stage = _load_continuation_control_artifact(
+        child_root,
+        "p1_5_continuation_parent_reuse_stage.json",
+        repository_root=repository_root,
+    )
+    marker = _load_continuation_control_artifact(
+        child_root,
+        "p1_5_continuation_network_process.json",
+        repository_root=repository_root,
+    )
+    if len(plan.pit_tasks) <= 19:
+        raise AlphaFeasibilityDataError(
+            "continuation_network_process_binding_invalid"
+        )
+    first_unfinished_task_id = plan.pit_tasks[19].task_id
+    locked = dict(LOCKED_TEST_STATUS)
+    if (
+        reuse.get("collection_plan_sha256") != plan.plan_sha256
+        or claim.get("collection_plan_sha256") != plan.plan_sha256
+        or stage.get("collection_plan_sha256") != plan.plan_sha256
+        or claim.get("reuse_manifest_sha256") != reuse.get("manifest_sha256")
+        or claim.get("parent") != reuse.get("parent")
+        or claim.get("successful_prefix_count") != 19
+        or claim.get("first_unfinished_task_id") != first_unfinished_task_id
+        or stage.get("continuation_run_id") != claim.get("continuation_run_id")
+        or stage.get("continuation_claim_sha256") != claim.get("claim_sha256")
+        or stage.get("reuse_manifest_sha256") != reuse.get("manifest_sha256")
+        or stage.get("parent") != claim.get("parent")
+        or stage.get("child_completed_prefix_count") != 19
+        or stage.get("first_unfinished_task_id") != first_unfinished_task_id
+        or stage.get("next_task_ordinal") != 20
+        or marker.get("continuation_run_id") != claim.get("continuation_run_id")
+        or marker.get("continuation_claim_sha256") != claim.get("claim_sha256")
+        or marker.get("reuse_manifest_sha256") != reuse.get("manifest_sha256")
+        or marker.get("parent_reuse_stage_sha256") != stage.get("stage_sha256")
+        or marker.get("completed_request_fingerprint_count_at_start") != 19
+        or marker.get("first_unfinished_task_id") != first_unfinished_task_id
+        or marker.get("next_attempt_number") != 2
+        or marker.get("network_process_count") != 1
+        or any(
+            artifact.get("locked_test_status") != locked
+            or artifact.get("locked_test_consumed") is not False
+            for artifact in (reuse, claim, stage, marker)
+        )
+    ):
+        raise AlphaFeasibilityDataError(
+            "continuation_network_process_binding_invalid"
+        )
+    key = (str(child_root.resolve(strict=False)), marker["marker_sha256"])
+    with _CONTINUATION_NETWORK_PROCESS_AUTHORIZATIONS_LOCK:
+        if key not in _CONTINUATION_NETWORK_PROCESS_AUTHORIZATIONS:
+            raise AlphaFeasibilityDataError(
+                "continuation_network_process_authorization_missing"
+            )
+        _CONTINUATION_NETWORK_PROCESS_AUTHORIZATIONS.remove(key)
+
+
+def run_parent_reuse_continuation_backfill(
+    config_path: Path | str,
+    child_root: Path | str,
+    token: str,
+    transport: TushareTransport | None = None,
+    generated_at: datetime | None = None,
+    *,
+    repository_root: Path | str = REPOSITORY_ROOT,
+    sleeper: Callable[[float], None] = time.sleep,
+    monotonic: Callable[[], float] = time.monotonic,
+    clock: Callable[[], datetime] = _utc_now,
+) -> dict[str, Any]:
+    """Continue a sealed P1.5 child with 12-second spacing and one safe retry.
+
+    The return value is the ordinary ``run_backfill`` result mapping.  A PIT
+    ``DATA_UNAVAILABLE`` business response is surfaced as
+    ``BLOCKED_PIT_SOURCE_COVERAGE``; other status semantics are unchanged.
+    """
+
+    return run_backfill(
+        config_path,
+        Path(child_root),
+        token,
+        transport=transport,
+        generated_at=generated_at,
+        repository_root=repository_root,
+        sleeper=sleeper,
+        monotonic=monotonic,
+        _continuation_execution=_CONTINUATION_EXECUTION_CAPABILITY,
+        _clock=clock,
+    )
+
+
 def run_backfill(
     config_path: Path | str,
     output_root: Path | str,
@@ -5700,6 +7710,8 @@ def run_backfill(
     adjustment_evidence: Mapping[str, Any] | None = None,
     sleeper: Callable[[float], None] = time.sleep,
     monotonic: Callable[[], float] = time.monotonic,
+    _continuation_execution: object = False,
+    _clock: Callable[[], datetime] = _utc_now,
 ) -> dict[str, Any]:
     """Run PIT first and plan stock history only after all 73 months pass.
 
@@ -5710,12 +7722,29 @@ def run_backfill(
     # The full config, source allowlist, frozen code hashes, 73 PIT requests,
     # and all hard date bounds are proven before the credential is inspected.
     plan = load_config_and_build_plan(config_path, repository_root=repository_root)
+    if not (
+        _continuation_execution is False
+        or _continuation_execution is _CONTINUATION_EXECUTION_CAPABILITY
+    ) or not callable(_clock):
+        raise AlphaFeasibilityDataError("invalid_continuation_execution_setting")
+    continuation_execution = (
+        _continuation_execution is _CONTINUATION_EXECUTION_CAPABILITY
+    )
     if adjustment_evidence is not None:
         raise AlphaFeasibilityDataError(
             "controlled_adjustment_evidence_not_supported", stage="pit"
         )
-    safe_token = _validate_token(token)
     root = Path(output_root)
+    if continuation_execution:
+        # The internal continuation flag must not provide a bypass around the
+        # public entry point's exact-19 reuse / attempt-1 / pristine-tail gate.
+        _validate_parent_reuse_continuation_child(plan, root)
+        _consume_parent_reuse_continuation_network_process(
+            plan,
+            root,
+            repository_root=Path(repository_root),
+        )
+    safe_token = _validate_token(token)
     store = CreateOnlyTaskStore(root)
     source = plan.config["source"]
     recover_attempts, maximum_attempts = _attempt_settings(plan)
@@ -5727,31 +7756,58 @@ def run_backfill(
         "minimum_request_interval_seconds",
         minimum=Decimal("0"),
     )
+    if continuation_execution:
+        interval = MINIMUM_REAL_TRANSPORT_INTERVAL_SECONDS
 
+    pit_network_performed = False
     pit_result = _load_existing_pit_result(root, plan)
     if pit_result is None:
         try:
-            first_pit_executions = execute_tasks(
-                plan.pit_tasks[:1],
-                store=store,
-                token=safe_token,
-                transport=active_transport,
-                timeout_seconds=source["request_timeout_seconds"],
-                maximum_response_bytes=source["maximum_response_bytes"],
-                recover_interrupted_attempts=recover_attempts,
-                maximum_attempts_per_fingerprint=maximum_attempts,
-                persist_full_raw_transport=persist_full_raw_transport,
-                minimum_request_interval_seconds=interval,
-                sleeper=sleeper,
-                monotonic=monotonic,
+            def execute_pit_subset(
+                tasks: Sequence[CollectionTask],
+            ) -> tuple[TaskExecutionResult, ...]:
+                return execute_tasks(
+                    tasks,
+                    store=store,
+                    token=safe_token,
+                    transport=active_transport,
+                    timeout_seconds=source["request_timeout_seconds"],
+                    maximum_response_bytes=source["maximum_response_bytes"],
+                    recover_interrupted_attempts=recover_attempts,
+                    maximum_attempts_per_fingerprint=maximum_attempts,
+                    persist_full_raw_transport=persist_full_raw_transport,
+                    minimum_request_interval_seconds=interval,
+                    sleeper=sleeper,
+                    monotonic=monotonic,
+                    business_error_retry_once=continuation_execution,
+                    clock=_clock,
+                    terminalize_transport_interruptions=continuation_execution,
+                )
+
+            # A fresh run probes task 1.  A parent-reuse continuation first
+            # replays the sealed 19-task prefix, then makes task 20 the sole
+            # network probe.  Its 2019-07 snapshot must pass before task 21 is
+            # even eligible to create an attempt claim.
+            probe_index = 19 if continuation_execution else 0
+            prefix_pit_executions = execute_pit_subset(
+                plan.pit_tasks[:probe_index]
+            )
+            probe_pit_executions = execute_pit_subset(
+                plan.pit_tasks[probe_index : probe_index + 1]
+            )
+            probed_pit_executions = (
+                *prefix_pit_executions,
+                *probe_pit_executions,
             )
             first_pit_probe = build_pit_membership_artifacts(
                 plan,
-                {first_pit_executions[0].task.task_id: first_pit_executions[0]},
+                {result.task.task_id: result for result in probed_pit_executions},
                 adjustment_evidence=adjustment_evidence,
                 generated_at=timestamp,
             )
-            first_month_check = first_pit_probe.coverage_report["monthly_checks"][0]
+            first_month_check = first_pit_probe.coverage_report["monthly_checks"][
+                probe_index
+            ]
             if first_month_check["status"] != "complete":
                 issues = first_month_check.get("issues", [])
                 blocker = (
@@ -5766,29 +7822,25 @@ def run_backfill(
             # Splitting the first task into its own semantic/PIT gate must not
             # weaken the configured inter-request spacing in the same process.
             if (
-                len(plan.pit_tasks) > 1
-                and not first_pit_executions[0].replayed
+                len(plan.pit_tasks) > probe_index + 1
+                and not probe_pit_executions[0].replayed
                 and interval > 0
             ):
                 sleeper(float(interval))
-            remaining_pit_executions = execute_tasks(
-                plan.pit_tasks[1:],
-                store=store,
-                token=safe_token,
-                transport=active_transport,
-                timeout_seconds=source["request_timeout_seconds"],
-                maximum_response_bytes=source["maximum_response_bytes"],
-                recover_interrupted_attempts=recover_attempts,
-                maximum_attempts_per_fingerprint=maximum_attempts,
-                persist_full_raw_transport=persist_full_raw_transport,
-                minimum_request_interval_seconds=interval,
-                sleeper=sleeper,
-                monotonic=monotonic,
+            remaining_pit_executions = execute_pit_subset(
+                plan.pit_tasks[probe_index + 1 :]
             )
-            pit_executions = (*first_pit_executions, *remaining_pit_executions)
+            pit_executions = (*probed_pit_executions, *remaining_pit_executions)
+            pit_network_performed = any(
+                not result.replayed for result in pit_executions
+            )
             pit_results = {result.task.task_id: result for result in pit_executions}
         except AlphaFeasibilityDataError as exc:
-            if recover_attempts and exc.code in RETRYABLE_ATTEMPT_FAILURES:
+            if (
+                recover_attempts
+                and exc.code in RETRYABLE_ATTEMPT_FAILURES
+                and not continuation_execution
+            ):
                 # A normal transport interruption is resumable evidence, not
                 # a sealed PIT verdict.  Leave the attempt journal in place.
                 raise
@@ -5816,6 +7868,9 @@ def run_backfill(
                 stage_status=(
                     "BLOCKED_ADAPTER_PROTOCOL"
                     if adapter_protocol_blocked
+                    else "BLOCKED_PIT_SOURCE_COVERAGE"
+                    if continuation_execution
+                    and public_blocker == "upstream_data_unavailable_error"
                     else "BLOCKED_PIT_MEMBERSHIP"
                 ),
                 blocker=public_blocker,
@@ -5843,6 +7898,15 @@ def run_backfill(
         )
 
     history_tasks = build_history_plan(plan, pit_result.union_instruments)
+    if (
+        continuation_execution
+        and pit_network_performed
+        and any(not store.is_complete(task) for task in history_tasks)
+    ):
+        # ``execute_tasks_bounded`` has its own interval clock.  Preserve the
+        # physical boundary between the last PIT transport and the first
+        # history transport by sleeping one full conservative interval here.
+        sleeper(float(MINIMUM_REAL_TRANSPORT_INTERVAL_SECONDS))
     existing_history_coverage = root / "history_coverage_report.json"
     existing_history_manifest = root / "history_manifest.json"
     if existing_history_coverage.exists() or existing_history_manifest.exists():
@@ -5875,11 +7939,18 @@ def run_backfill(
             minimum_request_interval_seconds=interval,
             sleeper=sleeper,
             monotonic=monotonic,
+            business_error_retry_once=continuation_execution,
+            clock=_clock,
+            terminalize_transport_interruptions=continuation_execution,
         )
         blocker: str | None = None
         adapter_protocol_blocked = False
     except AlphaFeasibilityDataError as exc:
-        if recover_attempts and exc.code in RETRYABLE_ATTEMPT_FAILURES:
+        if (
+            recover_attempts
+            and exc.code in RETRYABLE_ATTEMPT_FAILURES
+            and not continuation_execution
+        ):
             # Do not publish a terminal history blocker for a resumable
             # transport interruption.
             raise

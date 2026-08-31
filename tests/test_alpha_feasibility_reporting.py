@@ -374,6 +374,9 @@ class AlphaFeasibilityReportingTests(unittest.TestCase):
     def test_protocol_blocker_codes_are_exact_and_upstream_errors_remain_data_blocks(self) -> None:
         expected = {
             "duplicate_json_key",
+            "invalid_response_json",
+            "http_status_not_success",
+            "http_redirect_forbidden",
             "semantic_core_missing",
             "semantic_core_type_invalid",
             "response_body_too_large",

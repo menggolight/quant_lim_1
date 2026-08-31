@@ -1,0 +1,285 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tushare_alpha_feasibility_continuation_receipt.v1.json",
+  "title": "P1.5C Continuation Receipt V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "generated_at", "continuation_run_id",
+    "continuation_claim_sha256", "reuse_manifest_sha256", "parent",
+    "parent_reuse_stage_sha256", "network_process_id",
+    "network_process_marker_sha256", "network_process_count",
+    "current_runtime_implementation_bundle", "terminal_stage", "terminal_status",
+    "parent_actual_request_count_by_endpoint", "continuation_actual_request_count_by_endpoint",
+    "cumulative_actual_request_count_by_endpoint", "request_count_semantics",
+    "reused_successful_fingerprint_count", "completed_request_fingerprint_count",
+    "first_unfinished_task_id", "resumed_from_month",
+    "minimum_transport_interval_seconds", "parent_attempt_count",
+    "maximum_cumulative_attempts", "first_continuation_response", "pit",
+    "first_continuation_response_evidence_sha256", "terminal_failure_evidence",
+    "child_report_sha256", "child_pit_manifest_sha256", "child_history_manifest_sha256",
+    "development_metrics", "validation_metrics", "concentration_metrics",
+    "remaining_blockers", "safety", "locked_test_status", "locked_test_consumed",
+    "receipt_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "tushare-alpha-feasibility-continuation-receipt.v1"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "continuation_run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{2,95}$"},
+    "continuation_claim_sha256": {"$ref": "#/$defs/sha256"},
+    "reuse_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "parent": {"$ref": "tushare_alpha_feasibility_continuation_reuse_manifest.v1.json#/$defs/parent_binding"},
+    "parent_reuse_stage_sha256": {"$ref": "#/$defs/sha256"},
+    "network_process_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{2,95}$"},
+    "network_process_marker_sha256": {"$ref": "#/$defs/sha256"},
+    "network_process_count": {"const": 1},
+    "current_runtime_implementation_bundle": {"$ref": "tushare_alpha_feasibility_continuation_claim.v1.json#/$defs/runtime_bundle"},
+    "terminal_stage": {"enum": ["PIT", "HISTORY", "ALPHA_INPUT", "ALPHA_ENGINE", "REPORT"]},
+    "terminal_status": {
+      "enum": [
+        "COMPLETED",
+        "BLOCKED_UPSTREAM_RATE_LIMIT",
+        "BLOCKED_PROVIDER_PERMISSION",
+        "BLOCKED_PROVIDER_QUOTA",
+        "BLOCKED_INVALID_PARAMETER",
+        "BLOCKED_PIT_SOURCE_COVERAGE",
+        "BLOCKED_UPSTREAM_SERVER",
+        "BLOCKED_UPSTREAM_UNDOCUMENTED_CODE",
+        "BLOCKED_DATA",
+        "BLOCKED_ADAPTER_PROTOCOL"
+      ]
+    },
+    "parent_actual_request_count_by_endpoint": {"$ref": "#/$defs/request_counts"},
+    "continuation_actual_request_count_by_endpoint": {"$ref": "#/$defs/request_counts"},
+    "cumulative_actual_request_count_by_endpoint": {"$ref": "#/$defs/request_counts"},
+    "request_count_semantics": {"const": "conservative_durable_pre_transport_attempt_claim"},
+    "reused_successful_fingerprint_count": {"const": 19},
+    "completed_request_fingerprint_count": {"type": "integer", "minimum": 19},
+    "first_unfinished_task_id": {"const": "index_weight-63ab4e7a5df236828d4f750812809bc78a6e1f8e9cfdad64c8128431da6a741b"},
+    "resumed_from_month": {"const": "2019-07"},
+    "minimum_transport_interval_seconds": {"const": "12"},
+    "parent_attempt_count": {"const": 1},
+    "maximum_cumulative_attempts": {"const": 3},
+    "first_continuation_response": {"$ref": "#/$defs/first_continuation_response"},
+    "first_continuation_response_evidence_sha256": {"$ref": "#/$defs/sha256"},
+    "pit": {"$ref": "#/$defs/pit"},
+    "terminal_failure_evidence": {
+      "oneOf": [
+        {"$ref": "#/$defs/terminal_failure_evidence"},
+        {"type": "null"}
+      ]
+    },
+    "child_report_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+    "child_pit_manifest_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+    "child_history_manifest_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+    "development_metrics": {"oneOf": [{"$ref": "technical_alpha_feasibility_report.v4.json#/$defs/scenarios"}, {"type": "null"}]},
+    "validation_metrics": {"oneOf": [{"$ref": "technical_alpha_feasibility_report.v4.json#/$defs/scenarios"}, {"type": "null"}]},
+    "concentration_metrics": {"oneOf": [{"$ref": "technical_alpha_feasibility_report.v3.json#/$defs/concentration"}, {"type": "null"}]},
+    "remaining_blockers": {
+      "type": "array",
+      "items": {"type": "string", "pattern": "^[a-z0-9_]{3,96}$"},
+      "uniqueItems": true
+    },
+    "safety": {"$ref": "technical_alpha_feasibility_report.v4.json#/$defs/safety"},
+    "locked_test_status": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/locked"},
+    "locked_test_consumed": {"const": false},
+    "receipt_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "allOf": [
+    {
+      "if": {"properties": {"terminal_status": {"const": "COMPLETED"}}},
+      "then": {
+        "properties": {
+          "terminal_stage": {"const": "REPORT"},
+          "child_report_sha256": {"$ref": "#/$defs/sha256"},
+          "child_pit_manifest_sha256": {"$ref": "#/$defs/sha256"},
+          "child_history_manifest_sha256": {"$ref": "#/$defs/sha256"},
+          "development_metrics": {"$ref": "technical_alpha_feasibility_report.v4.json#/$defs/scenarios"},
+          "validation_metrics": {"$ref": "technical_alpha_feasibility_report.v4.json#/$defs/scenarios"},
+          "concentration_metrics": {"$ref": "technical_alpha_feasibility_report.v3.json#/$defs/concentration"},
+          "pit": {
+            "properties": {
+              "months_newly_observed": {"const": 54},
+              "months_total_observed": {"const": 73},
+              "missing_months": {"maxItems": 0},
+              "coverage_status": {"const": "COMPLETE"}
+            }
+          },
+          "terminal_failure_evidence": {"type": "null"},
+          "remaining_blockers": {"maxItems": 0}
+        }
+      },
+      "else": {
+        "properties": {
+          "development_metrics": {"type": "null"},
+          "validation_metrics": {"type": "null"},
+          "concentration_metrics": {"type": "null"},
+          "remaining_blockers": {"minItems": 1}
+        }
+      }
+    },
+    {
+      "if": {
+        "properties": {
+          "terminal_status": {
+            "enum": [
+              "BLOCKED_UPSTREAM_RATE_LIMIT",
+              "BLOCKED_PROVIDER_PERMISSION",
+              "BLOCKED_PROVIDER_QUOTA",
+              "BLOCKED_INVALID_PARAMETER",
+              "BLOCKED_UPSTREAM_SERVER",
+              "BLOCKED_UPSTREAM_UNDOCUMENTED_CODE",
+              "BLOCKED_ADAPTER_PROTOCOL"
+            ]
+          }
+        }
+      },
+      "then": {
+        "properties": {
+          "terminal_failure_evidence": {"$ref": "#/$defs/terminal_failure_evidence"}
+        }
+      }
+    }
+  ],
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "request_counts": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["trade_cal", "index_weight", "daily", "adj_factor", "index_daily", "suspend_d"],
+      "properties": {
+        "trade_cal": {"type": "integer", "minimum": 0},
+        "index_weight": {"type": "integer", "minimum": 0},
+        "daily": {"type": "integer", "minimum": 0},
+        "adj_factor": {"type": "integer", "minimum": 0},
+        "index_daily": {"type": "integer", "minimum": 0},
+        "suspend_d": {"type": "integer", "minimum": 0}
+      }
+    },
+    "classification": {
+      "enum": [
+        "RATE_LIMITED", "PERMISSION_DENIED", "INVALID_PARAMETER",
+        "DATA_UNAVAILABLE", "UPSTREAM_SERVER_ERROR",
+        "ACCOUNT_OR_QUOTA_LIMIT", "UPSTREAM_UNKNOWN_ERROR"
+      ]
+    },
+    "nullable_sha256": {
+      "oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]
+    },
+    "safe_detail_projection": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["json_type", "value", "sanitized_text", "semantic_category"],
+      "properties": {
+        "json_type": {"enum": ["null", "boolean", "integer", "number", "string", "array", "object"]},
+        "value": {},
+        "sanitized_text": {"type": "string", "maxLength": 1000},
+        "semantic_category": {
+          "oneOf": [{"$ref": "#/$defs/classification"}, {"type": "null"}]
+        }
+      }
+    },
+    "first_continuation_response": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id", "attempt_number", "business_code", "classification",
+        "sanitized_msg", "detail_type", "safe_detail_projection", "msg_sha256",
+        "detail_sha256", "request_id_sha256", "raw_transport_sha256",
+        "response_body_sha256", "response_byte_count",
+        "requested_at", "completed_at", "retry_after_seconds",
+        "retry_performed", "result",
+        "evidence_artifact_sha256"
+      ],
+      "properties": {
+        "task_id": {"const": "index_weight-63ab4e7a5df236828d4f750812809bc78a6e1f8e9cfdad64c8128431da6a741b"},
+        "attempt_number": {"const": 2},
+        "business_code": {"oneOf": [{"type": "integer"}, {"type": "null"}]},
+        "classification": {
+          "oneOf": [{"$ref": "#/$defs/classification"}, {"type": "null"}]
+        },
+        "sanitized_msg": {"oneOf": [{"type": "string", "maxLength": 1000}, {"type": "null"}]},
+        "detail_type": {
+          "oneOf": [
+            {"enum": ["null", "boolean", "integer", "number", "string", "array", "object"]},
+            {"type": "null"}
+          ]
+        },
+        "safe_detail_projection": {
+          "oneOf": [{"$ref": "#/$defs/safe_detail_projection"}, {"type": "null"}]
+        },
+        "msg_sha256": {"$ref": "#/$defs/nullable_sha256"},
+        "detail_sha256": {"$ref": "#/$defs/nullable_sha256"},
+        "request_id_sha256": {"$ref": "#/$defs/nullable_sha256"},
+        "raw_transport_sha256": {"$ref": "#/$defs/nullable_sha256"},
+        "response_body_sha256": {"$ref": "#/$defs/nullable_sha256"},
+        "response_byte_count": {
+          "oneOf": [{"type": "integer", "minimum": 0}, {"type": "null"}]
+        },
+        "requested_at": {"type": "string", "format": "date-time"},
+        "completed_at": {"type": "string", "format": "date-time"},
+        "retry_after_seconds": {
+          "oneOf": [
+            {"type": "integer", "minimum": 1, "maximum": 300},
+            {"type": "null"}
+          ]
+        },
+        "retry_performed": {"type": "boolean"},
+        "result": {
+          "enum": [
+            "FIRST_ATTEMPT_SUCCEEDED", "NOT_RETRYABLE",
+            "RETRY_SUCCEEDED", "RETRY_FAILED",
+            "NO_RESPONSE_TRANSPORT_INTERRUPTION",
+            "RESPONSE_REJECTED_ADAPTER_PROTOCOL",
+            "RESPONSE_REJECTED_DATA_VALIDATION"
+          ]
+        },
+        "evidence_artifact_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "pit": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "months_expected", "months_reused", "months_newly_observed",
+        "months_total_observed",
+        "missing_months", "snapshot_count", "union_instrument_count",
+        "coverage_status"
+      ],
+      "properties": {
+        "months_expected": {"const": 73},
+        "months_reused": {"const": 19},
+        "months_newly_observed": {"type": "integer", "minimum": 0, "maximum": 54},
+        "months_total_observed": {"type": "integer", "minimum": 19, "maximum": 73},
+        "missing_months": {
+          "type": "array", "maxItems": 54, "uniqueItems": true,
+          "items": {"type": "string", "pattern": "^20(?:19|20|21|22|23)-(?:0[1-9]|1[0-2])$"}
+        },
+        "snapshot_count": {"type": "integer", "minimum": 19},
+        "union_instrument_count": {"type": "integer", "minimum": 0},
+        "coverage_status": {"enum": ["COMPLETE", "BLOCKED_PIT_SOURCE_COVERAGE"]}
+      }
+    },
+    "terminal_failure_evidence": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "task_id", "attempt_number", "failure_code", "classification",
+        "attempt_artifact_sha256", "quarantine_artifact_sha256",
+        "business_error_artifact_sha256", "raw_error_artifact_sha256"
+      ],
+      "properties": {
+        "task_id": {"type": "string", "pattern": "^[a-z_]+-[0-9a-f]{64}$"},
+        "attempt_number": {"type": "integer", "minimum": 1, "maximum": 3},
+        "failure_code": {"type": "string", "pattern": "^[a-z0-9_]{3,96}$"},
+        "classification": {
+          "oneOf": [{"$ref": "#/$defs/classification"}, {"type": "null"}]
+        },
+        "attempt_artifact_sha256": {"$ref": "#/$defs/sha256"},
+        "quarantine_artifact_sha256": {"$ref": "#/$defs/sha256"},
+        "business_error_artifact_sha256": {"$ref": "#/$defs/nullable_sha256"},
+        "raw_error_artifact_sha256": {"$ref": "#/$defs/nullable_sha256"}
+      }
+    }
+  }
+}

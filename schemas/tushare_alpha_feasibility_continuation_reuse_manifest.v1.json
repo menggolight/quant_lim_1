@@ -1,0 +1,137 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tushare_alpha_feasibility_continuation_reuse_manifest.v1.json",
+  "title": "P1.5C Parent-Bound Reuse Manifest V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "generated_at", "experiment_id", "collection_plan_sha256",
+    "parent", "successful_prefix_count", "reused_tasks", "first_unfinished",
+    "locked_test_status", "locked_test_consumed", "manifest_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "tushare-alpha-feasibility-continuation-reuse-manifest.v1"},
+    "generated_at": {"type": "string", "format": "date-time"},
+    "experiment_id": {"const": "a-share-technical-alpha-feasibility-tushare-p1-v1"},
+    "collection_plan_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"},
+    "parent": {"$ref": "#/$defs/parent_binding"},
+    "successful_prefix_count": {"const": 19},
+    "reused_tasks": {
+      "type": "array",
+      "minItems": 19,
+      "maxItems": 19,
+      "items": {"$ref": "#/$defs/reused_task"}
+    },
+    "first_unfinished": {"$ref": "#/$defs/first_unfinished"},
+    "locked_test_status": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/locked"},
+    "locked_test_consumed": {"const": false},
+    "manifest_sha256": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "task_id": {"type": "string", "pattern": "^index_weight-[0-9a-f]{64}$"},
+    "parent_binding": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "network_run_id", "run_claim_sha256", "receipt_sha256", "report_sha256",
+        "pit_coverage_report_sha256", "pit_manifest_sha256",
+        "runtime_bundle_sha256", "experiment_config_canonical_sha256"
+      ],
+      "properties": {
+        "network_run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{2,95}$"},
+        "run_claim_sha256": {"$ref": "#/$defs/sha256"},
+        "receipt_sha256": {"$ref": "#/$defs/sha256"},
+        "report_sha256": {"$ref": "#/$defs/sha256"},
+        "pit_coverage_report_sha256": {"$ref": "#/$defs/sha256"},
+        "pit_manifest_sha256": {"$ref": "#/$defs/sha256"},
+        "runtime_bundle_sha256": {"$ref": "#/$defs/sha256"},
+        "experiment_config_canonical_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "params": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["index_code", "start_date", "end_date"],
+      "properties": {
+        "index_code": {"const": "000906.SH"},
+        "start_date": {"type": "string", "pattern": "^20(?:17|18|19|20|21|22|23)[0-9]{4}$"},
+        "end_date": {"type": "string", "pattern": "^20(?:17|18|19|20|21|22|23)[0-9]{4}$"}
+      }
+    },
+    "reused_task": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ordinal", "request_fingerprint", "task_id", "task_sha256", "endpoint",
+        "month", "params", "provenance_kind", "started_artifact_sha256",
+        "import_artifact_sha256", "raw_artifact_sha256", "response_file_sha256",
+        "response_artifact_sha256", "normalized_content_sha256",
+        "attempt_artifact_sha256_by_number", "network_request_count"
+      ],
+      "properties": {
+        "ordinal": {"type": "integer", "minimum": 1, "maximum": 19},
+        "request_fingerprint": {"$ref": "#/$defs/task_id"},
+        "task_id": {"$ref": "#/$defs/task_id"},
+        "task_sha256": {"$ref": "#/$defs/sha256"},
+        "endpoint": {"const": "index_weight"},
+        "month": {"type": "string", "pattern": "^20(?:17|18|19)-(?:0[1-9]|1[0-2])$"},
+        "params": {"$ref": "#/$defs/params"},
+        "provenance_kind": {"enum": ["offline_p14d_import", "network"]},
+        "started_artifact_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "import_artifact_sha256": {"oneOf": [{"$ref": "#/$defs/sha256"}, {"type": "null"}]},
+        "raw_artifact_sha256": {"$ref": "#/$defs/sha256"},
+        "response_file_sha256": {"$ref": "#/$defs/sha256"},
+        "response_artifact_sha256": {"$ref": "#/$defs/sha256"},
+        "normalized_content_sha256": {"$ref": "#/$defs/sha256"},
+        "attempt_artifact_sha256_by_number": {
+          "type": "array",
+          "maxItems": 3,
+          "items": {"$ref": "#/$defs/sha256"}
+        },
+        "network_request_count": {"type": "integer", "minimum": 0, "maximum": 3}
+      }
+    },
+    "first_unfinished": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "ordinal", "request_fingerprint", "task_id", "task_sha256", "endpoint",
+        "month", "params", "started_artifact_sha256", "raw_transport_sha256",
+        "quarantine_artifact_sha256", "attempt_artifact_sha256_by_number",
+        "parent_attempt_count", "next_attempt_number", "maximum_cumulative_attempts",
+        "parent_failure_code", "parent_upstream_code", "parent_classification"
+      ],
+      "properties": {
+        "ordinal": {"const": 20},
+        "request_fingerprint": {"const": "index_weight-63ab4e7a5df236828d4f750812809bc78a6e1f8e9cfdad64c8128431da6a741b"},
+        "task_id": {"const": "index_weight-63ab4e7a5df236828d4f750812809bc78a6e1f8e9cfdad64c8128431da6a741b"},
+        "task_sha256": {"$ref": "#/$defs/sha256"},
+        "endpoint": {"const": "index_weight"},
+        "month": {"const": "2019-07"},
+        "params": {
+          "const": {
+            "index_code": "000906.SH",
+            "start_date": "20190701",
+            "end_date": "20190731"
+          }
+        },
+        "started_artifact_sha256": {"$ref": "#/$defs/sha256"},
+        "raw_transport_sha256": {"$ref": "#/$defs/sha256"},
+        "quarantine_artifact_sha256": {"$ref": "#/$defs/sha256"},
+        "attempt_artifact_sha256_by_number": {
+          "type": "array",
+          "minItems": 1,
+          "maxItems": 1,
+          "items": {"$ref": "#/$defs/sha256"}
+        },
+        "parent_attempt_count": {"const": 1},
+        "next_attempt_number": {"const": 2},
+        "maximum_cumulative_attempts": {"const": 3},
+        "parent_failure_code": {"const": "upstream_unknown_error"},
+        "parent_upstream_code": {"const": 40204},
+        "parent_classification": {"const": "UNCLASSIFIED_PARENT_EVIDENCE"}
+      }
+    }
+  }
+}

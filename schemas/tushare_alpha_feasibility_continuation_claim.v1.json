@@ -1,0 +1,115 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "tushare_alpha_feasibility_continuation_claim.v1.json",
+  "title": "P1.5C Continuation Claim V1",
+  "type": "object",
+  "additionalProperties": false,
+  "required": [
+    "schema_version", "prepared_at", "continuation_run_id", "experiment_id",
+    "strategy_id", "collection_plan_sha256", "experiment_config_canonical_sha256",
+    "parent", "reuse_manifest_sha256", "successful_prefix_count",
+    "first_unfinished_task_id", "parent_runtime_implementation_bundle",
+    "current_runtime_implementation_bundle", "immutable_strategy_bundle",
+    "execution_policy", "locked_test_status", "locked_test_consumed", "claim_sha256"
+  ],
+  "properties": {
+    "schema_version": {"const": "tushare-alpha-feasibility-continuation-claim.v1"},
+    "prepared_at": {"type": "string", "format": "date-time"},
+    "continuation_run_id": {"type": "string", "pattern": "^[A-Za-z0-9][A-Za-z0-9._-]{2,95}$"},
+    "experiment_id": {"const": "a-share-technical-alpha-feasibility-tushare-p1-v1"},
+    "strategy_id": {"const": "a-share-technical-momentum-adaptive-v1"},
+    "collection_plan_sha256": {"$ref": "#/$defs/sha256"},
+    "experiment_config_canonical_sha256": {"$ref": "#/$defs/sha256"},
+    "parent": {"$ref": "tushare_alpha_feasibility_continuation_reuse_manifest.v1.json#/$defs/parent_binding"},
+    "reuse_manifest_sha256": {"$ref": "#/$defs/sha256"},
+    "successful_prefix_count": {"const": 19},
+    "first_unfinished_task_id": {"const": "index_weight-63ab4e7a5df236828d4f750812809bc78a6e1f8e9cfdad64c8128431da6a741b"},
+    "parent_runtime_implementation_bundle": {"$ref": "#/$defs/runtime_bundle"},
+    "current_runtime_implementation_bundle": {"$ref": "#/$defs/runtime_bundle"},
+    "immutable_strategy_bundle": {"$ref": "#/$defs/immutable_strategy_bundle"},
+    "execution_policy": {"$ref": "#/$defs/execution_policy"},
+    "locked_test_status": {"$ref": "pit_membership_coverage_report.v1.json#/$defs/locked"},
+    "locked_test_consumed": {"const": false},
+    "claim_sha256": {"$ref": "#/$defs/sha256"}
+  },
+  "$defs": {
+    "sha256": {"type": "string", "pattern": "^[0-9a-f]{64}$"},
+    "runtime_bundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": ["schema_version", "config_path", "files", "bundle_sha256"],
+      "properties": {
+        "schema_version": {"type": "string", "minLength": 1},
+        "config_path": {"type": "string", "pattern": "^(?!/)(?!.*(?:^|/)\\.\\.(?:/|$)).+\\.json$"},
+        "files": {
+          "type": "object",
+          "minProperties": 1,
+          "additionalProperties": {"$ref": "#/$defs/sha256"}
+        },
+        "bundle_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "immutable_strategy_bundle": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "experiment_config_canonical_sha256", "alpha_engine_sha256",
+        "frozen_implementation_files", "dates_sha256", "portfolio_sha256",
+        "costs_sha256", "gate_sha256", "locked_policy_sha256", "bundle_sha256"
+      ],
+      "properties": {
+        "experiment_config_canonical_sha256": {"$ref": "#/$defs/sha256"},
+        "alpha_engine_sha256": {"$ref": "#/$defs/sha256"},
+        "frozen_implementation_files": {
+          "type": "object",
+          "minProperties": 3,
+          "additionalProperties": {"$ref": "#/$defs/sha256"}
+        },
+        "dates_sha256": {"$ref": "#/$defs/sha256"},
+        "portfolio_sha256": {"$ref": "#/$defs/sha256"},
+        "costs_sha256": {"$ref": "#/$defs/sha256"},
+        "gate_sha256": {"$ref": "#/$defs/sha256"},
+        "locked_policy_sha256": {"$ref": "#/$defs/sha256"},
+        "bundle_sha256": {"$ref": "#/$defs/sha256"}
+      }
+    },
+    "execution_policy": {
+      "type": "object",
+      "additionalProperties": false,
+      "required": [
+        "minimum_transport_interval_seconds", "rate_limit_fallback_seconds",
+        "maximum_retry_after_seconds", "retry_count_by_failure_shape",
+        "other_failure_retry_count",
+        "maximum_cumulative_attempts_per_fingerprint", "parent_attempt_count",
+        "next_attempt_number", "first_request", "parent_terminal_quarantine_present",
+        "parent_failure_classification", "classification_inference_forbidden"
+      ],
+      "properties": {
+        "minimum_transport_interval_seconds": {"const": "12"},
+        "rate_limit_fallback_seconds": {"const": 65},
+        "maximum_retry_after_seconds": {"const": 300},
+        "retry_count_by_failure_shape": {
+          "const": {
+            "RATE_LIMITED": 1,
+            "UPSTREAM_SERVER_ERROR": 1
+          }
+        },
+        "other_failure_retry_count": {"const": 0},
+        "maximum_cumulative_attempts_per_fingerprint": {"const": 3},
+        "parent_attempt_count": {"const": 1},
+        "next_attempt_number": {"const": 2},
+        "first_request": {
+          "const": {
+            "endpoint": "index_weight",
+            "index_code": "000906.SH",
+            "start_date": "20190701",
+            "end_date": "20190731"
+          }
+        },
+        "parent_terminal_quarantine_present": {"const": true},
+        "parent_failure_classification": {"const": "UNCLASSIFIED_PARENT_EVIDENCE"},
+        "classification_inference_forbidden": {"const": true}
+      }
+    }
+  }
+}
