@@ -15,6 +15,7 @@ module-level ``DEFAULT_POLICY`` object from Technical Shadow V1.
 
 from __future__ import annotations
 
+from bisect import bisect_right
 from collections import Counter, defaultdict
 from dataclasses import dataclass, fields, is_dataclass
 from datetime import date
@@ -104,6 +105,7 @@ _P15_PIT_POLICY_FIELDS: Mapping[str, str] = {
 MINIMUM_VALID_CONTROLLED_SESSIONS = ALPHA_LOOKBACK_SESSIONS + 1
 INELIGIBLE_INSUFFICIENT_HISTORY = "ineligible_insufficient_history"
 INELIGIBLE_NO_INITIAL_PRICE = "ineligible_no_initial_price"
+UNAVAILABLE_NO_DAILY_BAR = "unavailable_no_daily_bar"
 
 
 class AlphaFeasibilityError(ValueError):
@@ -357,6 +359,7 @@ class HistoryEligibilityRecord:
         allowed_reasons = {
             INELIGIBLE_INSUFFICIENT_HISTORY,
             INELIGIBLE_NO_INITIAL_PRICE,
+            UNAVAILABLE_NO_DAILY_BAR,
         }
         if self.eligibility:
             if self.reason is not None:
@@ -923,6 +926,8 @@ class AlphaFeasibilityScenarioResult:
     nav: tuple[AlphaFeasibilityNavPoint, ...]
     decisions: tuple[AlphaFeasibilityDecision, ...]
     rebalances: tuple[AlphaFeasibilityRebalance, ...]
+    frozen_position_day_count: int = 0
+    terminal_stale_position_count: int = 0
     cost_model_semantics: str = COST_MODEL_SEMANTICS
     minimum_commission_modeled: bool = MINIMUM_COMMISSION_MODELED
     execution_realism: str = EXECUTION_REALISM
@@ -982,7 +987,9 @@ class _PreparedInput:
     suspended: frozenset[tuple[date, str]]
     calendar_position: Mapping[date, int]
     first_signal_position: Mapping[str, int]
+    valid_signal_positions: Mapping[str, tuple[int, ...]]
     first_membership_date: Mapping[str, date]
+    ranking_cache: dict[date, tuple[TechnicalRankRow, ...]]
 
 
 @dataclass(frozen=True, slots=True)
@@ -1170,6 +1177,14 @@ def _prepare(inputs: AlphaFeasibilityInput, *, required_end: date) -> _PreparedI
                 )
 
     signal_by_key: dict[tuple[date, str], SignalBar] = dict(stock_by_key)
+    valid_signal_positions: dict[str, tuple[int, ...]] = {
+        instrument_id: tuple(
+            calendar_position[trading_date]
+            for trading_date in sorted(signal_dates)
+            if (trading_date, instrument_id) not in suspended
+        )
+        for instrument_id, signal_dates in signal_dates_by_instrument.items()
+    }
     for trading_date, bar in benchmark_by_date.items():
         signal_by_key[(trading_date, benchmark_id)] = SignalBar(
             trading_date=trading_date,
@@ -1187,7 +1202,9 @@ def _prepare(inputs: AlphaFeasibilityInput, *, required_end: date) -> _PreparedI
         frozenset(suspended),
         calendar_position,
         first_signal_position,
+        valid_signal_positions,
         first_membership_date,
+        {},
     )
 
 
@@ -1240,48 +1257,37 @@ def _history_eligibility_records(
         decision_key = (decision_date, instrument_id)
         first_signal_position = prepared.first_signal_position.get(instrument_id)
         if decision_key not in prepared.signal_by_key:
-            no_signal_yet = (
-                first_signal_position is None
-                or first_signal_position > decision_position
-            )
-            if (
-                no_signal_yet
-                and (first_membership, instrument_id) in prepared.suspended
-                and decision_key in prepared.suspended
-            ):
-                records.append(
-                    HistoryEligibilityRecord(
-                        decision_date,
-                        instrument_id,
-                        False,
-                        INELIGIBLE_NO_INITIAL_PRICE,
-                    )
+            records.append(
+                HistoryEligibilityRecord(
+                    decision_date,
+                    instrument_id,
+                    False,
+                    INELIGIBLE_INSUFFICIENT_HISTORY,
                 )
-                continue
-            if decision_key in prepared.suspended:
-                raise AlphaFeasibilityDataError(
-                    "suspended PIT member lacks prior economic value:"
-                    f"{decision_date}:{instrument_id}"
-                )
-            raise AlphaFeasibilityDataError(
-                "non-suspended PIT member lacks decision-date signal:"
-                f"{decision_date}:{instrument_id}"
             )
+            continue
         if first_signal_position is None or first_signal_position > decision_position:
             raise AlphaFeasibilityDataError(
                 "decision-date signal lacks a causal first observation:"
                 f"{decision_date}:{instrument_id}"
             )
-        valid_session_count = decision_position - first_signal_position + 1
+        valid_session_count = bisect_right(
+            prepared.valid_signal_positions.get(instrument_id, ()),
+            decision_position,
+        )
+        unavailable = decision_key in prepared.suspended
         records.append(
             HistoryEligibilityRecord(
                 decision_date,
                 instrument_id,
-                valid_session_count >= MINIMUM_VALID_CONTROLLED_SESSIONS,
+                valid_session_count >= MINIMUM_VALID_CONTROLLED_SESSIONS
+                and not unavailable,
                 (
-                    None
-                    if valid_session_count >= MINIMUM_VALID_CONTROLLED_SESSIONS
-                    else INELIGIBLE_INSUFFICIENT_HISTORY
+                    INELIGIBLE_INSUFFICIENT_HISTORY
+                    if valid_session_count < MINIMUM_VALID_CONTROLLED_SESSIONS
+                    else UNAVAILABLE_NO_DAILY_BAR
+                    if unavailable
+                    else None
                 ),
             )
         )
@@ -1381,17 +1387,20 @@ def _validate_frozen_cost_scenario(scenario: Any) -> ProportionalCostScenario:
     return scenario
 
 
-def _build_decision(
+def _ranking_for_decision(
     *,
     prepared: _PreparedInput,
     decision_date: date,
-    execution_date: date,
-    current_weights: Mapping[str, Decimal],
-    current_nav: Decimal,
-    peak_nav: Decimal,
-) -> AlphaFeasibilityDecision:
-    sessions = tuple(day for day in prepared.trading_dates if day <= decision_date)
-    members = select_pit_membership(prepared.memberships, decision_date)
+    sessions: Sequence[date],
+    members: Sequence[str],
+) -> tuple[TechnicalRankRow, ...]:
+    """Cache only scenario-independent frozen ranks for one decision date."""
+
+    cached = prepared.ranking_cache.get(decision_date)
+    if cached is not None:
+        if {row.instrument_id for row in cached} != set(members):
+            raise AlphaFeasibilityDataError("cached PIT ranking membership drift")
+        return cached
     history_records = _history_eligibility_records(
         prepared,
         decision_date=decision_date,
@@ -1400,17 +1409,17 @@ def _build_decision(
     alpha_members = tuple(
         item.instrument_id for item in history_records if item.eligibility
     )
-    scored_rows = (
-        rank_alpha_feasibility_universe(
-            decision_date=decision_date,
-            sessions=sessions,
-            instrument_ids=alpha_members,
-            signal_index=prepared.signal_by_key,
-            benchmark_id=prepared.benchmark_id,
-            suspended=prepared.suspended,
+    if not alpha_members:
+        raise AlphaFeasibilityDataError(
+            "decision cross-section is below the frozen minimum of one"
         )
-        if alpha_members
-        else ()
+    scored_rows = rank_alpha_feasibility_universe(
+        decision_date=decision_date,
+        sessions=sessions,
+        instrument_ids=alpha_members,
+        signal_index=prepared.signal_by_key,
+        benchmark_id=prepared.benchmark_id,
+        suspended=prepared.suspended,
     )
     history_ineligible_rows = tuple(
         TechnicalRankRow(
@@ -1444,6 +1453,27 @@ def _build_decision(
         raise AlphaFeasibilityDataError(
             "not every PIT member has one final eligibility conclusion"
         )
+    prepared.ranking_cache[decision_date] = ranking
+    return ranking
+
+
+def _build_decision(
+    *,
+    prepared: _PreparedInput,
+    decision_date: date,
+    execution_date: date,
+    current_weights: Mapping[str, Decimal],
+    current_nav: Decimal,
+    peak_nav: Decimal,
+) -> AlphaFeasibilityDecision:
+    sessions = tuple(day for day in prepared.trading_dates if day <= decision_date)
+    members = select_pit_membership(prepared.memberships, decision_date)
+    ranking = _ranking_for_decision(
+        prepared=prepared,
+        decision_date=decision_date,
+        sessions=sessions,
+        members=members,
+    )
     required = sessions[-(ALPHA_LOOKBACK_SESSIONS + 1):]
     benchmark_rows = [
         {"close": str(prepared.signal_by_key[(day, prepared.benchmark_id)].close)}
@@ -1566,6 +1596,40 @@ def _period_returns(
     return tuple(result)
 
 
+def _value_held_positions_at_open(
+    *,
+    prepared: _PreparedInput,
+    decision_date: date,
+    trading_date: date,
+    nav_before: Decimal,
+    current_weights: Mapping[str, Decimal],
+) -> tuple[dict[str, Decimal], frozenset[str]]:
+    """Value holdings causally; an unavailable day is frozen at prior value."""
+
+    open_values: dict[str, Decimal] = {}
+    frozen: set[str] = set()
+    for instrument_id, weight in current_weights.items():
+        prior_value = nav_before * weight
+        previous = prepared.signal_by_key.get((decision_date, instrument_id))
+        current = prepared.signal_by_key.get((trading_date, instrument_id))
+        if previous is None:
+            raise AlphaFeasibilityDataError(
+                "held position lacks a causal prior adjusted value:"
+                f"{decision_date}:{instrument_id}"
+            )
+        if (trading_date, instrument_id) in prepared.suspended:
+            open_values[instrument_id] = prior_value
+            frozen.add(instrument_id)
+            continue
+        if current is None:
+            raise AlphaFeasibilityDataError(
+                "held position is completely unpriceable:"
+                f"{trading_date}:{instrument_id}"
+            )
+        open_values[instrument_id] = prior_value * current.open / previous.close
+    return open_values, frozenset(frozen)
+
+
 def _metrics(
     *,
     nav: Sequence[AlphaFeasibilityNavPoint],
@@ -1672,6 +1736,7 @@ def _run_prepared_scenario(
     nav_points: list[AlphaFeasibilityNavPoint] = []
     decisions: list[AlphaFeasibilityDecision] = []
     rebalances: list[AlphaFeasibilityRebalance] = []
+    frozen_position_day_count = 0
 
     pending = _build_decision(
         prepared=prepared,
@@ -1684,23 +1749,19 @@ def _run_prepared_scenario(
     decisions.append(pending)
     for index, trading_date in enumerate(report_dates):
         nav_before = nav_value
-        prior_close_values = {
-            instrument_id: nav_before * weight
-            for instrument_id, weight in current_weights.items()
-        }
         cash_at_open = nav_before * (ONE - sum(current_weights.values(), ZERO))
-        open_values: dict[str, Decimal] = {}
-        for instrument_id, prior_value in prior_close_values.items():
-            previous = prepared.signal_by_key.get((pending.decision_date, instrument_id))
-            current = prepared.signal_by_key.get((trading_date, instrument_id))
-            if previous is None or current is None:
-                raise AlphaFeasibilityDataError(
-                    "held position lacks causal close-to-open signal:"
-                    f"{pending.decision_date}:{trading_date}:{instrument_id}"
-                )
-            open_value = prior_value * current.open / previous.close
-            open_values[instrument_id] = open_value
-            contributions[instrument_id] += open_value - prior_value
+        open_values, frozen_ids = _value_held_positions_at_open(
+            prepared=prepared,
+            decision_date=pending.decision_date,
+            trading_date=trading_date,
+            nav_before=nav_before,
+            current_weights=current_weights,
+        )
+        frozen_position_day_count += len(frozen_ids)
+        for instrument_id, open_value in open_values.items():
+            contributions[instrument_id] += (
+                open_value - nav_before * current_weights[instrument_id]
+            )
         nav_at_open = cash_at_open + sum(open_values.values(), ZERO)
         if nav_at_open <= ZERO:
             raise AlphaFeasibilityError("normalized NAV is non-positive at open")
@@ -1709,8 +1770,43 @@ def _run_prepared_scenario(
             for instrument_id, value in open_values.items()
             if value > ZERO
         }
+        frozen_gross = sum(
+            (open_weights.get(instrument_id, ZERO) for instrument_id in frozen_ids),
+            ZERO,
+        )
+        tradable_selected = [
+            instrument_id
+            for instrument_id in pending.selected_instrument_ids
+            if instrument_id not in frozen_ids
+            and (trading_date, instrument_id) not in prepared.suspended
+        ][: max(0, MAX_POSITIONS - len(frozen_ids))]
+        tradable_budget = max(pending.target_gross_exposure - frozen_gross, ZERO)
+        effective_target_weights = {
+            instrument_id: open_weights[instrument_id]
+            for instrument_id in sorted(frozen_ids)
+            if instrument_id in open_weights
+        }
+        if tradable_selected and tradable_budget > ZERO:
+            per_weight = min(
+                MAX_POSITION_WEIGHT,
+                tradable_budget / Decimal(len(tradable_selected)),
+            )
+            effective_target_weights.update(
+                {instrument_id: per_weight for instrument_id in tradable_selected}
+            )
+        effective_decision = AlphaFeasibilityDecision(
+            decision_date=pending.decision_date,
+            execution_date=pending.execution_date,
+            selected_instrument_ids=tuple(effective_target_weights),
+            target_weights=effective_target_weights,
+            market_state=pending.market_state,
+            target_gross_exposure=pending.target_gross_exposure,
+            realized_target_weight=sum(effective_target_weights.values(), ZERO),
+            eligible_count=pending.eligible_count,
+            entry_count=pending.entry_count,
+        )
         rebalance = _cost_for_rebalance(
-            decision=pending,
+            decision=effective_decision,
             prior_weights=open_weights,
             current_nav=nav_at_open,
             scenario=scenario,
@@ -1722,28 +1818,71 @@ def _run_prepared_scenario(
         nav_after_cost = nav_at_open - rebalance.total_cost
 
         asset_values: dict[str, Decimal] = {}
-        for instrument_id, weight in pending.target_weights.items():
+        planned_values: dict[str, Decimal] = {}
+        for instrument_id, weight in effective_target_weights.items():
             current = prepared.signal_by_key.get((trading_date, instrument_id))
+            if instrument_id in frozen_ids:
+                planned_values[instrument_id] = open_values[instrument_id]
+                continue
             if current is None:
-                key = (trading_date, instrument_id)
-                if key in prepared.suspended:
-                    raise AlphaFeasibilityDataError(
-                        "held suspended position lacks causal carry value:"
-                        f"{trading_date}:{instrument_id}"
-                    )
                 raise AlphaFeasibilityDataError(
                     "held non-suspended position lacks signal return:"
                     f"{trading_date}:{instrument_id}"
                 )
-            instrument_return = current.close / current.open - ONE
-            start_value = nav_after_cost * weight
+            planned_values[instrument_id] = nav_after_cost * weight
+
+        if frozen_ids:
+            planned_cash = nav_at_open - sum(
+                (
+                    open_values[instrument_id]
+                    for instrument_id in frozen_ids
+                ),
+                ZERO,
+            ) - sum(
+                (
+                    nav_at_open * effective_target_weights[instrument_id]
+                    for instrument_id in effective_target_weights
+                    if instrument_id not in frozen_ids
+                ),
+                ZERO,
+            )
+            cost_deficit = max(rebalance.total_cost - max(planned_cash, ZERO), ZERO)
+            tradable_total = sum(
+                (
+                    nav_at_open * effective_target_weights[instrument_id]
+                    for instrument_id in effective_target_weights
+                    if instrument_id not in frozen_ids
+                ),
+                ZERO,
+            )
+            scale = (
+                max(tradable_total - cost_deficit, ZERO) / tradable_total
+                if tradable_total > ZERO
+                else ZERO
+            )
+            for instrument_id in effective_target_weights:
+                if instrument_id not in frozen_ids:
+                    planned_values[instrument_id] = (
+                        nav_at_open
+                        * effective_target_weights[instrument_id]
+                        * scale
+                    )
+
+        for instrument_id, start_value in planned_values.items():
+            current = prepared.signal_by_key[(trading_date, instrument_id)]
+            instrument_return = (
+                ZERO
+                if instrument_id in frozen_ids
+                else current.close / current.open - ONE
+            )
             instrument_pnl = start_value * instrument_return
             contributions[instrument_id] += instrument_pnl
             asset_values[instrument_id] = start_value + instrument_pnl
 
-        cash_value = nav_after_cost * (
-            ONE - sum(pending.target_weights.values(), ZERO)
-        )
+        cash_value = nav_after_cost - sum(planned_values.values(), ZERO)
+        if cash_value < -_EPSILON:
+            raise AlphaFeasibilityError("frozen positions overdraw normalized cash")
+        cash_value = max(cash_value, ZERO)
         nav_value = cash_value + sum(asset_values.values(), ZERO)
         if nav_value <= ZERO:
             raise AlphaFeasibilityError("normalized NAV is non-positive")
@@ -1801,6 +1940,11 @@ def _run_prepared_scenario(
         nav=tuple(nav_points),
         decisions=tuple(decisions),
         rebalances=tuple(rebalances),
+        frozen_position_day_count=frozen_position_day_count,
+        terminal_stale_position_count=sum(
+            (report_dates[-1], instrument_id) in prepared.suspended
+            for instrument_id in current_weights
+        ),
     )
 
 

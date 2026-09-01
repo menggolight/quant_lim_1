@@ -5913,17 +5913,34 @@ def _aggregate_suspension_events(
     return result
 
 
-def _reject_suspension_daily_bar_conflicts(
+def _usable_daily_bar(row: Mapping[str, Any] | None) -> bool:
+    """Return whether a normalized bar is an actual traded-price fact."""
+
+    if row is None:
+        return False
+    values: dict[str, Decimal] = {}
+    for field in ("open", "high", "low", "close"):
+        values[field], _ = _decimal(row.get(field), field, minimum=Decimal("0"))
+    volume, _ = _decimal(row.get("vol"), "vol", minimum=Decimal("0"))
+    amount, _ = _decimal(row.get("amount"), "amount", minimum=Decimal("0"))
+    return (
+        all(value > 0 for value in values.values())
+        and values["high"] >= max(values["open"], values["close"], values["low"])
+        and values["low"] <= min(values["open"], values["close"], values["high"])
+        and (volume > 0 or amount > 0)
+    )
+
+
+def _suspension_daily_bar_conflict_keys(
     daily: Mapping[tuple[str, str], Mapping[str, Any]],
     suspensions: Mapping[tuple[str, str], Mapping[str, Any]],
-) -> None:
+) -> set[tuple[str, str]]:
+    conflicts: set[tuple[str, str]] = set()
     for key, suspension in suspensions.items():
         bar = daily.get(key)
-        if bar is None or not _is_full_session_suspension(suspension):
-            continue
-        volume, _text = _decimal(bar.get("vol"), "vol", minimum=Decimal("0"))
-        if volume > 0:
-            raise AlphaFeasibilityDataError("suspension_daily_bar_conflict")
+        if _is_full_session_suspension(suspension) and _usable_daily_bar(bar):
+            conflicts.add(key)
+    return conflicts
 
 
 @dataclass(frozen=True, slots=True)
@@ -5964,6 +5981,9 @@ def validate_history_coverage(
             "insufficient_history_count_by_decision": {},
             "ineligible_no_initial_price_count": 0,
             "unexplained_market_data_gap_count": 0,
+            "unavailable_stock_day_count": 0,
+            "suspension_daily_bar_conflict_count": 0,
+            "off_calendar_adj_factor_count": 0,
             "blockers": [{"reason": "missing_endpoint_artifacts", "endpoints": missing}],
             "locked_test_status": dict(LOCKED_TEST_STATUS),
             "locked_test_consumed": False,
@@ -6106,18 +6126,17 @@ def validate_history_coverage(
     except AlphaFeasibilityDataError as exc:
         suspension_status = "BLOCKED_DATA"
         blockers.append({"reason": exc.code})
-    try:
-        _reject_suspension_daily_bar_conflicts(daily_index, suspend_index)
-    except AlphaFeasibilityDataError as exc:
-        daily_status = "BLOCKED_DATA"
-        suspension_status = "BLOCKED_DATA"
-        blockers.append({"reason": exc.code})
+    suspension_daily_bar_conflicts = _suspension_daily_bar_conflict_keys(
+        daily_index, suspend_index
+    )
+    off_calendar_adj_factor_count = 0
     try:
         adj_index = _unique_rows("adj_factor", rows_by_endpoint["adj_factor"])
         if any(key[0] not in union_set for key in adj_index):
             raise AlphaFeasibilityDataError("adj_factor_contains_non_union_instrument")
-        if any(key[1] not in set(open_dates) for key in adj_index):
-            raise AlphaFeasibilityDataError("adj_factor_row_not_on_open_session")
+        off_calendar_adj_factor_count = sum(
+            key[1] not in set(open_dates) for key in adj_index
+        )
         for (code, trade_date), row in adj_index.items():
             factor, _ = _decimal(row["adj_factor"], "adj_factor", minimum=Decimal("0"))
             if factor <= 0:
@@ -6132,13 +6151,9 @@ def validate_history_coverage(
     missing_adj: set[tuple[str, str]] = set()
     for key in daily_index:
         code, trade_date_text = key
-        if _is_full_session_suspension(suspend_index.get(key)):
-            continue
         trade_date = _parse_date(trade_date_text, "daily_trade_date")
         if not adj_by_code[code] or adj_by_code[code][0][0] > trade_date:
             missing_adj.add(key)
-    if missing_adj:
-        adj_status = "BLOCKED_DATA"
     explained_suspension_missing: set[tuple[str, str]] = set()
     unexplained_missing: set[tuple[str, str]] = set()
     valid_candidate_count_by_decision: dict[str, int] = {}
@@ -6172,15 +6187,14 @@ def validate_history_coverage(
             valid_signal_keys: set[tuple[str, str]] = set()
             first_real_position: dict[str, int] = {}
             for code in union:
-                has_prior_economic_value = False
                 for position, trade_date_text in enumerate(open_dates):
                     key = (code, trade_date_text)
-                    if _is_full_session_suspension(suspend_index.get(key)):
-                        if has_prior_economic_value:
-                            valid_signal_keys.add(key)
-                    elif key in daily_index:
+                    if (
+                        key in daily_index
+                        and key not in missing_adj
+                        and _usable_daily_bar(daily_index[key])
+                    ):
                         first_real_position.setdefault(code, position)
-                        has_prior_economic_value = True
                         valid_signal_keys.add(key)
 
             first_membership_position: dict[str, int] = {}
@@ -6193,11 +6207,8 @@ def validate_history_coverage(
                 for code in members:
                     first_membership_position.setdefault(code, snapshot_position)
 
-            # Keep the panel and the engine's existing global-contiguity guard
-            # aligned: after the first real price, an observed series may not
-            # contain an unexplained interior hole, even while temporarily out
-            # of the index.  A trailing period is checked only when PIT makes it
-            # causally required below.
+            # Missing observations remain diagnostic stock-days.  They no
+            # longer invalidate unrelated instruments or the complete dataset.
             for code in union:
                 first_position = first_real_position.get(code)
                 observed_positions = [
@@ -6211,7 +6222,19 @@ def validate_history_coverage(
                 for position in range(first_position, max(observed_positions) + 1):
                     key = (code, open_dates[position])
                     if key not in valid_signal_keys:
-                        unexplained_missing.add(key)
+                        if _is_full_session_suspension(suspend_index.get(key)):
+                            explained_suspension_missing.add(key)
+                        else:
+                            unexplained_missing.add(key)
+
+            valid_observation_prefix_by_code: dict[str, list[int]] = {}
+            for code in union:
+                running = 0
+                prefix: list[int] = []
+                for trade_date_text in open_dates:
+                    running += (code, trade_date_text) in valid_signal_keys
+                    prefix.append(running)
+                valid_observation_prefix_by_code[code] = prefix
 
             for decision_date in decision_dates:
                 visible = [
@@ -6225,91 +6248,32 @@ def validate_history_coverage(
                     )
                 members = max(visible, key=lambda item: item[0])[1]
                 decision_position = open_position[decision_date]
-                window_start = max(
-                    0,
-                    decision_position - (MINIMUM_VALID_CONTROLLED_SESSIONS - 1),
-                )
-                window_positions = range(window_start, decision_position + 1)
                 valid_count = 0
                 insufficient_count = 0
                 no_initial_price_count = 0
-                unresolved_count = 0
+                unavailable_count = 0
                 for code in members:
                     decision_key = (code, _compact(decision_date))
-                    if decision_key not in valid_signal_keys:
-                        first_position = first_real_position.get(code)
-                        first_membership = first_membership_position.get(code)
-                        if (
-                            _is_full_session_suspension(
-                                suspend_index.get(decision_key)
-                            )
-                            and first_membership is not None
-                            and decision_position >= first_membership
-                            and _is_full_session_suspension(
-                                suspend_index.get(
-                                    (code, open_dates[first_membership])
-                                )
-                            )
-                            and (
-                                first_position is None
-                                or decision_position < first_position
-                            )
-                        ):
-                            # A first-observation full-session suspension has
-                            # no earlier economic value to freeze.  It is an
-                            # individual history-ineligibility, not an
-                            # unexplained non-suspension data gap.
-                            no_initial_price_count += 1
-                            continue
-                        unexplained_missing.add(decision_key)
-                        unresolved_count += 1
-                        continue
-                    first_position = first_real_position.get(code)
-                    has_gap = False
-                    has_pre_observation_prefix = False
-                    for position in window_positions:
-                        key = (code, open_dates[position])
-                        if key in valid_signal_keys:
-                            if key not in daily_index:
-                                explained_suspension_missing.add(key)
-                            elif key in missing_adj:
-                                missing_adj.add(key)
-                            continue
-                        first_membership = first_membership_position.get(code)
-                        if (
-                            _is_full_session_suspension(suspend_index.get(key))
-                            and first_position is not None
-                            and position < first_position
-                            and first_membership is not None
-                            and position >= first_membership
-                        ):
-                            has_pre_observation_prefix = True
-                            continue
-                        if (
-                            first_position is not None
-                            and position < first_position
-                            and (first_membership is None or position < first_membership)
-                        ):
-                            has_pre_observation_prefix = True
-                            continue
-                        unexplained_missing.add(key)
-                        has_gap = True
-                    if has_gap:
-                        unresolved_count += 1
-                        continue
-                    if (
-                        len(window_positions)
-                        < MINIMUM_VALID_CONTROLLED_SESSIONS
-                        or has_pre_observation_prefix
-                    ):
+                    valid_observations = valid_observation_prefix_by_code[code][
+                        decision_position
+                    ]
+                    if valid_observations < MINIMUM_VALID_CONTROLLED_SESSIONS:
                         insufficient_count += 1
+                    elif decision_key not in valid_signal_keys:
+                        unavailable_count += 1
+                        if _is_full_session_suspension(
+                            suspend_index.get(decision_key)
+                        ):
+                            explained_suspension_missing.add(decision_key)
+                        elif decision_key not in missing_adj:
+                            unexplained_missing.add(decision_key)
                     else:
                         valid_count += 1
                 if (
                     valid_count
                     + insufficient_count
                     + no_initial_price_count
-                    + unresolved_count
+                    + unavailable_count
                     != len(members)
                 ):
                     raise AlphaFeasibilityDataError(
@@ -6324,25 +6288,6 @@ def validate_history_coverage(
 
         except AlphaFeasibilityDataError as exc:
             blockers.append({"reason": exc.code})
-    if unexplained_missing:
-        daily_status = "BLOCKED_DATA"
-        suspension_status = "BLOCKED_DATA"
-        blockers.append(
-            {
-                "reason": UNEXPLAINED_MARKET_DATA_GAP_STATUS,
-                "count": len(unexplained_missing),
-                "sample": [list(item) for item in sorted(unexplained_missing)[:20]],
-            }
-        )
-    if missing_adj:
-        adj_status = "BLOCKED_DATA"
-        blockers.append(
-            {
-                "reason": "missing_causal_adj_factor",
-                "count": len(missing_adj),
-                "sample": [list(item) for item in sorted(missing_adj)[:20]],
-            }
-        )
     passed = not blockers
     report = {
         "schema_version": HISTORY_COVERAGE_SCHEMA_VERSION,
@@ -6372,6 +6317,13 @@ def validate_history_coverage(
         "non_suspension_missing_daily_count": len(unexplained_missing),
         "unexplained_market_data_gap_count": len(unexplained_missing),
         "missing_causal_adj_factor_count": len(missing_adj),
+        "unavailable_stock_day_count": len(
+            explained_suspension_missing | unexplained_missing | missing_adj
+        ),
+        "suspension_daily_bar_conflict_count": len(
+            suspension_daily_bar_conflicts
+        ),
+        "off_calendar_adj_factor_count": off_calendar_adj_factor_count,
         "terminal_session_next_session": None,
         "blockers": blockers,
         "locked_test_status": dict(LOCKED_TEST_STATUS),
@@ -6581,6 +6533,16 @@ def validate_history_coverage_from_store(
         ),
         "missing_causal_adj_factor_count": sum(
             int(part.report["missing_causal_adj_factor_count"]) for part in partials
+        ),
+        "unavailable_stock_day_count": sum(
+            int(part.report["unavailable_stock_day_count"]) for part in partials
+        ),
+        "suspension_daily_bar_conflict_count": sum(
+            int(part.report["suspension_daily_bar_conflict_count"])
+            for part in partials
+        ),
+        "off_calendar_adj_factor_count": sum(
+            int(part.report["off_calendar_adj_factor_count"]) for part in partials
         ),
         "terminal_session_next_session": None,
         "blockers": [
@@ -6874,8 +6836,6 @@ def build_history_manifest_from_store(
         len(summaries[endpoint]) == expected[endpoint]
         for endpoint in ("trade_cal", "daily", "adj_factor", "suspend_d", "index_daily")
     )
-    if complete and int(coverage.report.get("unexplained_market_data_gap_count", 0)) != 0:
-        raise AlphaFeasibilityDataError("ready_history_contains_unexplained_gap")
     return MappingProxyType(
         _self_hashed(
             {
@@ -6951,10 +6911,10 @@ def build_total_return_panel(
 ) -> list[dict[str, Any]]:
     """Build causal signal values from ``raw_close * as-of adj_factor``.
 
-    A suspended open session carries the previous economic value only with a
-    same-day ``suspend_type == 'S'`` record.  All other missing daily bars fail
-    closed.  ``raw_open`` and ``raw_close`` remain separate from the adjusted
-    signal ``close`` and ``high`` fields consumed by the research engine.
+    A usable positive-turnover daily bar is the price fact even when a
+    ``suspend_d`` event claims a full-session suspension.  After the first
+    causal adjusted price, any unavailable stock-day carries that last value
+    for valuation while remaining explicitly unavailable to the selector.
     """
 
     parsed_dates = tuple(
@@ -6991,7 +6951,6 @@ def build_total_return_panel(
     daily = _unique_rows("daily", daily_rows)
     suspensions = _aggregate_suspension_events(suspension_rows)
     adj_index = _unique_rows("adj_factor", adj_factor_rows)
-    _reject_suspension_daily_bar_conflicts(daily, suspensions)
     if not {code for code, _trade_date in daily}.issubset(instrument_set):
         raise AlphaFeasibilityDataError("index_weight_daily_code_mismatch")
     if any(code not in instrument_set for code, _trade_date in suspensions):
@@ -7018,39 +6977,24 @@ def build_total_return_panel(
 
     panel: list[dict[str, Any]] = []
     for code in instruments:
-        real_dates = [
-            _parse_date(trade_date, "daily_trade_date")
-            for instrument, trade_date in daily
-            if instrument == code
-            and not _is_full_session_suspension(
-                suspensions.get((instrument, trade_date))
-            )
-        ]
-        observed_dates = real_dates + [
-            _parse_date(trade_date, "suspension_trade_date")
-            for instrument, trade_date in suspensions
-            if instrument == code
-        ]
+        factor_values = factors[code]
+        real_dates = []
+        for instrument, trade_date in daily:
+            if instrument != code or not _usable_daily_bar(daily[(instrument, trade_date)]):
+                continue
+            parsed_trade_date = _parse_date(trade_date, "daily_trade_date")
+            if factor_values and factor_values[0][0] <= parsed_trade_date:
+                real_dates.append(parsed_trade_date)
         if not real_dates:
-            has_full_session_suspension = any(
-                instrument == code and _is_full_session_suspension(row)
-                for (instrument, _trade_date), row in suspensions.items()
-            )
-            if not has_full_session_suspension:
-                raise AlphaFeasibilityDataError("index_weight_daily_code_mismatch")
-            # Do not manufacture a signal value for a member whose only
-            # observations are full-session suspensions before any price.
-            # The separate suspension evidence stream lets the engine emit
-            # ``ineligible_no_initial_price`` for each applicable decision.
+            # The engine emits an insufficient-history conclusion for every
+            # applicable PIT decision without inventing a price.
             continue
         first_real = max(start, min(real_dates))
-        last_observed = min(end, max(observed_dates))
-        factor_values = factors[code]
         factor_cursor = 0
         latest_factor: tuple[date, Decimal, str] | None = None
         previous_economic_value: Decimal | None = None
         for trading_date in parsed_dates:
-            if trading_date < first_real or trading_date > last_observed:
+            if trading_date < first_real or trading_date > end:
                 continue
             while (
                 factor_cursor < len(factor_values)
@@ -7061,10 +7005,9 @@ def build_total_return_panel(
             key = (code, _compact(trading_date))
             bar = daily.get(key)
             suspension = suspensions.get(key)
-            if _is_full_session_suspension(suspension):
+            usable_bar = _usable_daily_bar(bar) and latest_factor is not None
+            if not usable_bar:
                 if previous_economic_value is None:
-                    # No security master exists in P1.  A leading suspension is
-                    # not allowed to invent a pre-observation price.
                     continue
                 raw_values: dict[str, str | None] = {
                     "open": None,
@@ -7073,9 +7016,6 @@ def build_total_return_panel(
                     "close": None,
                 }
                 if bar is not None:
-                    # Preserve a simultaneously returned provider bar as raw
-                    # evidence, but never consume it as the suspension-day
-                    # signal value.
                     for field in raw_values:
                         _number, raw_values[field] = _decimal(
                             bar[field], field, minimum=Decimal("0")
@@ -7100,16 +7040,14 @@ def build_total_return_panel(
                     "open": str(economic_value),
                     "adjusted_value": str(economic_value),
                     "daily_total_return": "0",
-                    "is_suspended_carry": True,
-                    "suspend_type": "S",
+                    "is_suspended_carry": _is_full_session_suspension(suspension),
+                    "is_unavailable_no_daily_bar": True,
+                    "suspend_type": (
+                        "S" if _is_full_session_suspension(suspension) else None
+                    ),
                 }
-            elif bar is None:
-                raise AlphaFeasibilityDataError(
-                    UNEXPLAINED_MARKET_DATA_GAP_STATUS
-                )
             else:
-                if latest_factor is None:
-                    raise AlphaFeasibilityDataError("missing_causal_adj_factor")
+                assert bar is not None and latest_factor is not None
                 raw_close, raw_close_text = _decimal(
                     bar["close"], "close", minimum=Decimal("0")
                 )
@@ -7147,6 +7085,7 @@ def build_total_return_panel(
                     "adjusted_value": str(economic_value),
                     "daily_total_return": None if daily_return is None else str(daily_return),
                     "is_suspended_carry": False,
+                    "is_unavailable_no_daily_bar": False,
                     "suspend_type": None,
                 }
             panel.append(row)
@@ -7474,6 +7413,9 @@ def _blocked_history_coverage(
         "same_day_suspension_explained_missing_daily_count": 0,
         "non_suspension_missing_daily_count": 0,
         "missing_causal_adj_factor_count": 0,
+        "unavailable_stock_day_count": 0,
+        "suspension_daily_bar_conflict_count": 0,
+        "off_calendar_adj_factor_count": 0,
         "terminal_session_next_session": None,
         "blockers": [{"reason": blocker}],
         "locked_test_status": dict(LOCKED_TEST_STATUS),
@@ -8306,19 +8248,17 @@ def load_feasibility_inputs(
     ]
 
     def suspension_records() -> Iterable[dict[str, Any]]:
-        # Preserve full-session evidence even before the first observable
-        # economic value.  The engine needs that evidence to conclude
-        # ``ineligible_no_initial_price`` without inventing a carry value.
-        for suspension_task in by_endpoint["suspend_d"]:
-            for row in store._load_response(suspension_task).rows:
-                if _is_full_session_suspension(row):
+        # The engine's legacy ``suspensions`` input is the non-tradable-day
+        # channel.  Availability is derived from daily+causal-adj evidence;
+        # suspend_d is diagnostic only and cannot override a usable bar.
+        for daily_task in by_endpoint["daily"]:
+            for row in panel_for_task(daily_task):
+                if row["is_unavailable_no_daily_bar"]:
                     yield {
-                        "trading_date": _iso(
-                            _parse_date(row["trade_date"], "suspension_date")
-                        ),
+                        "trading_date": row["trading_date"],
                         "ts_code": row["ts_code"],
                         "instrument_id": row["ts_code"],
-                        "suspend_type": "S",
+                        "suspend_type": row["suspend_type"],
                     }
     snapshots = [
         {

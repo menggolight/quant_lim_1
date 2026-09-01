@@ -9,6 +9,7 @@ from types import SimpleNamespace
 import unittest
 from unittest import mock
 
+from research.market_data import tushare_alpha_feasibility as taf
 from research.strategy_workspace import alpha_feasibility as af
 from research.strategy_workspace.alpha_feasibility import (
     AlphaFeasibilityDataError,
@@ -33,6 +34,128 @@ from research.strategy_workspace.technical_exposure_shadow_v1 import DEFAULT_POL
 from research.strategy_workspace.technical_formal_backtest import (
     rank_technical_formal_universe,
 )
+
+
+class AlphaFeasibilityUnavailableDaySemanticsTests(unittest.TestCase):
+    @staticmethod
+    def _daily(day: str, close: str = "10") -> dict[str, str]:
+        return {
+            "ts_code": "000979.SZ",
+            "trade_date": day,
+            "open": close,
+            "high": close,
+            "low": close,
+            "close": close,
+            "pre_close": close,
+            "vol": "100",
+            "amount": "1000",
+        }
+
+    def test_daily_positive_turnover_wins_over_suspend_event(self) -> None:
+        panel = taf.build_total_return_panel(
+            ["2018-08-28"],
+            ["000979.SZ"],
+            [self._daily("20180828")],
+            [{"ts_code": "000979.SZ", "trade_date": "20180828", "adj_factor": "1"}],
+            [{"ts_code": "000979.SZ", "trade_date": "20180828", "suspend_timing": None, "suspend_type": "S"}],
+        )
+        self.assertEqual(panel[0]["raw_close"], "10")
+        self.assertFalse(panel[0]["is_unavailable_no_daily_bar"])
+        self.assertFalse(panel[0]["is_suspended_carry"])
+
+    def test_unheld_missing_daily_is_not_a_candidate(self) -> None:
+        sessions = tuple(date(2023, 1, 1) + timedelta(days=index) for index in range(122))
+        instrument = "000001.SZ"
+        signal_by_key = {
+            (session, instrument): SignalBar(session, instrument, D("100"), D("100"))
+            for session in sessions
+        }
+        prepared = SimpleNamespace(
+            calendar_position={session: index for index, session in enumerate(sessions)},
+            first_membership_date={instrument: sessions[0]},
+            first_signal_position={instrument: 0},
+            valid_signal_positions={instrument: tuple(range(121))},
+            trading_dates=sessions,
+            signal_by_key=signal_by_key,
+            suspended=frozenset({(sessions[-1], instrument)}),
+        )
+        record = af._history_eligibility_records(
+            prepared,
+            decision_date=sessions[-1],
+            instrument_ids=(instrument,),
+        )[0]
+        self.assertFalse(record.eligibility)
+        self.assertEqual(record.reason, "unavailable_no_daily_bar")
+
+    def test_held_missing_daily_freezes_prior_value(self) -> None:
+        prior = date(2023, 6, 1)
+        missing = date(2023, 6, 2)
+        instrument = "000001.SZ"
+        prepared = SimpleNamespace(
+            signal_by_key={
+                (prior, instrument): SignalBar(prior, instrument, D("100"), D("100")),
+                (missing, instrument): SignalBar(missing, instrument, D("100"), D("100")),
+            },
+            suspended=frozenset({(missing, instrument)}),
+        )
+        values, frozen = af._value_held_positions_at_open(
+            prepared=prepared,
+            decision_date=prior,
+            trading_date=missing,
+            nav_before=D("1"),
+            current_weights={instrument: D("0.4")},
+        )
+        self.assertEqual(values[instrument], D("0.4"))
+        self.assertEqual(frozen, frozenset({instrument}))
+
+    def test_reopened_position_keeps_cumulative_price_change(self) -> None:
+        missing = date(2023, 6, 2)
+        reopened = date(2023, 6, 5)
+        instrument = "000001.SZ"
+        prepared = SimpleNamespace(
+            signal_by_key={
+                (missing, instrument): SignalBar(missing, instrument, D("100"), D("100")),
+                (reopened, instrument): SignalBar(reopened, instrument, D("125"), D("125"), D("120")),
+            },
+            suspended=frozenset({(missing, instrument)}),
+        )
+        values, frozen = af._value_held_positions_at_open(
+            prepared=prepared,
+            decision_date=missing,
+            trading_date=reopened,
+            nav_before=D("1"),
+            current_weights={instrument: D("0.4")},
+        )
+        self.assertEqual(values[instrument], D("0.48"))
+        self.assertFalse(frozen)
+
+    def test_off_calendar_adj_factor_is_used_only_by_backward_asof(self) -> None:
+        panel = taf.build_total_return_panel(
+            ["2018-01-02", "2018-01-03"],
+            ["000979.SZ"],
+            [self._daily("20180102", "10"), self._daily("20180103", "11")],
+            [{"ts_code": "000979.SZ", "trade_date": "20180101", "adj_factor": "2"}],
+            [],
+        )
+        self.assertEqual([row["adj_factor_asof_date"] for row in panel], ["2018-01-01", "2018-01-01"])
+        self.assertEqual([row["close"] for row in panel], ["20", "22"])
+
+    def test_2024_metadata_is_rejected_before_any_row_access(self) -> None:
+        class Poison:
+            def __iter__(self):
+                raise AssertionError("2024+ guard accessed rows")
+
+        inputs = AlphaFeasibilityInput(
+            coverage_start=date(2017, 7, 1),
+            coverage_end=date(2024, 1, 1),
+            trading_dates=Poison(),
+            memberships=Poison(),
+            stock_signal_bars=Poison(),
+            benchmark_signal_bars=Poison(),
+            suspensions=Poison(),
+        )
+        with self.assertRaises(LockedTestAccessForbidden):
+            run_alpha_feasibility(split="development", inputs=inputs)
 
 
 D = Decimal
