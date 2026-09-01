@@ -2416,8 +2416,12 @@ def _normalize_response_row(
         else:
             if type(result["suspend_type"]) is not str or result["suspend_type"] not in {"S", "R"}:
                 raise AlphaFeasibilityDataError("invalid_suspend_type")
-            if result["suspend_timing"] is not None and type(result["suspend_timing"]) is not str:
+            timing = result["suspend_timing"]
+            if timing is not None and type(timing) is not str:
                 raise AlphaFeasibilityDataError("invalid_suspend_timing")
+            if type(timing) is str:
+                timing = timing.strip()
+                result["suspend_timing"] = timing or None
     elif endpoint == "index_daily":
         if result["ts_code"] != task.params.get("ts_code"):
             raise AlphaFeasibilityDataError("response_index_not_requested")
@@ -2451,6 +2455,13 @@ def _primary_key(endpoint: str, row: Mapping[str, Any]) -> tuple[Any, ...]:
         return row["index_code"], row["trade_date"], row["con_code"]
     if endpoint == "stock_basic":
         return (row["ts_code"],)
+    if endpoint == "suspend_d":
+        return (
+            row["ts_code"],
+            row["trade_date"],
+            row["suspend_type"],
+            row["suspend_timing"],
+        )
     return row["ts_code"], row["trade_date"]
 
 
@@ -2461,6 +2472,14 @@ def _row_sort_key(endpoint: str, row: Mapping[str, Any]) -> tuple[Any, ...]:
         return row["index_code"], row["trade_date"], row["con_code"]
     if endpoint == "stock_basic":
         return (row["ts_code"],)
+    if endpoint == "suspend_d":
+        return (
+            row["trade_date"],
+            row["ts_code"],
+            row["suspend_type"],
+            row["suspend_timing"] is not None,
+            row["suspend_timing"] or "",
+        )
     return row["trade_date"], row["ts_code"]
 
 
@@ -2943,7 +2962,17 @@ def validate_response_bytes(
                 continue
             key = _primary_key(task.endpoint, row)
             if key in keys:
-                raise AlphaFeasibilityDataError("duplicate_response_primary_key")
+                if task.endpoint != "suspend_d":
+                    raise AlphaFeasibilityDataError("duplicate_response_primary_key")
+                for index, existing in enumerate(normalized):
+                    if _primary_key(task.endpoint, existing) == key:
+                        folded = dict(existing)
+                        folded["exact_duplicate_count"] = (
+                            int(folded.get("exact_duplicate_count", 0)) + 1
+                        )
+                        normalized[index] = MappingProxyType(folded)
+                        break
+                continue
             keys.add(key)
             normalized.append(MappingProxyType(row))
     except AlphaFeasibilityDataError as exc:
@@ -5298,7 +5327,11 @@ def _generated_at(value: datetime | None) -> str:
 
 
 def _is_full_session_suspension(row: Mapping[str, Any] | None) -> bool:
-    if not row or row.get("suspend_type") != "S":
+    if not row:
+        return False
+    if "full_session_suspended" in row:
+        return row.get("full_session_suspended") is True
+    if row.get("suspend_type") != "S":
         return False
     timing = row.get("suspend_timing")
     if timing is None:
@@ -5824,6 +5857,75 @@ def _unique_rows(
     return result
 
 
+def _aggregate_suspension_events(
+    rows: Sequence[Mapping[str, Any]],
+) -> dict[tuple[str, str], Mapping[str, Any]]:
+    """Fold exact events and expose one conservative state per stock-day."""
+
+    events_by_day: dict[
+        tuple[str, str], dict[tuple[str, str, str, str | None], int]
+    ] = {}
+    for observed in rows:
+        code = _normalized_code(observed.get("ts_code"))
+        trade_date = _compact(_parse_date(observed.get("trade_date"), "trade_date"))
+        suspend_type = observed.get("suspend_type")
+        if type(suspend_type) is not str or suspend_type not in {"S", "R"}:
+            raise AlphaFeasibilityDataError("invalid_suspend_type")
+        timing = observed.get("suspend_timing")
+        if timing is not None and type(timing) is not str:
+            raise AlphaFeasibilityDataError("invalid_suspend_timing")
+        if type(timing) is str:
+            timing = timing.strip() or None
+        duplicate_count = observed.get("exact_duplicate_count", 0)
+        if type(duplicate_count) is not int or duplicate_count < 0:
+            raise AlphaFeasibilityDataError("invalid_exact_duplicate_count")
+        day = (code, trade_date)
+        identity = (code, trade_date, suspend_type, timing)
+        event_counts = events_by_day.setdefault(day, {})
+        event_counts[identity] = event_counts.get(identity, 0) + 1 + duplicate_count
+
+    result: dict[tuple[str, str], Mapping[str, Any]] = {}
+    full_markers = {None, "全天", "全日", "全天停牌", "全日停牌"}
+    for day, event_counts in events_by_day.items():
+        identities = tuple(event_counts)
+        source_event_count = sum(event_counts.values())
+        unique_event_count = len(identities)
+        result[day] = MappingProxyType(
+            {
+                "ts_code": day[0],
+                "trade_date": day[1],
+                "full_session_suspended": any(
+                    event[2] == "S" and event[3] in full_markers
+                    for event in identities
+                ),
+                "partial_session_suspended": any(
+                    event[2] == "S" and event[3] not in full_markers
+                    for event in identities
+                ),
+                "resume_event_present": any(
+                    event[2] == "R" for event in identities
+                ),
+                "source_event_count": source_event_count,
+                "unique_event_count": unique_event_count,
+                "exact_duplicate_count": source_event_count - unique_event_count,
+            }
+        )
+    return result
+
+
+def _reject_suspension_daily_bar_conflicts(
+    daily: Mapping[tuple[str, str], Mapping[str, Any]],
+    suspensions: Mapping[tuple[str, str], Mapping[str, Any]],
+) -> None:
+    for key, suspension in suspensions.items():
+        bar = daily.get(key)
+        if bar is None or not _is_full_session_suspension(suspension):
+            continue
+        volume, _text = _decimal(bar.get("vol"), "vol", minimum=Decimal("0"))
+        if volume > 0:
+            raise AlphaFeasibilityDataError("suspension_daily_bar_conflict")
+
+
 @dataclass(frozen=True, slots=True)
 class HistoryCoverageResult:
     report: Mapping[str, Any]
@@ -5996,12 +6098,18 @@ def validate_history_coverage(
         daily_status = "BLOCKED_DATA"
         blockers.append({"reason": exc.code})
     try:
-        suspend_index = _unique_rows("suspend_d", rows_by_endpoint["suspend_d"])
+        suspend_index = _aggregate_suspension_events(rows_by_endpoint["suspend_d"])
         if any(key[0] not in union_set for key in suspend_index):
             raise AlphaFeasibilityDataError("suspension_contains_non_union_instrument")
         if any(key[1] not in set(open_dates) for key in suspend_index):
             raise AlphaFeasibilityDataError("suspension_row_not_on_open_session")
     except AlphaFeasibilityDataError as exc:
+        suspension_status = "BLOCKED_DATA"
+        blockers.append({"reason": exc.code})
+    try:
+        _reject_suspension_daily_bar_conflicts(daily_index, suspend_index)
+    except AlphaFeasibilityDataError as exc:
+        daily_status = "BLOCKED_DATA"
         suspension_status = "BLOCKED_DATA"
         blockers.append({"reason": exc.code})
     try:
@@ -6881,8 +6989,9 @@ def build_total_return_panel(
         raise AlphaFeasibilityDataError("invalid_panel_instrument_union")
     instrument_set = set(instruments)
     daily = _unique_rows("daily", daily_rows)
-    suspensions = _unique_rows("suspend_d", suspension_rows)
+    suspensions = _aggregate_suspension_events(suspension_rows)
     adj_index = _unique_rows("adj_factor", adj_factor_rows)
+    _reject_suspension_daily_bar_conflicts(daily, suspensions)
     if not {code for code, _trade_date in daily}.issubset(instrument_set):
         raise AlphaFeasibilityDataError("index_weight_daily_code_mismatch")
     if any(code not in instrument_set for code, _trade_date in suspensions):

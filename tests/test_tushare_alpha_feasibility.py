@@ -233,6 +233,66 @@ class TushareResponseEnvelopeTests(unittest.TestCase):
         )
         return raised.exception
 
+    def _validate_suspend(self, rows: list[list[object]]):
+        task = next(
+            task
+            for task in build_history_plan(self.plan, ["600000.SH"])
+            if task.endpoint == "suspend_d"
+        )
+        return taf.validate_response_bytes(
+            task,
+            response_bytes("suspend_d", rows),
+            token=TOKEN,
+            http_status=200,
+        )
+
+    def test_suspend_same_day_stop_and_resume_are_distinct_events(self):
+        validated = self._validate_suspend(
+            [
+                ["600000.SH", "20231229", None, "S"],
+                ["600000.SH", "20231229", None, "R"],
+            ]
+        )
+        self.assertEqual(len(validated.rows), 2)
+        state = taf._aggregate_suspension_events(validated.rows)[
+            ("600000.SH", "20231229")
+        ]
+        self.assertTrue(state["full_session_suspended"])
+        self.assertTrue(state["resume_event_present"])
+        self.assertEqual(state["unique_event_count"], 2)
+
+    def test_suspend_same_day_distinct_timings_are_retained(self):
+        validated = self._validate_suspend(
+            [
+                ["600000.SH", "20231229", None, "S"],
+                ["600000.SH", "20231229", "09:30-10:30", "S"],
+            ]
+        )
+        state = taf._aggregate_suspension_events(validated.rows)[
+            ("600000.SH", "20231229")
+        ]
+        self.assertEqual(len(validated.rows), 2)
+        self.assertTrue(state["full_session_suspended"])
+        self.assertTrue(state["partial_session_suspended"])
+        self.assertEqual(state["unique_event_count"], 2)
+
+    def test_suspend_exact_duplicates_fold_and_count_after_timing_normalization(self):
+        validated = self._validate_suspend(
+            [
+                ["600000.SH", "20231229", " 09:30-10:30 ", "S"],
+                ["600000.SH", "20231229", "09:30-10:30", "S"],
+            ]
+        )
+        self.assertEqual(len(validated.rows), 1)
+        self.assertEqual(validated.rows[0]["suspend_timing"], "09:30-10:30")
+        self.assertEqual(validated.rows[0]["exact_duplicate_count"], 1)
+        state = taf._aggregate_suspension_events(validated.rows)[
+            ("600000.SH", "20231229")
+        ]
+        self.assertEqual(state["source_event_count"], 2)
+        self.assertEqual(state["unique_event_count"], 1)
+        self.assertEqual(state["exact_duplicate_count"], 1)
+
     def test_semantic_core_and_controlled_extension_shapes_pass(self):
         cases = (
             ({}, (), {}),
@@ -3891,22 +3951,21 @@ class TotalReturnAndCoverageTests(unittest.TestCase):
             *self.factors,
             {"ts_code": "600000.SH", "trade_date": "20170705", "adj_factor": "2"},
         ]
-        conflict = build_total_return_panel(
-            ["20170703", "20170704", "20170705"],
-            self.basic,
-            same_day_bar,
-            same_day_factor,
-            self.suspensions,
-        )
-        self.assertTrue(conflict[2]["is_suspended_carry"])
-        self.assertEqual(conflict[2]["raw_close"], "60")
-        self.assertEqual(conflict[2]["close"], "100")
-        self.assertEqual(conflict[2]["daily_total_return"], "0")
+        with self.assertRaisesRegex(
+            AlphaFeasibilityDataError, "suspension_daily_bar_conflict"
+        ):
+            build_total_return_panel(
+                ["20170703", "20170704", "20170705"],
+                self.basic,
+                same_day_bar,
+                same_day_factor,
+                self.suspensions,
+            )
 
         leading_suspension = build_total_return_panel(
             ["20170703", "20170704"],
             self.basic,
-            self.daily,
+            [{**self.daily[0], "vol": "0"}, self.daily[1]],
             self.factors,
             [
                 {
@@ -3957,6 +4016,28 @@ class TotalReturnAndCoverageTests(unittest.TestCase):
                 [self.daily[0], later_bar],
                 [self.factors[0], later_factor],
                 [],
+            )
+
+    def test_intraday_suspension_cannot_explain_a_missing_daily_bar(self):
+        later_bar = {**self.daily[-1], "trade_date": "20170705"}
+        later_factor = {**self.factors[-1], "trade_date": "20170705"}
+        intraday = [
+            {
+                "ts_code": "600000.SH",
+                "trade_date": "20170704",
+                "suspend_timing": "09:30-10:30",
+                "suspend_type": "S",
+            }
+        ]
+        with self.assertRaisesRegex(
+            AlphaFeasibilityDataError, "unexplained_market_data_gap"
+        ):
+            build_total_return_panel(
+                ["20170703", "20170704", "20170705"],
+                self.basic,
+                [self.daily[0], later_bar],
+                [self.factors[0], later_factor],
+                intraday,
             )
 
     def test_history_coverage_accepts_only_same_day_suspension_explanation(self):
